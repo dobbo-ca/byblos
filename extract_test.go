@@ -60,8 +60,14 @@ func TestExtractPageRasterRejectsJBIG2(t *testing.T) {
 	if errors.Is(err, ErrNotSingleRaster) {
 		t.Error("a JBIG2 page-covering scan IS a single raster; it must not also report ErrNotSingleRaster")
 	}
-	if !strings.Contains(err.Error(), "jbig2") {
-		t.Errorf("error = %q; want it to name the codec", err)
+	// The message must be exactly the guard's, not merely one that mentions the
+	// codec. Deleting the `case "jbig2", "jpx"` guard sends the payload on to
+	// image.Decode, whose failure branch also wraps ErrUnsupportedImageCodec and
+	// also interpolates the fileType — it just appends the decoder's own words
+	// ("...: jbig2: image: unknown format"). A Contains("jbig2") assertion is
+	// satisfied by both, so it pins nothing.
+	if want := ErrUnsupportedImageCodec.Error() + ": jbig2"; err.Error() != want {
+		t.Errorf("error = %q; want exactly %q (a longer message means the guard was bypassed)", err, want)
 	}
 }
 
@@ -124,6 +130,7 @@ func TestDivertClassCoversEveryReason(t *testing.T) {
 		"shading":            "not-single-raster",
 		"unresolved-xobject": "not-single-raster",
 		"rotated-placement":  "not-single-raster",
+		"flipped-placement":  "not-single-raster",
 		"not-page-covering":  "not-single-raster",
 		"unsupported-codec":  "unsupported-codec",
 	}
@@ -155,6 +162,13 @@ func TestClassify(t *testing.T) {
 		{"shading", &contentScan{Images: onePlacement(full), ShadingOps: 1}, "shading"},
 		{"unresolved name", &contentScan{Images: onePlacement(full), Unresolved: []string{"X"}}, "unresolved-xobject"},
 		{"rotated placement", &contentScan{Images: rotatedPlacement()}, "rotated-placement"},
+		// A negative scale term mirrors the raster without introducing any skew,
+		// so the off-diagonal check cannot see it, and UnitSquareBox reports the
+		// same page-covering box for all three. Only the sign of a and d tells
+		// these apart from a clean placement.
+		{"vertically flipped", &contentScan{Images: flippedPlacement(content.Matrix{612, 0, 0, -792, 0, 792})}, "flipped-placement"},
+		{"horizontally flipped", &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, 792, 612, 0})}, "flipped-placement"},
+		{"flipped on both axes", &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, -792, 612, 792})}, "flipped-placement"},
 		{"image covers only half the page", &contentScan{Images: onePlacement(contentBox(0, 0, 306, 792))}, "not-page-covering"},
 		{"half a point of slack is tolerated", &contentScan{Images: onePlacement(contentBox(0.5, 0.5, 611.5, 791.5))}, ""},
 	}
@@ -186,6 +200,13 @@ func onePlacement(b content.Box) []content.Placement {
 
 func twoPlacements(b content.Box) []content.Placement {
 	return append(onePlacement(b), onePlacement(b)...)
+}
+
+// flippedPlacement builds a placement from m and derives its Box the way the
+// walker does. Deriving rather than hardcoding is the point: it shows the Box
+// really is page-covering, so classify cannot detect the mirror from geometry.
+func flippedPlacement(m content.Matrix) []content.Placement {
+	return []content.Placement{{Name: "Im0", ID: 1, CTM: m, Box: m.UnitSquareBox()}}
 }
 
 func rotatedPlacement() []content.Placement {

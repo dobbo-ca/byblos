@@ -52,6 +52,11 @@ const skewTolerance = 1e-6
 // Note on rotation: a page's /Rotate is a display attribute and does not affect
 // content space, so a rotated page still extracts cleanly. The returned image
 // is the raster as stored; applying /Rotate is the caller's business.
+//
+// Orientation within content space is a different matter and is not the
+// caller's business, because the caller has no way to recover it: a placement
+// that rotates, skews or mirrors the raster diverts rather than returning an
+// image the caller would have no signal to correct.
 func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error) {
 	countAttempt()
 
@@ -136,6 +141,16 @@ func classify(page pdfdoc.Rect, s *content.Scan) string {
 	m := s.Images[0].CTM
 	if math.Abs(m[1]) > skewTolerance || math.Abs(m[2]) > skewTolerance {
 		return "rotated-placement"
+	}
+	// The off-diagonal terms do not pin orientation. A negative scale mirrors
+	// the raster without any skew, and Box cannot see it either: UnitSquareBox
+	// takes min/max over the four mapped corners, so `612 0 0 -792 0 792` still
+	// reports {0 0 612 792} and covers() still says yes. Without this check a
+	// mirrored or upside-down page extracts silently as if it were clean.
+	// Requiring both scales strictly positive also rules out a degenerate
+	// zero-scale placement, leaving a > 0 and d > 0 for everything downstream.
+	if m[0] <= 0 || m[3] <= 0 {
+		return "flipped-placement"
 	}
 	if !covers(s.Images[0].Box, page) {
 		return "not-page-covering"

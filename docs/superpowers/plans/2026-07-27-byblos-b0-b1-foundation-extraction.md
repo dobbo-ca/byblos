@@ -4312,8 +4312,14 @@ func TestExtractPageRasterRejectsJBIG2(t *testing.T) {
 	if errors.Is(err, ErrNotSingleRaster) {
 		t.Error("a JBIG2 page-covering scan IS a single raster; it must not also report ErrNotSingleRaster")
 	}
-	if !strings.Contains(err.Error(), "jbig2") {
-		t.Errorf("error = %q; want it to name the codec", err)
+	// The message must be exactly the guard's, not merely one that mentions the
+	// codec. Deleting the `case "jbig2", "jpx"` guard sends the payload on to
+	// image.Decode, whose failure branch also wraps ErrUnsupportedImageCodec and
+	// also interpolates the fileType — it just appends the decoder's own words
+	// ("...: jbig2: image: unknown format"). A Contains("jbig2") assertion is
+	// satisfied by both, so it pins nothing.
+	if want := ErrUnsupportedImageCodec.Error() + ": jbig2"; err.Error() != want {
+		t.Errorf("error = %q; want exactly %q (a longer message means the guard was bypassed)", err, want)
 	}
 }
 
@@ -4376,6 +4382,7 @@ func TestDivertClassCoversEveryReason(t *testing.T) {
 		"shading":            "not-single-raster",
 		"unresolved-xobject": "not-single-raster",
 		"rotated-placement":  "not-single-raster",
+		"flipped-placement":  "not-single-raster",
 		"not-page-covering":  "not-single-raster",
 		"unsupported-codec":  "unsupported-codec",
 	}
@@ -4407,6 +4414,13 @@ func TestClassify(t *testing.T) {
 		{"shading", &contentScan{Images: onePlacement(full), ShadingOps: 1}, "shading"},
 		{"unresolved name", &contentScan{Images: onePlacement(full), Unresolved: []string{"X"}}, "unresolved-xobject"},
 		{"rotated placement", &contentScan{Images: rotatedPlacement()}, "rotated-placement"},
+		// A negative scale term mirrors the raster without introducing any skew,
+		// so the off-diagonal check cannot see it, and UnitSquareBox reports the
+		// same page-covering box for all three. Only the sign of a and d tells
+		// these apart from a clean placement.
+		{"vertically flipped", &contentScan{Images: flippedPlacement(content.Matrix{612, 0, 0, -792, 0, 792})}, "flipped-placement"},
+		{"horizontally flipped", &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, 792, 612, 0})}, "flipped-placement"},
+		{"flipped on both axes", &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, -792, 612, 792})}, "flipped-placement"},
 		{"image covers only half the page", &contentScan{Images: onePlacement(contentBox(0, 0, 306, 792))}, "not-page-covering"},
 		{"half a point of slack is tolerated", &contentScan{Images: onePlacement(contentBox(0.5, 0.5, 611.5, 791.5))}, ""},
 	}
@@ -4442,6 +4456,13 @@ func onePlacement(b content.Box) []content.Placement {
 
 func twoPlacements(b content.Box) []content.Placement {
 	return append(onePlacement(b), onePlacement(b)...)
+}
+
+// flippedPlacement builds a placement from m and derives its Box the way the
+// walker does. Deriving rather than hardcoding is the point: it shows the Box
+// really is page-covering, so classify cannot detect the mirror from geometry.
+func flippedPlacement(m content.Matrix) []content.Placement {
+	return []content.Placement{{Name: "Im0", ID: 1, CTM: m, Box: m.UnitSquareBox()}}
 }
 
 func rotatedPlacement() []content.Placement {
@@ -4520,6 +4541,11 @@ const skewTolerance = 1e-6
 // Note on rotation: a page's /Rotate is a display attribute and does not affect
 // content space, so a rotated page still extracts cleanly. The returned image
 // is the raster as stored; applying /Rotate is the caller's business.
+//
+// Orientation within content space is a different matter and is not the
+// caller's business, because the caller has no way to recover it: a placement
+// that rotates, skews or mirrors the raster diverts rather than returning an
+// image the caller would have no signal to correct.
 func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error) {
 	countAttempt()
 
@@ -4605,6 +4631,16 @@ func classify(page pdfdoc.Rect, s *content.Scan) string {
 	if math.Abs(m[1]) > skewTolerance || math.Abs(m[2]) > skewTolerance {
 		return "rotated-placement"
 	}
+	// The off-diagonal terms do not pin orientation. A negative scale mirrors
+	// the raster without any skew, and Box cannot see it either: UnitSquareBox
+	// takes min/max over the four mapped corners, so `612 0 0 -792 0 792` still
+	// reports {0 0 612 792} and covers() still says yes. Without this check a
+	// mirrored or upside-down page extracts silently as if it were clean.
+	// Requiring both scales strictly positive also rules out a degenerate
+	// zero-scale placement, leaving a > 0 and d > 0 for everything downstream.
+	if m[0] <= 0 || m[3] <= 0 {
+		return "flipped-placement"
+	}
 	if !covers(s.Images[0].Box, page) {
 		return "not-page-covering"
 	}
@@ -4656,7 +4692,7 @@ func countDivert(reason string) { _ = reason }
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `go test . -run 'TestExtract|TestClassify|TestDivertClass' -v`
-Expected: PASS — three `TestExtractPageRasterSucceeds` subtests, four `TestExtractPageRasterDiverts` subtests, all eleven `TestClassify` subtests, and the JBIG2, dup-raster, per-page, out-of-range, malformed and `TestDivertClassCoversEveryReason` tests.
+Expected: PASS — three `TestExtractPageRasterSucceeds` subtests, four `TestExtractPageRasterDiverts` subtests, all fourteen `TestClassify` subtests, and the JBIG2, dup-raster, per-page, out-of-range, malformed and `TestDivertClassCoversEveryReason` tests.
 
 - [ ] **Step 5: Commit**
 
@@ -5623,7 +5659,7 @@ Any other module is a constraint violation — stop and raise it.
 - [ ] **Step 2: Close byb-b1**
 
 ```bash
-bd update byb-b1 --append-notes "B1 complete: Inspect returns per-page bounds, image placements (pixel dims + bitonal), and a text-character count that sees through Form XObjects. ExtractPageRaster returns ErrNotSingleRaster with a named reason for no-image / has-text / multiple-images / inline-image / vector-paint / shading / unresolved-xobject / rotated-placement / not-page-covering, and ErrUnsupportedImageCodec when the raster's codec is not decodable. TESTED: JBIG2, via a corpus document that carries a /JBIG2Decode raster, which also gives ImageRef.Bitonal its only positive case. NOT tested, asserted from pdfcpu source only: JPX and the CMYK-TIFF path, plus the nil-reader guard in pdfdoc for other unhandled filters; /ImageMask true is likewise uncovered, since a stencil mask is not extractable at all. pdfcpu is confined to internal/pdfdoc and arch_test.go enforces it (Imports, TestImports and XTestImports). Extraction renders from the stream dictionary resolved through the page's own resources, NOT via api.ExtractImagesRaw, which deduplicates identical rasters and would return page 1's object for page 2 — the dup-raster corpus document is the regression guard. Divert counters plus cmd/byblos-divert ship with the epic. Corpus of 11 documents generated from committed Go code; poppler goldens committed (including per-page pixel hashes from pdfimages -png, the differential oracle for ExtractPageRaster) and tests skip without them."
+bd update byb-b1 --append-notes "B1 complete: Inspect returns per-page bounds, image placements (pixel dims + bitonal), and a text-character count that sees through Form XObjects. ExtractPageRaster returns ErrNotSingleRaster with a named reason for no-image / has-text / multiple-images / inline-image / vector-paint / shading / unresolved-xobject / rotated-placement / flipped-placement / not-page-covering, and ErrUnsupportedImageCodec when the raster's codec is not decodable. TESTED: JBIG2, via a corpus document that carries a /JBIG2Decode raster, which also gives ImageRef.Bitonal its only positive case. NOT tested, asserted from pdfcpu source only: JPX and the CMYK-TIFF path, plus the nil-reader guard in pdfdoc for other unhandled filters; /ImageMask true is likewise uncovered, since a stencil mask is not extractable at all. pdfcpu is confined to internal/pdfdoc and arch_test.go enforces it (Imports, TestImports and XTestImports). Extraction renders from the stream dictionary resolved through the page's own resources, NOT via api.ExtractImagesRaw, which deduplicates identical rasters and would return page 1's object for page 2 — the dup-raster corpus document is the regression guard. Divert counters plus cmd/byblos-divert ship with the epic. Corpus of 11 documents generated from committed Go code; poppler goldens committed (including per-page pixel hashes from pdfimages -png, the differential oracle for ExtractPageRaster) and tests skip without them."
 bd close byb-b1
 ```
 
