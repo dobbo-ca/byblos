@@ -1,0 +1,14 @@
+version: "2"
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  exclusions:
+    presets:
+      # golangci-lint v2 has no implicit default exclusions. Without this,
+      # errcheck flags every fmt.Printf/fmt.Fprintln in cmd/byblos-corpus and
+      # cmd/byblos-divert and the `defer f.Close()` in byblos-divert.
+      - std-error-handling
