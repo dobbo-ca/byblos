@@ -186,9 +186,3 @@ func divertClass(reason string) string {
 	}
 	return "not-single-raster"
 }
-
-// Replaced by the real counters in stats.go (Task 11).
-func countAttempt()             {}
-func countExtracted()           {}
-func countFailure()             {}
-func countDivert(reason string) { _ = reason }
