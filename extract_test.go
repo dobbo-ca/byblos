@@ -14,7 +14,7 @@ import (
 )
 
 func TestExtractPageRasterSucceeds(t *testing.T) {
-	for _, name := range []string{"scan", "scan-rotated", "scan-in-form"} {
+	for _, name := range []string{"scan", "scan-rotated", "scan-in-form", "background-wash"} {
 		t.Run(name, func(t *testing.T) {
 			data := corpusDoc(t, name)
 			img, err := ExtractPageRaster(bytes.NewReader(data), 1)
@@ -310,7 +310,12 @@ func TestClassify(t *testing.T) {
 		// deposits no ink, so it is not a reason to divert.
 		{name: "invisible text only", scan: &contentScan{Images: onePlacement(full), TextOps: 4}, want: ""},
 		{name: "inline image", scan: &contentScan{Images: onePlacement(full), InlineImgs: 1}, want: "inline-image"},
-		{name: "painted path", scan: &contentScan{Images: onePlacement(full), PaintOps: 1}, want: "vector-paint"},
+		// The raster is placed at Index 0, so a paint at Index 1 lands on top of
+		// it and is visible content.
+		{name: "painted path over the raster", scan: &contentScan{
+			Images: onePlacement(full),
+			Paints: []content.Paint{{Op: "f", Box: full, Index: 1}},
+		}, want: "vector-paint"},
 		{name: "shading", scan: &contentScan{Images: onePlacement(full), ShadingOps: 1}, want: "shading"},
 		{name: "unresolved name", scan: &contentScan{Images: onePlacement(full), Unresolved: []string{"X"}}, want: "unresolved-xobject"},
 		{name: "rotated placement", scan: &contentScan{Images: rotatedPlacement()}, want: "rotated-placement"},
@@ -448,6 +453,175 @@ func TestClassify(t *testing.T) {
 			}
 		})
 	}
+}
+
+// byb-b1.5 measured 126 scan-shaped pages diverting as vector-paint. The
+// trigger is a background wash painted before the raster and then covered by
+// it: 117 of the 126 set an explicit background fill colour before the first
+// Do, 90 white and 27 the PowerPoint slide colour.
+//
+// These cases go through the real walker rather than a hand-built Scan, because
+// what is under test is the graphics state: painting order, the CTM at the time
+// of the paint, and the path's device-space extent. A Scan literal would let a
+// test assert an ordering the walker never actually produces.
+func TestClassifyPaintOcclusion(t *testing.T) {
+	page := pdfdocRect(0, 0, 612, 792)
+	const fullPageDo = "q 612 0 0 792 0 0 cm /Im0 Do Q\n"
+
+	for _, tc := range []struct {
+		name, src, form, want string
+	}{
+		// The shape from govdocs1/005697.pdf, with the placement widened to the
+		// full page. See backgroundWashContent in the corpus.
+		{"background wash then the raster",
+			"/Cs6 cs 1 1 1 scn\n0.029999 0.03009 611.94 791.94 re\nf\n0 0 0 scn\n" + fullPageDo,
+			"", ""},
+
+		// The overlay-vector corpus document. Same rectangle, same raster: only
+		// the order differs, and the order is the whole decision.
+		{"stroked border over the raster",
+			fullPageDo + "q 0 0 0 RG 2 w 72 72 468 648 re S Q\n",
+			"", "vector-paint"},
+
+		// A wash the raster does not cover is visible content, whatever order it
+		// was painted in. The coverage rule would also reject this page, but the
+		// paint arm is reached first and must not wave it through.
+		{"wash wider than the raster it precedes",
+			"0 0 612 792 re f\nq 412 0 0 592 100 100 cm /Im0 Do Q\n",
+			"", "vector-paint"},
+
+		// Ink spreads half the line width to either side of the path, so a border
+		// stroked along the raster's own edge lands outside it. Comparing the
+		// path box alone would call this hidden.
+		{"a stroke whose ink spreads past the raster edge",
+			"20 w 0 0 612 792 re S\n" + fullPageDo,
+			"", "vector-paint"},
+
+		// The same stroke, thin enough that its ink stays inside the raster.
+		{"a stroke whose ink stays inside the raster",
+			"1 w 10 10 592 772 re S\n" + fullPageDo,
+			"", ""},
+
+		// W sets the clip from the current path and n ends it without painting.
+		// Clipping alone has never counted as paint; this pins that it still does
+		// not now that paths are tracked rather than only counted.
+		{"clip only, no paint", "0 0 612 792 re W n\n" + fullPageDo, "", ""},
+
+		// A wash inside a Form XObject is invisible to the page's own operators,
+		// which is the reason the walker recurses at all. Its CTM and its place in
+		// the painting order both have to survive the recursion.
+		{"wash inside a form before the raster",
+			"q 0.5 0 0 0.5 0 0 cm /Fm0 Do Q\n" + fullPageDo,
+			"1 1 1 scn 0 0 1200 1500 re f\n", ""},
+
+		// Same form, painted after the raster.
+		{"wash inside a form after the raster",
+			fullPageDo + "q 0.5 0 0 0.5 0 0 cm /Fm0 Do Q\n",
+			"1 1 1 scn 0 0 1200 1500 re f\n", "vector-paint"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, got := classify(page, walkPage(t, tc.src, tc.form), plainFacts); got != tc.want {
+				t.Errorf("classify() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A wash is only invisible while the thing over it is opaque. A stencil
+// /ImageMask paints through its 1 bits and leaves the rest clear, so the wash
+// beneath one is the page background — and of the 126 pages byb-b1.5 measured,
+// 27 fill it in the PowerPoint slide colour rather than white. Same for an
+// /SMask, a /Mask, and a lowered /ca in the graphics state.
+func TestClassifyPaintUnderATransparentRasterStillDiverts(t *testing.T) {
+	const src = "1 1 1 scn 0 0 612 792 re f\nq 612 0 0 792 0 0 cm /Im0 Do Q\n"
+	for _, tc := range []struct {
+		name string
+		info pdfdoc.ImageInfo
+	}{
+		{"stencil image mask", pdfdoc.ImageInfo{ImageMask: true}},
+		{"soft-masked raster", pdfdoc.ImageInfo{BPC: 8, SMask: true}},
+		{"colour-keyed raster", pdfdoc.ImageInfo{BPC: 8, Mask: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := walkPage(t, src, "")
+			if _, got := classify(pdfdocRect(0, 0, 612, 792), s, facts(map[int]pdfdoc.ImageInfo{1: tc.info})); got != "vector-paint" {
+				t.Errorf("classify() = %q; want %q", got, "vector-paint")
+			}
+		})
+	}
+
+	// The graphics-state half of the same question: /GS0 lowers /ca, so the
+	// raster is painted at reduced alpha and the wash shows through it.
+	s := walkPage(t, "1 1 1 scn 0 0 612 792 re f\nq /GS0 gs 612 0 0 792 0 0 cm /Im0 Do Q\n", "")
+	if _, got := classify(pdfdocRect(0, 0, 612, 792), s, plainFacts); got != "vector-paint" {
+		t.Errorf("classify() with a non-opaque ExtGState = %q; want %q", got, "vector-paint")
+	}
+}
+
+// The page byb-b1.5 was measured on, at its measured geometry. Its entire
+// 132-byte content stream is identical on all 45 pages of govdocs1/005697.pdf:
+//
+//	/Cs6 cs 1 1 1 scn
+//	/GS1 gs
+//	0.029999 0.03009 610.5 791.94 re
+//	f
+//	0 0 0 scn
+//	q
+//	610.559937 0 0 792.000061 -0.000012 -0.000031 cm
+//	/Im1 Do
+//	Q
+//
+// This is the bead's honesty test. The wash no longer diverts the page — but
+// the raster is 610.56 points wide on a 612 point MediaBox, so covers() rejects
+// it and the page lands in byb-b1.3's bucket instead. That is exactly what the
+// re-scoring predicted: of the 126 pages, removing the paint arm alone leaves
+// 59 not-page-covering, 53 rotated, 8 flipped, 5 shading, and 1 extraction.
+func TestClassifyOnTheMeasuredWashPage(t *testing.T) {
+	const src = "/Cs6 cs 1 1 1 scn\n" +
+		"/GS1 gs\n" +
+		"0.029999 0.03009 610.5 791.94 re\n" +
+		"f\n" +
+		"0 0 0 scn\n" +
+		"q\n" +
+		"610.559937 0 0 792.000061 -0.000012 -0.000031 cm\n" +
+		"/Im0 Do\n" +
+		"Q\n"
+	_, got := classify(pdfdocRect(0, 0, 612, 792), walkPage(t, src, ""), plainFacts)
+	if got == "vector-paint" {
+		t.Fatal("classify() = \"vector-paint\"; the wash is painted before the raster and inside its box")
+	}
+	if got != "not-page-covering" {
+		t.Errorf("classify() = %q; want %q — this page is byb-b1.3's bucket once the wash stops diverting it", got, "not-page-covering")
+	}
+}
+
+// pageEnv is the resource tree the classify tests walk against: /Im0 is an
+// image, /Fm0 a form carrying the supplied content at scope 1, /GS1 an opaque
+// graphics state and /GS0 a transparent one.
+type pageEnv struct{ form string }
+
+func (e pageEnv) XObject(scope int, name string) (content.XObject, bool) {
+	switch name {
+	case "Im0":
+		return content.XObject{Image: true, ID: 1}, true
+	case "Fm0":
+		if e.form == "" {
+			return content.XObject{}, false
+		}
+		return content.XObject{Content: []byte(e.form), Matrix: content.Identity, Scope: 1}, true
+	}
+	return content.XObject{}, false
+}
+
+func (e pageEnv) ExtGStateOpaque(scope int, name string) bool { return name == "GS1" }
+
+func walkPage(t *testing.T, src, form string) *content.Scan {
+	t.Helper()
+	s, err := content.Walk([]byte(src), 0, pageEnv{form: form})
+	if err != nil {
+		t.Fatalf("content.Walk() error = %v", err)
+	}
+	return s
 }
 
 type contentScan = content.Scan

@@ -426,10 +426,198 @@ func TestWalkCountsPaintingOperators(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Walk() error = %v", err)
 			}
-			if s.PaintOps != tc.want {
-				t.Errorf("PaintOps = %d; want %d", s.PaintOps, tc.want)
+			if len(s.Paints) != tc.want {
+				t.Errorf("Paints = %+v; want %d", s.Paints, tc.want)
 			}
 		})
+	}
+}
+
+// A paint operator with no current path marks nothing. Recording it would give
+// it the empty box, which a containment test would then have to reason about.
+func TestWalkIgnoresAPaintWithNoPath(t *testing.T) {
+	s, err := Walk([]byte("f S B n"), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 0 {
+		t.Errorf("Paints = %+v; want none", s.Paints)
+	}
+}
+
+// byb-b1.5 needs where a path landed, not how many there were: the decision is
+// whether the raster covers it. Every path-construction operator takes its
+// operands as coordinate pairs, and all of them have to reach the box.
+func TestWalkRecordsThePathBoxInDeviceSpace(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		src                string
+		llx, lly, urx, ury float64
+	}{
+		{"rectangle", "10 20 100 200 re f", 10, 20, 110, 220},
+		{"lines", "10 10 m 50 80 l 30 5 l h f", 10, 5, 50, 80},
+		{"cubic curve bounded by its control points", "0 0 m 10 90 20 90 30 0 c f", 0, 0, 30, 90},
+		{"under a CTM", "q 2 0 0 3 5 7 cm 10 20 100 200 re f Q", 25, 67, 225, 667},
+		// A second subpath extends the same path; both are painted by the one f.
+		{"two subpaths", "0 0 10 10 re 100 100 10 10 re f", 0, 0, 110, 110},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := Walk([]byte(tc.src), 0, mapEnv{{}})
+			if err != nil {
+				t.Fatalf("Walk() error = %v", err)
+			}
+			if len(s.Paints) != 1 {
+				t.Fatalf("Paints = %+v; want exactly one", s.Paints)
+			}
+			boxEq(t, s.Paints[0].Box, tc.llx, tc.lly, tc.urx, tc.ury)
+		})
+	}
+}
+
+// The path is reset by the operator that paints or discards it, so a second
+// paint reports only its own path.
+func TestWalkResetsThePathAfterPainting(t *testing.T) {
+	s, err := Walk([]byte("0 0 10 10 re f 100 100 10 10 re f"), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 2 {
+		t.Fatalf("Paints = %+v; want two", s.Paints)
+	}
+	boxEq(t, s.Paints[0].Box, 0, 0, 10, 10)
+	boxEq(t, s.Paints[1].Box, 100, 100, 110, 110)
+}
+
+// n discards the path without painting it, and must clear it too.
+func TestWalkResetsThePathAfterNoOp(t *testing.T) {
+	s, err := Walk([]byte("0 0 500 500 re n 10 10 10 10 re f"), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 1 {
+		t.Fatalf("Paints = %+v; want one", s.Paints)
+	}
+	boxEq(t, s.Paints[0].Box, 10, 10, 20, 20)
+}
+
+// Stroked ink spreads half the line width to either side of the path, in device
+// space, so the CTM scales the spread along with everything else.
+func TestWalkInflatesAStrokeByHalfItsLineWidth(t *testing.T) {
+	s, err := Walk([]byte("10 w 100 100 200 200 re S"), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 1 {
+		t.Fatalf("Paints = %+v; want one", s.Paints)
+	}
+	boxEq(t, s.Paints[0].Box, 95, 95, 305, 305)
+
+	// Under a 2x CTM the same 10-point pen is 20 device points wide.
+	s, err = Walk([]byte("q 2 0 0 2 0 0 cm 10 w 100 100 200 200 re S Q"), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	boxEq(t, s.Paints[0].Box, 190, 190, 610, 610)
+
+	// A fill is not inflated: ink stops at the path.
+	s, err = Walk([]byte("10 w 100 100 200 200 re f"), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	boxEq(t, s.Paints[0].Box, 100, 100, 300, 300)
+}
+
+// The default line width is 1.0 (ISO 32000-1 section 8.4.3.2), not zero, so a
+// stroke that never sets one still spreads half a point.
+func TestWalkStrokeUsesTheDefaultLineWidth(t *testing.T) {
+	s, err := Walk([]byte("100 100 200 200 re S"), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 1 {
+		t.Fatalf("Paints = %+v; want one", s.Paints)
+	}
+	boxEq(t, s.Paints[0].Box, 99.5, 99.5, 300.5, 300.5)
+}
+
+// Index orders paints against image placements. Whether a wash is background or
+// overlay is entirely this number.
+func TestWalkOrdersPaintsAgainstPlacements(t *testing.T) {
+	src := "0 0 10 10 re f q 612 0 0 792 0 0 cm /Im0 Do Q 20 20 10 10 re f"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 2 || len(s.Images) != 1 {
+		t.Fatalf("Paints = %+v, Images = %+v; want two paints and one image", s.Paints, s.Images)
+	}
+	if !(s.Paints[0].Index < s.Images[0].Index && s.Images[0].Index < s.Paints[1].Index) {
+		t.Errorf("indices are paint %d, image %d, paint %d; want them strictly increasing",
+			s.Paints[0].Index, s.Images[0].Index, s.Paints[1].Index)
+	}
+}
+
+// A form's contents are painted where the Do appears, so a paint inside one
+// must order against the page's own operators, not after all of them.
+func TestWalkOrdersPaintsInsideAForm(t *testing.T) {
+	env := mapEnv{
+		{
+			"Im0": {Image: true, ID: 1},
+			"Fm0": {Content: []byte("0 0 10 10 re f"), Matrix: Identity, Scope: 1},
+		},
+		{},
+	}
+	s, err := Walk([]byte("/Fm0 Do q 612 0 0 792 0 0 cm /Im0 Do Q"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 1 || len(s.Images) != 1 {
+		t.Fatalf("Paints = %+v, Images = %+v; want one of each", s.Paints, s.Images)
+	}
+	if s.Paints[0].Index >= s.Images[0].Index {
+		t.Errorf("paint index %d, image index %d; the form's fill precedes the raster",
+			s.Paints[0].Index, s.Images[0].Index)
+	}
+}
+
+// The colour a paint was issued with is recorded but not resolved: `1 1 1 scn`
+// is white in an ICCBased RGB space and nearly black in a three-ink DeviceN,
+// and telling those apart means following /ColorSpace resources. classify does
+// not read this yet; see the note on Color.
+func TestWalkRecordsTheColourAPaintWasIssuedWith(t *testing.T) {
+	src := "/Cs6 cs 1 1 1 scn 0 0 0 RG 4 w 0 0 10 10 re B 0.5 g 0 0 10 10 re f"
+	s, err := Walk([]byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 2 {
+		t.Fatalf("Paints = %+v; want two", s.Paints)
+	}
+	if got := s.Paints[0].Fill; got.Space != "Cs6" || len(got.Comps) != 3 || got.Comps[0] != 1 {
+		t.Errorf("first fill = %+v; want space Cs6 with components 1 1 1", got)
+	}
+	if got := s.Paints[0].Stroke; got.Space != "DeviceRGB" || len(got.Comps) != 3 || got.Comps[0] != 0 {
+		t.Errorf("first stroke = %+v; want DeviceRGB 0 0 0", got)
+	}
+	if got := s.Paints[1].Fill; got.Space != "DeviceGray" || len(got.Comps) != 1 || got.Comps[0] != 0.5 {
+		t.Errorf("second fill = %+v; want DeviceGray 0.5", got)
+	}
+}
+
+// q and Q save and restore the whole graphics state, not only the CTM. Line
+// width is the one that changes a box, so it is the one asserted on.
+func TestWalkQRestoresLineWidthAndColour(t *testing.T) {
+	src := "2 w 0 g q 40 w 1 0 0 rg Q 100 100 200 200 re S"
+	s, err := Walk([]byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 1 {
+		t.Fatalf("Paints = %+v; want one", s.Paints)
+	}
+	boxEq(t, s.Paints[0].Box, 99, 99, 301, 301)
+	if got := s.Paints[0].Fill; got.Space != "DeviceGray" {
+		t.Errorf("fill = %+v; want the DeviceGray in force before the q", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 // Matrix is a PDF transformation matrix [a b c d e f] in the row-vector
@@ -89,6 +90,38 @@ type Placement struct {
 	// deciding whether this placement hides what is under it has to check those
 	// separately.
 	Opaque bool
+	// Index is this painting's position in the page's painting order, counted
+	// across images and paths together. Scan.Images is already in paint order,
+	// so this adds nothing between two images; what it adds is the comparison
+	// against Paint.Index, which is how a background wash is told from an
+	// overlay.
+	Index int
+}
+
+// Color is the colour a paint operator was issued with, exactly as the content
+// stream stated it: the operands of the last colour operator, and the name of
+// the colour space when cs or CS named one.
+//
+// It is deliberately not resolved to device values. Resolving means following
+// /ColorSpace resources through ICCBased, Indexed, Separation and DeviceN, and
+// the components alone do not say what they mean — `1 1 1 scn` is white in an
+// ICCBased RGB space and nearly black in a three-ink DeviceN, and the page
+// byb-b1.5 was measured on writes exactly that. Occlusion is decided by
+// painting order, geometry and opacity, which need none of it; this is recorded
+// so the question can be measured before anyone builds the machinery.
+type Color struct {
+	Space string    // "DeviceGray", "DeviceRGB", "DeviceCMYK", or the cs/CS resource name
+	Comps []float64 // as written; empty when a space was named but no colour set
+}
+
+// Paint is one path-painting operator: where its path landed in device space,
+// and the colours in force when it was issued.
+type Paint struct {
+	Op     string // the painting operator, for diagnostics
+	Box    Box    // device-space bounds of the path, stroke spread included
+	Fill   Color
+	Stroke Color
+	Index  int // painting order across the page, shared with Placement.Index
 }
 
 // Scan is what a content-stream walk observed, including everything reached
@@ -106,10 +139,16 @@ type Scan struct {
 	// page is an invisible OCR layer (3 Tr) and deposits nothing; classification
 	// wants this count, not TextOps.
 	InkedTextOps int
-	PaintOps     int      // path-painting operators; clipping alone does not count
-	ShadingOps   int      // sh
-	InlineImgs   int      // BI ... EI
-	Unresolved   []string // Do operands that did not resolve
+	// Paints is in paint order too, and interleaves with Images through the
+	// shared Index. Clipping alone does not appear here.
+	Paints     []Paint
+	ShadingOps int      // sh
+	InlineImgs int      // BI ... EI
+	Unresolved []string // Do operands that did not resolve
+
+	// order counts painting events, so that Paint.Index and Placement.Index can
+	// be compared. It is walk state, not part of what a walk reports.
+	order int
 }
 
 const (
@@ -129,9 +168,17 @@ const (
 // ignores that clip. A form whose BBox crops an oversized image will therefore
 // report an oversized placement. This errs toward accepting a page as
 // page-covering; revisit if the divert-rate instrumentation shows it matters.
+//
+// The same simplification runs the other way for paint. An oversized Paint.Box
+// is one a raster is less likely to contain, so a clipped-away path errs toward
+// diverting a page rather than extracting one. Both directions are the
+// conservative one for what reads them.
 func Walk(src []byte, scope int, env Env) (*Scan, error) {
 	s := &Scan{}
-	if err := walk(src, scope, env, gstate{ctm: Identity, opaque: true}, 0, s); err != nil {
+	// ISO 32000-1 section 8.4.1's initial graphics state, for the parts tracked
+	// here. The line width matters: a stroke that never sets one still spreads
+	// half a point either side of its path, not nothing.
+	if err := walk(src, scope, env, gstate{ctm: Identity, opaque: true, lineWidth: 1}, 0, s); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -150,11 +197,42 @@ func Walk(src []byte, scope int, env Env) (*Scan, error) {
 // is part of the graphics state, so BT/ET does not reset it: BT resets the text
 // matrix only. A Form XObject inherits it at the Do and discards it on return,
 // which the pass-by-value recursion in doXObject gives for free.
+//
+// lineWidth, fill and stroke are what a path-painting operator needs: how far
+// its ink spreads, and in what colour. Dash patterns, line joins, blend modes
+// and soft masks are a renderer's business (design spec section 2).
 type gstate struct {
-	ctm    Matrix
-	opaque bool
-	tr     int
+	ctm       Matrix
+	opaque    bool
+	tr        int
+	lineWidth float64
+	fill      Color
+	stroke    Color
 }
+
+// pathBox accumulates the device-space bounds of the path under construction.
+//
+// A curve contributes its control points rather than the curve itself. A Bezier
+// lies inside the convex hull of its control points, so this can only
+// over-estimate — and over-estimating makes a page divert rather than extract,
+// the safe direction for a rule whose job is to prove a paint is hidden.
+type pathBox struct {
+	box Box
+	set bool
+}
+
+func (p *pathBox) add(x, y float64) {
+	if !p.set {
+		p.box, p.set = Box{LLX: x, LLY: y, URX: x, URY: y}, true
+		return
+	}
+	p.box.LLX = min(p.box.LLX, x)
+	p.box.LLY = min(p.box.LLY, y)
+	p.box.URX = max(p.box.URX, x)
+	p.box.URY = max(p.box.URY, y)
+}
+
+func (p *pathBox) reset() { *p = pathBox{} }
 
 // inksGlyphs reports whether text shown in rendering mode tr deposits any ink.
 // ISO 32000-1 table 106: 3 is invisible and 7 adds to the clipping path without
@@ -169,6 +247,7 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 	}
 	l := NewLexer(src)
 	var stack []gstate
+	var path pathBox
 	var ops []Token
 	for {
 		tok, err := l.Next()
@@ -192,7 +271,8 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 			continue
 		}
 
-		switch string(tok.Text) {
+		op := string(tok.Text)
+		switch op {
 		case "q":
 			stack = append(stack, gs)
 		case "Q":
@@ -212,6 +292,48 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 			if n := len(ops); n > 0 && ops[n-1].Kind == KindNumber {
 				gs.tr = int(ops[n-1].Num)
 			}
+		case "w":
+			if v, ok := lastNumber(ops); ok {
+				gs.lineWidth = v
+			}
+
+		// Colour. The lower-case operator sets the nonstroking colour and the
+		// upper-case one the stroking colour (ISO 32000-1 section 8.6.8). cs and
+		// CS name a space and reset the colour to that space's initial value,
+		// which is why the components are dropped rather than kept.
+		case "g":
+			gs.fill = Color{Space: "DeviceGray", Comps: numberOperands(ops)}
+		case "G":
+			gs.stroke = Color{Space: "DeviceGray", Comps: numberOperands(ops)}
+		case "rg":
+			gs.fill = Color{Space: "DeviceRGB", Comps: numberOperands(ops)}
+		case "RG":
+			gs.stroke = Color{Space: "DeviceRGB", Comps: numberOperands(ops)}
+		case "k":
+			gs.fill = Color{Space: "DeviceCMYK", Comps: numberOperands(ops)}
+		case "K":
+			gs.stroke = Color{Space: "DeviceCMYK", Comps: numberOperands(ops)}
+		case "cs":
+			gs.fill = Color{Space: lastName(ops)}
+		case "CS":
+			gs.stroke = Color{Space: lastName(ops)}
+		case "sc", "scn":
+			gs.fill.Comps = numberOperands(ops)
+		case "SC", "SCN":
+			gs.stroke.Comps = numberOperands(ops)
+
+		// Path construction. Every one of these takes its operands as coordinate
+		// pairs — m and l one point, v and y two, c three — so pairing them off
+		// handles all of them. h closes the subpath and introduces no new point.
+		case "m", "l", "c", "v", "y":
+			addPoints(&path, numberOperands(ops), gs.ctm)
+		case "re":
+			addRect(&path, numberOperands(ops), gs.ctm)
+		case "n":
+			// n ends the path without painting it. W before it sets the clip from
+			// that path, which marks nothing either.
+			path.reset()
+
 		case "Do":
 			if err := doXObject(ops, scope, env, gs, depth, s); err != nil {
 				return err
@@ -238,12 +360,71 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 				}
 			}
 		case "S", "s", "f", "F", "f*", "B", "B*", "b", "b*":
-			s.PaintOps++
+			recordPaint(s, &path, gs, op)
 		case "sh":
 			s.ShadingOps++
 		}
 		ops = ops[:0]
 	}
+}
+
+// strokingOps are the painting operators that lay ink along the path, as well
+// as or instead of inside it.
+var strokingOps = map[string]bool{
+	"S": true, "s": true, "B": true, "B*": true, "b": true, "b*": true,
+}
+
+// recordPaint appends the path as painted and clears it, which every painting
+// operator does (ISO 32000-1 section 8.5.3).
+func recordPaint(s *Scan, path *pathBox, gs gstate, op string) {
+	defer path.reset()
+	if !path.set {
+		// A painting operator with no current path marks nothing, and giving it
+		// the empty box would put a rectangle at the origin into the record.
+		return
+	}
+	box := path.box
+	if strokingOps[op] {
+		// Ink spreads half the line width either side of the path. Without this
+		// a border stroked along the raster's own edge would look contained by
+		// it, when half the ink actually falls outside.
+		r := gs.lineWidth * deviceScale(gs.ctm) / 2
+		box = Box{LLX: box.LLX - r, LLY: box.LLY - r, URX: box.URX + r, URY: box.URY + r}
+	}
+	s.order++
+	s.Paints = append(s.Paints, Paint{
+		Op: op, Box: box, Fill: gs.fill, Stroke: gs.stroke, Index: s.order,
+	})
+}
+
+// deviceScale is how much the CTM magnifies lengths. The square root of the
+// determinant is exact for the rotations and uniform scales a page placement
+// carries, and for an anisotropic one it is the geometric mean rather than the
+// worst axis — close enough for a pen width, and nowhere near the tolerances
+// classify decides on.
+func deviceScale(m Matrix) float64 {
+	return math.Sqrt(math.Abs(m[0]*m[3] - m[1]*m[2]))
+}
+
+// addPoints adds every coordinate pair in nums, mapped through m.
+func addPoints(p *pathBox, nums []float64, m Matrix) {
+	for i := 0; i+1 < len(nums); i += 2 {
+		p.add(m.Apply(nums[i], nums[i+1]))
+	}
+}
+
+// addRect adds the four corners of a `re` rectangle. Width or height may be
+// negative, and taking all four corners covers that without a special case.
+func addRect(p *pathBox, nums []float64, m Matrix) {
+	if len(nums) < 4 {
+		return
+	}
+	n := nums[len(nums)-4:]
+	x, y, w, h := n[0], n[1], n[2], n[3]
+	p.add(m.Apply(x, y))
+	p.add(m.Apply(x+w, y))
+	p.add(m.Apply(x+w, y+h))
+	p.add(m.Apply(x, y+h))
 }
 
 func doXObject(ops []Token, scope int, env Env, gs gstate, depth int, s *Scan) error {
@@ -257,8 +438,10 @@ func doXObject(ops []Token, scope int, env Env, gs gstate, depth int, s *Scan) e
 		return nil
 	}
 	if xo.Image {
+		s.order++
 		s.Images = append(s.Images, Placement{
-			Name: name, ID: xo.ID, CTM: gs.ctm, Box: gs.ctm.UnitSquareBox(), Opaque: gs.opaque,
+			Name: name, ID: xo.ID, CTM: gs.ctm, Box: gs.ctm.UnitSquareBox(),
+			Opaque: gs.opaque, Index: s.order,
 		})
 		return nil
 	}
@@ -280,4 +463,35 @@ func matrixOperands(ops []Token) (Matrix, bool) {
 		m[i] = t.Num
 	}
 	return m, true
+}
+
+// numberOperands returns the numeric operands in order. Non-numeric tokens are
+// dropped rather than rejected: a malformed operand list should cost a little
+// precision, not abort the walk of an otherwise readable page.
+func numberOperands(ops []Token) []float64 {
+	out := make([]float64, 0, len(ops))
+	for _, o := range ops {
+		if o.Kind == KindNumber {
+			out = append(out, o.Num)
+		}
+	}
+	return out
+}
+
+func lastNumber(ops []Token) (float64, bool) {
+	for i := len(ops) - 1; i >= 0; i-- {
+		if ops[i].Kind == KindNumber {
+			return ops[i].Num, true
+		}
+	}
+	return 0, false
+}
+
+func lastName(ops []Token) string {
+	for i := len(ops) - 1; i >= 0; i-- {
+		if ops[i].Kind == KindName {
+			return string(ops[i].Text)
+		}
+	}
+	return ""
 }
