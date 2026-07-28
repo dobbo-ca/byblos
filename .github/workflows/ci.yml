@@ -1,0 +1,30 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - name: cross-build without cgo
+        run: GOOS=linux GOARCH=arm64 go build ./...
+      - name: assert only permitted dependencies
+        run: |
+          go list -f '{{range .Imports}}{{.}}{{"\n"}}{{end}}{{range .TestImports}}{{.}}{{"\n"}}{{end}}{{range .XTestImports}}{{.}}{{"\n"}}{{end}}' ./... \
+            | sort -u | grep '\.' | grep -v '^github.com/dobbo-ca/byblos' > ext.txt || true
+          echo "external imports:"; cat ext.txt
+          if grep -vE '^(github\.com/pdfcpu/pdfcpu|golang\.org/x/image)(/|$)' ext.txt; then
+            echo "FORBIDDEN dependency listed above. Permitted: pdfcpu, golang.org/x/image."
+            exit 1
+          fi
