@@ -94,6 +94,18 @@ var (
 
 	// QuarterTurnPlacement is an exact 90-degree rotation: a and d are zero.
 	QuarterTurnPlacement = [6]float64{0, PageHeightPt, -PageWidthPt, 0, PageWidthPt, 0}
+
+	// NaturalDPIPlacement is ia-DTIC_ADA383635.pdf p40's, the shape byb-b1.3
+	// measured on 132 pages across 17 files. The raster is placed at its own
+	// resolution rather than stretched to the page: 2384x3321 pixels at 302 DPI
+	// is 568.37 x 791.76 points on a nominal 612x792 MediaBox, which covers
+	// 91.74% of it and leaves a 43.6 point blank strip down the right-hand side.
+	// The page's entire content stream is `/GS1 gs q 568.3708 0 0 791.7616 0 0
+	// /Im40 Do Q` — nothing else can mark that strip.
+	//
+	// Measured placement DPI was a round number in every dominant file: DTIC
+	// 302/303, CIA 299.3, dc-1238360 400.0, govdocs1 200/300/300.3.
+	NaturalDPIPlacement = [6]float64{568.3708, 0, 0, 791.7616, 0, 0}
 )
 
 // cmOperands renders a placement matrix as the six operands of a `cm` operator.
@@ -123,6 +135,8 @@ func All() []Doc {
 		{"scan-in-form", "one page-covering image inside a Form XObject: must NOT divert", scanInForm()},
 		{"scan-deskewed", "page-covering image placed with a 0.13 degree scanner deskew: must NOT divert",
 			scanPlaced(cmOperands(DeskewPlacement), 0)},
+		{"scan-natural-dpi", "raster placed at its own 302 DPI on a nominal Letter box, 43.6 points short: must NOT divert",
+			scanPlaced(cmOperands(NaturalDPIPlacement), 0)},
 		{"scan-mirrored", "page-covering image placed with a vertical mirror: must divert",
 			scanPlaced(cmOperands(MirrorPlacement), 0)},
 		{"scan-quarter-turn", "page-covering image placed with a true 90 degree rotation: must divert",

@@ -17,11 +17,17 @@ func TestExtractPageRasterSucceeds(t *testing.T) {
 	for _, name := range []string{"scan", "scan-rotated", "scan-in-form", "background-wash"} {
 		t.Run(name, func(t *testing.T) {
 			data := corpusDoc(t, name)
-			img, err := ExtractPageRaster(bytes.NewReader(data), 1)
+			pr, err := ExtractPageRaster(bytes.NewReader(data), 1)
 			if err != nil {
 				t.Fatalf("ExtractPageRaster() error = %v", err)
 			}
-			b := img.Bounds()
+			// Every document here is placed across the whole page box, so the
+			// coverage answer is the uninteresting one. scan-natural-dpi is the
+			// case where it is not; see the test below.
+			if !pr.CoversPage() {
+				t.Errorf("CoversPage() = false; placement %v should fill the page box %v", pr.Bounds, pr.Page)
+			}
+			b := pr.Image.Bounds()
 			if b.Dx() != corpus.ScanImageW || b.Dy() != corpus.ScanImageH {
 				t.Errorf("raster = %dx%d; want %dx%d",
 					b.Dx(), b.Dy(), corpus.ScanImageW, corpus.ScanImageH)
@@ -40,11 +46,11 @@ func TestExtractPageRasterTakesTheOccludingLayer(t *testing.T) {
 	}
 	for _, name := range []string{"stacked", "stacked-in-form"} {
 		t.Run(name, func(t *testing.T) {
-			img, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, name)), 1)
+			pr, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, name)), 1)
 			if err != nil {
 				t.Fatalf("ExtractPageRaster() error = %v", err)
 			}
-			r, _, _, _ := img.At(0, 0).RGBA()
+			r, _, _, _ := pr.Image.At(0, 0).RGBA()
 			if got := uint8(r >> 8); got != wantGray {
 				t.Errorf("first pixel = %d; want %d (the top layer). %d is the occluded base",
 					got, wantGray, corpus.FirstGray(corpus.StackedBaseSeed))
@@ -65,11 +71,11 @@ func TestExtractPageRasterExtractsUnderAnInvisibleTextLayer(t *testing.T) {
 		"invisible-text-bracketed",
 	} {
 		t.Run(name, func(t *testing.T) {
-			img, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, name)), 1)
+			pr, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, name)), 1)
 			if err != nil {
 				t.Fatalf("ExtractPageRaster() error = %v; want the page to extract", err)
 			}
-			if b := img.Bounds(); b.Dx() != corpus.ScanImageW || b.Dy() != corpus.ScanImageH {
+			if b := pr.Image.Bounds(); b.Dx() != corpus.ScanImageW || b.Dy() != corpus.ScanImageH {
 				t.Errorf("raster = %dx%d; want %dx%d",
 					b.Dx(), b.Dy(), corpus.ScanImageW, corpus.ScanImageH)
 			}
@@ -85,16 +91,18 @@ func TestExtractPageRasterExtractsUnderAnInvisibleTextLayer(t *testing.T) {
 // resampling, and those rasters are bilevel JBIG2: interpolation would destroy
 // the lossless promise on exactly the pages Byblos most wants to serve.
 func TestExtractPageRasterKeepsADeskewedRasterAsStored(t *testing.T) {
-	got, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan-deskewed")), 1)
+	pr, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan-deskewed")), 1)
 	if err != nil {
 		t.Fatalf("ExtractPageRaster(scan-deskewed) error = %v", err)
 	}
+	got := pr.Image
 	// scan and scan-deskewed hold the same raster object; only the placement
 	// differs, so anything but pixel equality means the raster was rewritten.
-	want, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan")), 1)
+	wantPR, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan")), 1)
 	if err != nil {
 		t.Fatalf("ExtractPageRaster(scan) error = %v", err)
 	}
+	want := wantPR.Image
 	if got.Bounds() != want.Bounds() {
 		t.Fatalf("raster bounds = %v; want %v", got.Bounds(), want.Bounds())
 	}
@@ -108,6 +116,36 @@ func TestExtractPageRasterKeepsADeskewedRasterAsStored(t *testing.T) {
 					x, y, got.At(x, y), want.At(x, y))
 			}
 		}
+	}
+}
+
+// byb-b1.3: 132 pages across 17 files place the raster at its own resolution on
+// a nominal page box rather than stretching it to fit. ia-DTIC_ADA383635.pdf p40
+// is 2384x3321 pixels at 302 DPI, which is 568.37 x 791.76 points on a 612x792
+// MediaBox — 91.74% of it, with a 43.6 point blank strip down the right.
+//
+// Its whole content stream is `/GS1 gs q 568.3708 0 0 791.7616 0 0 /Im40 Do Q`.
+// Nothing can mark that strip, so the raster is the page and the page extracts.
+// What the caller gets told is the geometry, not a divert.
+func TestExtractPageRasterAcceptsANaturalDPIPlacement(t *testing.T) {
+	pr, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan-natural-dpi")), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster(scan-natural-dpi) error = %v; want the page to extract", err)
+	}
+	if pr.CoversPage() {
+		t.Errorf("CoversPage() = true; placement %v does not fill page box %v", pr.Bounds, pr.Page)
+	}
+	// The gap the caller has to be able to see: 612 - 568 points down the right.
+	if got := pr.Page.Dx() - pr.Bounds.Dx(); got < 40 || got > 48 {
+		t.Errorf("horizontal shortfall = %d points; the measured page is 43.6", got)
+	}
+	if got := pr.Page.Dy() - pr.Bounds.Dy(); got != 0 {
+		t.Errorf("vertical shortfall = %d points; the measured page is flush top and bottom", got)
+	}
+	// The raster itself is returned as stored, not padded out to the page box.
+	if b := pr.Image.Bounds(); b.Dx() != corpus.ScanImageW || b.Dy() != corpus.ScanImageH {
+		t.Errorf("raster = %dx%d; want %dx%d as stored — Byblos does not pad to the MediaBox",
+			b.Dx(), b.Dy(), corpus.ScanImageW, corpus.ScanImageH)
 	}
 }
 
@@ -183,11 +221,11 @@ func TestExtractPageRasterIsPerPage(t *testing.T) {
 func TestExtractPageRasterHandlesDeduplicatedRasters(t *testing.T) {
 	data := corpusDoc(t, "dup-raster")
 	for _, page := range []int{1, 2} {
-		img, err := ExtractPageRaster(bytes.NewReader(data), page)
+		pr, err := ExtractPageRaster(bytes.NewReader(data), page)
 		if err != nil {
 			t.Fatalf("page %d: error = %v; want success", page, err)
 		}
-		if b := img.Bounds(); b.Dx() != corpus.ScanImageW || b.Dy() != corpus.ScanImageH {
+		if b := pr.Image.Bounds(); b.Dx() != corpus.ScanImageW || b.Dy() != corpus.ScanImageH {
 			t.Errorf("page %d: raster = %dx%d; want %dx%d",
 				page, b.Dx(), b.Dy(), corpus.ScanImageW, corpus.ScanImageH)
 		}
@@ -216,15 +254,18 @@ func TestExtractPageRasterMalformed(t *testing.T) {
 // upgrade blind spot.
 func TestDivertClassCoversEveryReason(t *testing.T) {
 	want := map[string]string{
-		"no-image":            "not-single-raster",
-		"has-text":            "not-single-raster",
-		"multiple-images":     "not-single-raster",
-		"inline-image":        "not-single-raster",
-		"vector-paint":        "not-single-raster",
-		"shading":             "not-single-raster",
-		"unresolved-xobject":  "not-single-raster",
-		"rotated-placement":   "not-single-raster",
-		"flipped-placement":   "not-single-raster",
+		"no-image":           "not-single-raster",
+		"has-text":           "not-single-raster",
+		"multiple-images":    "not-single-raster",
+		"inline-image":       "not-single-raster",
+		"vector-paint":       "not-single-raster",
+		"shading":            "not-single-raster",
+		"unresolved-xobject": "not-single-raster",
+		"rotated-placement":  "not-single-raster",
+		"flipped-placement":  "not-single-raster",
+		// byb-b1.3 stopped classify emitting this one: a lone raster is the page
+		// at any coverage. It stays here because a provenance record written by
+		// an earlier release carries it, and divertClass is what reads those.
 		"not-page-covering":   "not-single-raster",
 		"transparent-overlay": "not-single-raster",
 		"mrc-layers":          "not-single-raster",
@@ -337,8 +378,24 @@ func TestClassify(t *testing.T) {
 		{name: "vertically flipped", scan: &contentScan{Images: placementOf(content.Matrix{612, 0, 0, -792, 0, 792})}, want: "flipped-placement"},
 		{name: "horizontally flipped", scan: &contentScan{Images: placementOf(content.Matrix{-612, 0, 0, 792, 612, 0})}, want: "flipped-placement"},
 		{name: "flipped on both axes", scan: &contentScan{Images: placementOf(content.Matrix{-612, 0, 0, -792, 612, 792})}, want: "flipped-placement"},
-		{name: "image covers only half the page", scan: &contentScan{Images: onePlacement(half)}, want: "not-page-covering"},
+		// byb-b1.3. A lone raster is the page whatever fraction of the box it
+		// occupies: every other arm has already established that nothing in the
+		// stream can mark the part it leaves bare. The measured shape is a
+		// natural-DPI placement covering 91.74%; half a page is the same rule
+		// pushed well past anything measured, and it still holds, because the
+		// argument is about what can put ink there and not about how much is
+		// left. PageRaster.CoversPage is where the caller learns the difference.
+		{name: "a natural-DPI placement 43.6 points short still extracts",
+			scan: &contentScan{Images: onePlacement(contentBox(0, 0, 568.3708, 791.7616))}},
+		{name: "a lone raster over half the page is still the page",
+			scan: &contentScan{Images: onePlacement(half)}},
 		{name: "half a point of slack is tolerated", scan: &contentScan{Images: onePlacement(contentBox(0.5, 0.5, 611.5, 791.5))}},
+		// A stack is a different question: an under-layer can reach past the top
+		// one, so a layered page still has to be covered.
+		{name: "a stacked pair that does not cover the page",
+			scan:    &contentScan{Images: layers(placement(1, half, true), placement(2, half, true))},
+			want:    "multiple-images",
+			wantIdx: 0},
 
 		// The measured Internet Archive shape.
 		{
@@ -571,11 +628,14 @@ func TestClassifyPaintUnderATransparentRasterStillDiverts(t *testing.T) {
 //	/Im1 Do
 //	Q
 //
-// This is the bead's honesty test. The wash no longer diverts the page — but
-// the raster is 610.56 points wide on a 612 point MediaBox, so covers() rejects
-// it and the page lands in byb-b1.3's bucket instead. That is exactly what the
-// re-scoring predicted: of the 126 pages, removing the paint arm alone leaves
-// 59 not-page-covering, 53 rotated, 8 flipped, 5 shading, and 1 extraction.
+// This was byb-b1.5's honesty test, and byb-b1.3 finished the job. When b1.5
+// landed the wash stopped diverting the page but the raster is 610.56 points
+// wide on a 612 point MediaBox, so covers() rejected it and the page fell into
+// b1.3's bucket instead — one of the 59 the re-scoring predicted would.
+//
+// Both arms are in now, so this page extracts: at its own geometry, with the
+// two operators it actually carries. All 45 pages of govdocs1/005697.pdf are
+// this stream byte for byte.
 func TestClassifyOnTheMeasuredWashPage(t *testing.T) {
 	const src = "/Cs6 cs 1 1 1 scn\n" +
 		"/GS1 gs\n" +
@@ -588,10 +648,13 @@ func TestClassifyOnTheMeasuredWashPage(t *testing.T) {
 		"Q\n"
 	_, got := classify(pdfdocRect(0, 0, 612, 792), walkPage(t, src, ""), plainFacts)
 	if got == "vector-paint" {
-		t.Fatal("classify() = \"vector-paint\"; the wash is painted before the raster and inside its box")
+		t.Fatal("classify() = \"vector-paint\"; the wash is painted before the raster and inside its box (byb-b1.5)")
 	}
-	if got != "not-page-covering" {
-		t.Errorf("classify() = %q; want %q — this page is byb-b1.3's bucket once the wash stops diverting it", got, "not-page-covering")
+	if got == "not-page-covering" {
+		t.Fatal("classify() = \"not-page-covering\"; the raster is 610.56pt on a 612pt box and is still the whole page (byb-b1.3)")
+	}
+	if got != "" {
+		t.Errorf("classify() = %q; want the page to extract", got)
 	}
 }
 
