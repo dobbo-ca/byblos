@@ -75,6 +75,44 @@ rare, since JBIG2 has been in the PDF specification since 1.4.
 
 ---
 
+## Raster decoders — JBIG2, JPEG 2000, CMYK TIFF
+
+**Capability strings:** `decode-jbig2`, `decode-jpx`, `decode-tiff`
+
+Would let Byblos handle pages that `ExtractPageRaster` currently rejects with
+`ErrUnsupportedImageCodec`. The page is understood — one page-covering raster —
+and only its codec is out of reach. `decode-tiff` is the smallest of the three
+and arrives with B3, which already pulls in `golang.org/x/image/tiff` for the
+CMYK rasters pdfcpu re-renders as TIFF.
+
+**Why deferred:** B0/B1 targeted the extraction path, and the corpus Byblos was
+built against is consumer-scanner output, which is entirely PNG and JPEG.
+
+**Why they are separate capability strings:** the codec mix is wildly
+corpus-dependent, so "would a decoder help?" has no single answer. Codec of the
+page-covering raster on scan-shaped pages, measured on `byb-divert`:
+
+| corpus | n | codec mix | undecodable |
+|---|---|---|---|
+| localscans | 110 | png 100% | 0.0% |
+| personal | 30 | png 66.7%, jpg 33.3% | 0.0% |
+| govdocs1 | 875 | png 82.4%, jbig2 8.9%, jpg 5.6% | 12.0% |
+| dc_random | 520 | jbig2 54.6%, png 20.6%, jpg 20.0% | 56.9% |
+| commons | 8048 | jpx 54.8%, png 22.2%, jbig2 12.4%, jpg 10.7% | 67.2% |
+| ia | 19590 | jpx 84.0%, jbig2 7.4%, png 5.8%, jpg 2.8% | 91.3% |
+
+151 of the 347 files carrying a page-covering scan raster were 100%
+undecodable. On an archive-processed corpus the **input** side is a bigger gate
+than the output side; on the one raw-consumer-scanner corpus it is not a gate at
+all. Settle what Kleio actually ingests before ordering B2 and B3.
+
+**Upgrade path:** documents whose provenance records
+`diverted: unsupported-codec`. Note that the stored record does not say *which*
+codec, so all three capabilities currently nominate the same document set. That
+is deliberately conservative; making the record finer is `byb-z8j`.
+
+---
+
 ## A PDF renderer
 
 **Capability string:** `render`
@@ -82,6 +120,10 @@ rare, since JBIG2 has been in the PDF specification since 1.4.
 Would let Byblos handle pages that `ExtractPageRaster` currently rejects with
 `ErrNotSingleRaster`: tiled rasters, image-plus-vector-overlay, and genuinely
 mixed content.
+
+It would **not** help a page that diverted with `unsupported-codec`: a renderer
+still has to decode the raster it is compositing. Those pages want a decoder
+above, and they do not count toward the divert rate that justifies this work.
 
 **Why deferred:** this is the single largest piece of work anywhere in the Cadmus
 / Byblos family — a content-stream interpreter plus Type1/CFF/TrueType/CID font
