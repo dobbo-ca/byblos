@@ -44,11 +44,26 @@ const (
 		"BT /F1 12 Tf 1 0 0 1 72 700 Tm [ (Second) -250 (line) -250 (here.) ] TJ ET\n"
 	overlayTextContent = "BT /F1 10 Tf 1 0 0 1 72 40 Tm (Scanned 2026-07-27) Tj ET\n"
 
+	// ocrTextContent is the invisible OCR layer every scan pipeline ships,
+	// transcribed from ia-DTIC_ADA134285.pdf p20. Rendering mode 3 paints no
+	// glyphs, so this deposits no ink anywhere on the page.
+	ocrTextContent = "BT\n3 Tr /F1 1 Tf\n11.4 0 0 12 119 703.2 Tm (References)Tj\nET\n"
+	// ocrTextBracketed restores mode 0 after the showing operator, the idiom
+	// measured on govdocs1/004513.pdf p1. The text is still invisible: what the
+	// stream mentions is not what was in force when the glyphs were shown.
+	ocrTextBracketed = "BT\n3 Tr /F1 1 Tf\n11.4 0 0 12 119 703.2 Tm (References)Tj\n0 Tr\nET\n"
+	// ocrTextInheritedMode sets no mode of its own and shows text in whatever
+	// mode it inherits from the stream that invoked it.
+	ocrTextInheritedMode = "BT\n/F1 1 Tf\n11.4 0 0 12 119 703.2 Tm (References)Tj\nET\n"
+
 	// BornDigitalTextChars is len("Byblos born-digital page one.") +
 	// len("Second") + len("line") + len("here.") = 29 + 6 + 4 + 5.
 	BornDigitalTextChars = 44
 	// OverlayTextChars is len("Scanned 2026-07-27").
 	OverlayTextChars = 18
+	// InvisibleTextChars is len("References"). TextChars counts an invisible
+	// layer like any other text; only classification treats it differently.
+	InvisibleTextChars = 10
 )
 
 const helveticaFont = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
@@ -70,6 +85,10 @@ func All() []Doc {
 		{"tiled", "two half-page images: must divert", tiled()},
 		{"overlay-text", "page-covering image plus text inside a Form XObject: must divert", overlayText()},
 		{"overlay-vector", "page-covering image plus a stroked rectangle: must divert", overlayVector()},
+		{"invisible-text", "page-covering image under an invisible OCR layer (3 Tr): must NOT divert", ocrScan(ocrTextContent, "")},
+		{"invisible-text-in-form", "the OCR layer, and its 3 Tr, inside a Form XObject: must NOT divert", ocrScan("q /Fm0 Do Q\n", ocrTextContent)},
+		{"invisible-text-form-inherits", "3 Tr set by the page, the OCR layer shown inside a form: must NOT divert", ocrScan("q 3 Tr /Fm0 Do Q\n", ocrTextInheritedMode)},
+		{"invisible-text-bracketed", "the `3 Tr ... Tj ... 0 Tr` idiom: must NOT divert", ocrScan(ocrTextBracketed, "")},
 		{"mixed", "two pages: born-digital then scan", mixed()},
 		{"dup-raster", "two pages holding a byte-identical raster as two objects: both must extract", dupRaster()},
 		{"jbig2", "one page-covering JBIG2 raster: 1 bpc, and a codec byblos cannot decode", jbig2()},
@@ -281,6 +300,42 @@ func overlayVector() []byte {
 		"q %d 0 0 %d 0 0 cm /Im0 Do Q\nq 0 0 0 RG 2 w 72 72 468 648 re S Q\n",
 		PageWidthPt, PageHeightPt)))
 	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	return w.finish(cat)
+}
+
+// ocrScan builds a page-covering scan carrying an invisible OCR text layer.
+//
+// pageText is appended to the page's own content stream, after the raster.
+// formText, when not empty, becomes a Form XObject the page can invoke as
+// /Fm0 — the shape 14 files and 207 pages of the DocumentCloud sample take,
+// where Tesseract's /GlyphLessFont text and its `3 Tr` are both out of sight of
+// anything that reads only the page stream.
+func ocrScan(pageText, formText string) []byte {
+	w := newWriter()
+	cat, pages, page, cont := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	font, img := w.reserve(), w.reserve()
+	xobjects := fmt.Sprintf("/Im0 %d 0 R", img)
+	form := 0
+	if formText != "" {
+		form = w.reserve()
+		xobjects += fmt.Sprintf(" /Fm0 %d 0 R", form)
+	}
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %d 0 R >> /XObject << %s >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, font, xobjects, cont))
+	// The raster is painted first and the text over it, so these documents say
+	// nothing about z-order: they are about the rendering mode alone.
+	w.fillStream(cont, "", []byte(
+		fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)+pageText))
+	w.fill(font, helveticaFont)
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	if formText != "" {
+		w.fillStream(form, fmt.Sprintf("/Type /XObject /Subtype /Form /BBox [0 0 %d %d]"+
+			" /Resources << /Font << /F1 %d 0 R >> >>", PageWidthPt, PageHeightPt, font),
+			[]byte(formText))
+	}
 	return w.finish(cat)
 }
 

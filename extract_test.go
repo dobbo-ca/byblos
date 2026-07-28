@@ -52,6 +52,30 @@ func TestExtractPageRasterTakesTheOccludingLayer(t *testing.T) {
 	}
 }
 
+// The headline correction of byb-b1.1. Byblos diverted 100% of a real ScanSnap
+// iX500 corpus because classify keyed on TextOps, and 98.7% of the pages it
+// diverted over a page-covering raster carried nothing but an invisible OCR
+// layer. Each document here is one of the three shapes that layer takes.
+func TestExtractPageRasterExtractsUnderAnInvisibleTextLayer(t *testing.T) {
+	for _, name := range []string{
+		"invisible-text",
+		"invisible-text-in-form",
+		"invisible-text-form-inherits",
+		"invisible-text-bracketed",
+	} {
+		t.Run(name, func(t *testing.T) {
+			img, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, name)), 1)
+			if err != nil {
+				t.Fatalf("ExtractPageRaster() error = %v; want the page to extract", err)
+			}
+			if b := img.Bounds(); b.Dx() != corpus.ScanImageW || b.Dy() != corpus.ScanImageH {
+				t.Errorf("raster = %dx%d; want %dx%d",
+					b.Dx(), b.Dy(), corpus.ScanImageW, corpus.ScanImageH)
+			}
+		})
+	}
+}
+
 func TestExtractPageRasterDiverts(t *testing.T) {
 	for _, tc := range []struct{ doc, reason string }{
 		{"born-digital", "no-image"},
@@ -195,7 +219,10 @@ func TestClassify(t *testing.T) {
 	}{
 		{name: "clean scan", scan: &contentScan{Images: onePlacement(full)}},
 		{name: "no image at all", scan: &contentScan{}, want: "no-image"},
-		{name: "text present", scan: &contentScan{Images: onePlacement(full), TextOps: 1}, want: "has-text"},
+		{name: "inked text present", scan: &contentScan{Images: onePlacement(full), TextOps: 1, InkedTextOps: 1}, want: "has-text"},
+		// The whole point of byb-b1.1: an OCR layer shows text operators and
+		// deposits no ink, so it is not a reason to divert.
+		{name: "invisible text only", scan: &contentScan{Images: onePlacement(full), TextOps: 4}, want: ""},
 		{name: "inline image", scan: &contentScan{Images: onePlacement(full), InlineImgs: 1}, want: "inline-image"},
 		{name: "painted path", scan: &contentScan{Images: onePlacement(full), PaintOps: 1}, want: "vector-paint"},
 		{name: "shading", scan: &contentScan{Images: onePlacement(full), ShadingOps: 1}, want: "shading"},

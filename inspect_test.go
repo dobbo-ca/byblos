@@ -137,6 +137,26 @@ func TestInspectCountsTextInsideAForm(t *testing.T) {
 	}
 }
 
+// TextChars and the divert decision were split apart by byb-b1.1 and must stay
+// split. TextChars is a born-digital signal and an invisible OCR layer is still
+// text, so it keeps counting; only classify stopped treating it as ink. These
+// pages all extract, which the divert tests assert separately.
+func TestInspectCountsInvisibleTextAsText(t *testing.T) {
+	for _, name := range []string{
+		"invisible-text",
+		"invisible-text-in-form",
+		"invisible-text-form-inherits",
+		"invisible-text-bracketed",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := inspect(t, name)[0]
+			if p.TextChars != corpus.InvisibleTextChars {
+				t.Errorf("TextChars = %d; want %d", p.TextChars, corpus.InvisibleTextChars)
+			}
+		})
+	}
+}
+
 func TestInspectVectorOverlayStillReportsTheImage(t *testing.T) {
 	p := inspect(t, "overlay-vector")[0]
 	if len(p.Images) != 1 {

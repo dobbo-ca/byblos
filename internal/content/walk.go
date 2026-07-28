@@ -98,13 +98,18 @@ type Scan struct {
 	// lands on top. Form XObjects are walked where they are invoked, so a
 	// placement inside a form sits between the placements around the Do that
 	// reached it. Classification reads occlusion straight off this order.
-	Images     []Placement
-	TextChars  int      // bytes shown by Tj, TJ, ' and "
-	TextOps    int      // number of text-showing operators
-	PaintOps   int      // path-painting operators; clipping alone does not count
-	ShadingOps int      // sh
-	InlineImgs int      // BI ... EI
-	Unresolved []string // Do operands that did not resolve
+	Images    []Placement
+	TextChars int // bytes shown by Tj, TJ, ' and "
+	TextOps   int // number of text-showing operators
+	// InkedTextOps counts only the text-showing operators that were in a
+	// rendering mode which actually paints glyphs. Almost all text on a scanned
+	// page is an invisible OCR layer (3 Tr) and deposits nothing; classification
+	// wants this count, not TextOps.
+	InkedTextOps int
+	PaintOps     int      // path-painting operators; clipping alone does not count
+	ShadingOps   int      // sh
+	InlineImgs   int      // BI ... EI
+	Unresolved   []string // Do operands that did not resolve
 }
 
 const (
@@ -140,10 +145,23 @@ func Walk(src []byte, scope int, env Env) (*Scan, error) {
 // /ExtGState that restores /ca to 1 after an earlier one lowered it leaves the
 // state reported as not opaque, so a page doing that diverts. No producer has
 // been seen to do it, and the error is in the safe direction.
+//
+// tr is the text rendering mode. It lives in the text state (table 104), which
+// is part of the graphics state, so BT/ET does not reset it: BT resets the text
+// matrix only. A Form XObject inherits it at the Do and discards it on return,
+// which the pass-by-value recursion in doXObject gives for free.
 type gstate struct {
 	ctm    Matrix
 	opaque bool
+	tr     int
 }
+
+// inksGlyphs reports whether text shown in rendering mode tr deposits any ink.
+// ISO 32000-1 table 106: 3 is invisible and 7 adds to the clipping path without
+// painting; every other listed mode fills, strokes, or both. A mode outside the
+// table is treated as inking, because diverting a page Byblos does not
+// understand is the safe direction.
+func inksGlyphs(tr int) bool { return tr != 3 && tr != 7 }
 
 func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 	if depth > maxFormDepth {
@@ -190,12 +208,19 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 			if len(ops) > 0 && ops[len(ops)-1].Kind == KindName {
 				gs.opaque = gs.opaque && env.ExtGStateOpaque(scope, string(ops[len(ops)-1].Text))
 			}
+		case "Tr":
+			if n := len(ops); n > 0 && ops[n-1].Kind == KindNumber {
+				gs.tr = int(ops[n-1].Num)
+			}
 		case "Do":
 			if err := doXObject(ops, scope, env, gs, depth, s); err != nil {
 				return err
 			}
 		case "Tj", "'", "\"":
 			s.TextOps++
+			if inksGlyphs(gs.tr) {
+				s.InkedTextOps++
+			}
 			for i := len(ops) - 1; i >= 0; i-- {
 				if ops[i].Kind == KindString {
 					s.TextChars += len(ops[i].Text)
@@ -204,6 +229,9 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 			}
 		case "TJ":
 			s.TextOps++
+			if inksGlyphs(gs.tr) {
+				s.InkedTextOps++
+			}
 			for _, o := range ops {
 				if o.Kind == KindString {
 					s.TextChars += len(o.Text)
