@@ -295,6 +295,61 @@ func TestImageInfoReadsOneBitPerComponent(t *testing.T) {
 	}
 }
 
+// Whether the upper layer of a stacked page is opaque decides whether it can be
+// said to hide the layer below, and /ca lives in an /ExtGState rather than in
+// the image dictionary.
+func TestExtGStateOpaque(t *testing.T) {
+	d := open(t, "stacked-alpha")
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v", err)
+	}
+	if d.ExtGStateOpaque(p.Scope, "GS0") {
+		t.Error("ExtGStateOpaque(GS0) = true; the state sets /ca 0.5")
+	}
+	// A name the document does not declare has not been shown to be opaque, and
+	// guessing that it is would be the one direction that loses content.
+	if d.ExtGStateOpaque(p.Scope, "Nope") {
+		t.Error("ExtGStateOpaque(undeclared name) = true; want the conservative answer")
+	}
+	// A document with no /ExtGState at all must not report its placements as
+	// transparent, or every clean scan would divert.
+	scan := open(t, "scan")
+	sp, err := scan.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v", err)
+	}
+	if s, err := content.Walk(sp.Content, sp.Scope, scan); err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	} else if len(s.Images) != 1 || !s.Images[0].Opaque {
+		t.Errorf("Images = %+v; want one opaque placement", s.Images)
+	}
+}
+
+func TestImageInfoReportsTransparencyEntries(t *testing.T) {
+	d := open(t, "stacked-smask")
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v", err)
+	}
+	for name, want := range map[string]bool{"Im1": true, "Im0": false} {
+		xo, ok := d.XObject(p.Scope, name)
+		if !ok {
+			t.Fatalf("XObject(scope, %q) not found", name)
+		}
+		info, ok := d.ImageInfo(xo.ID)
+		if !ok {
+			t.Fatalf("ImageInfo for %s not found", name)
+		}
+		if info.SMask != want {
+			t.Errorf("%s: SMask = %v; want %v", name, info.SMask, want)
+		}
+		if info.Mask {
+			t.Errorf("%s: Mask = true; the document declares none", name)
+		}
+	}
+}
+
 func TestRawImageUnknownID(t *testing.T) {
 	d := open(t, "scan")
 	if _, _, err := d.RawImage(99999); err == nil {

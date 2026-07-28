@@ -24,6 +24,19 @@ const (
 	TileImageW, TileImageH = 153, 396 // each half of the tiled page
 )
 
+// Seeds for the grey patterns of the stacked documents. The two layers must be
+// distinguishable pixel by pixel, because "which one came back?" is the whole
+// question those documents ask.
+const (
+	StackedBaseSeed = 4
+	StackedTopSeed  = 5
+)
+
+// FirstGray is the first sample of the pattern grayPixels builds for a seed. A
+// test that decodes a stacked document reads pixel (0,0) and compares it to
+// this, which is cheaper than a second copy of the pattern and just as decisive.
+func FirstGray(seed int) uint8 { return grayPixels(1, 1, seed)[0] }
+
 // Text content, kept as constants so tests assert against a named value rather
 // than a magic number.
 const (
@@ -60,6 +73,11 @@ func All() []Doc {
 		{"mixed", "two pages: born-digital then scan", mixed()},
 		{"dup-raster", "two pages holding a byte-identical raster as two objects: both must extract", dupRaster()},
 		{"jbig2", "one page-covering JBIG2 raster: 1 bpc, and a codec byblos cannot decode", jbig2()},
+		{"stacked", "two page-covering images at the identical CTM: the second occludes the first", stackedPair(false, 0)},
+		{"stacked-in-form", "the occluding image is painted inside a Form XObject: paint order must survive the recursion", stackedInForm()},
+		{"stacked-smask", "the occluding image carries an /SMask, so it cannot be assumed to hide what is below: must divert", stackedPair(true, 0)},
+		{"stacked-alpha", "the occluding image is painted under /ca 0.5: must divert", stackedPair(false, 0.5)},
+		{"mrc", "bitonal page-covering base plus a smaller non-bitonal patch: must divert", mrc()},
 		{"malformed", "the scan document truncated mid-body", malformed()},
 	}
 }
@@ -348,6 +366,103 @@ func jbig2() []byte {
 	w.fillRawStream(img, fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d"+
 		" /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode", ScanImageW, ScanImageH),
 		jbig2Payload())
+	return w.finish(cat)
+}
+
+// stackedPair builds the shape 16,241 measured Internet Archive pages have:
+// two page-covering placements at the identical CTM, the second painted over
+// the first. The content stream is modelled on ia-06043926.cn.pdf page 1,
+// including the leading `cm` that paints nothing — that is what MuPDF emits.
+//
+// topSMask gives the upper image an /SMask, and topFillAlpha, when non-zero,
+// paints it under an /ExtGState with that /ca. Either one makes the upper image
+// something other than an opaque cover, so the occlusion argument stops holding
+// and the page has to divert.
+func stackedPair(topSMask bool, topFillAlpha float64) []byte {
+	w := newWriter()
+	cat, pages, page, cont := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	img0, img1 := w.reserve(), w.reserve()
+
+	topDict := imageDict(ScanImageW, ScanImageH)
+	smask := 0
+	if topSMask {
+		smask = w.reserve()
+		topDict += fmt.Sprintf(" /SMask %d 0 R", smask)
+	}
+	res := fmt.Sprintf("/XObject << /Im0 %d 0 R /Im1 %d 0 R >>", img0, img1)
+	gsOp, gsObj := "", 0
+	if topFillAlpha > 0 {
+		gsObj = w.reserve()
+		res += fmt.Sprintf(" /ExtGState << /GS0 %d 0 R >>", gsObj)
+		gsOp = "/GS0 gs "
+	}
+
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << %s >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, res, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf(
+		"q %d 0 0 %d 0 0 cm Q\nq %d 0 0 %d 0 0 cm /Im0 Do Q\nq %s%d 0 0 %d 0 0 cm /Im1 Do Q\n",
+		PageWidthPt, PageHeightPt,
+		PageWidthPt, PageHeightPt,
+		gsOp, PageWidthPt, PageHeightPt)))
+	w.fillStream(img0, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, StackedBaseSeed))
+	w.fillStream(img1, topDict, grayPixels(ScanImageW, ScanImageH, StackedTopSeed))
+	if topSMask {
+		w.fillStream(smask, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 6))
+	}
+	if gsObj != 0 {
+		w.fill(gsObj, fmt.Sprintf("<< /Type /ExtGState /ca %v >>", topFillAlpha))
+	}
+	return w.finish(cat)
+}
+
+// stackedInForm puts the occluding placement inside a Form XObject. Paint order
+// is only usable if it survives the recursion, and a form is the one place a
+// walk could plausibly lose it.
+func stackedInForm() []byte {
+	w := newWriter()
+	cat, pages, page, cont := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	img0, form, img1 := w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R /Fm0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img0, form, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf(
+		"q %d 0 0 %d 0 0 cm /Im0 Do Q\nq /Fm0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img0, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, StackedBaseSeed))
+	w.fillStream(form, fmt.Sprintf("/Type /XObject /Subtype /Form /BBox [0 0 %d %d]"+
+		" /Matrix [1 0 0 1 0 0] /Resources << /XObject << /Im1 %d 0 R >> >>",
+		PageWidthPt, PageHeightPt, img1),
+		[]byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im1 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img1, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, StackedTopSeed))
+	return w.finish(cat)
+}
+
+// mrc is the two-tier Google Books shape: a bitonal page-covering base plus a
+// smaller non-bitonal patch. The resource names are the ones that file uses.
+//
+// The measured trap is that the base can be blank while the patch carries every
+// word on the page, and nothing in the file says which. Byblos cannot tell those
+// apart without decoding pixels, so the shape itself diverts.
+func mrc() []byte {
+	w := newWriter()
+	cat, pages, page, cont := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	base, patch := w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /J2i0 %d 0 R /JXi0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, base, patch, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf(
+		"q %d 0 0 %d 0 0 cm /J2i0 Do Q\nq 353 0 0 615 12 2 cm /JXi0 Do Q\n",
+		PageWidthPt, PageHeightPt)))
+	w.fillRawStream(base, fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d"+
+		" /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode", ScanImageW, ScanImageH),
+		jbig2Payload())
+	w.fillStream(patch, imageDict(TileImageW, TileImageH), grayPixels(TileImageW, TileImageH, 7))
 	return w.finish(cat)
 }
 

@@ -43,8 +43,20 @@ const coverTolerancePt = 1.0
 // from zero before the image is treated as rotated or sheared.
 const skewTolerance = 1e-6
 
+// mrcPatchAreaFrac is how much of the page a non-bitonal placement must cover
+// before it counts as an MRC patch rather than a stamp or a logo. Google Books
+// patches cover about 84% of the page, so the floor only has to be clear of
+// noise; it is not a tuned number.
+const mrcPatchAreaFrac = 0.02
+
 // ExtractPageRaster returns the single page-covering raster of the given
 // 1-based page.
+//
+// A page may reach that through more than one placement. Scanner pipelines
+// routinely paint two page-covering images at the same matrix, the second
+// hiding the first; that page has one visible raster and this returns it. See
+// classify for the conditions, which are stricter than they look — a layer that
+// is not provably an opaque cover diverts.
 //
 // It returns an error wrapping ErrNotSingleRaster when the page is anything
 // else, and ErrUnsupportedImageCodec when the raster's codec is not decodable.
@@ -76,12 +88,13 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error) {
 		return nil, err
 	}
 
-	if reason := classify(p.CropBox, scan); reason != "" {
+	idx, reason := classify(p.CropBox, scan, d.ImageInfo)
+	if reason != "" {
 		countDivert(reason)
 		return nil, fmt.Errorf("%w: %s", ErrNotSingleRaster, reason)
 	}
 
-	id := scan.Images[0].ID
+	id := scan.Images[idx].ID
 	data, fileType, err := d.RawImage(id)
 	if err != nil {
 		// pdfcpu declines to render some filters by returning a nil reader;
@@ -112,8 +125,10 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error) {
 	return img, nil
 }
 
-// classify returns the reason a page cannot be treated as a single
-// page-covering raster, or "" when it can.
+// classify returns the index of the placement that is the page's raster, or the
+// reason the page cannot be treated as one. imageInfo resolves an image's
+// dictionary facts by placement ID; pdfdoc.Doc's ImageInfo method is the real
+// one.
 //
 // The order is deliberate: the first matching reason is the one reported, and
 // it should be the most informative. A born-digital page has both no image and
@@ -121,24 +136,60 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error) {
 //
 // The returned strings are the keys of the divert counters, so changing one
 // changes an operational metric. Do not rename them casually.
-func classify(page pdfdoc.Rect, s *content.Scan) string {
+func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.ImageInfo, bool)) (int, string) {
 	switch {
 	case len(s.Images) == 0:
-		return "no-image"
+		return 0, "no-image"
 	case s.TextOps > 0:
-		return "has-text"
-	case len(s.Images) > 1:
-		return "multiple-images"
+		return 0, "has-text"
 	case s.InlineImgs > 0:
-		return "inline-image"
+		return 0, "inline-image"
 	case s.PaintOps > 0:
-		return "vector-paint"
+		return 0, "vector-paint"
 	case s.ShadingOps > 0:
-		return "shading"
+		return 0, "shading"
 	case len(s.Unresolved) > 0:
-		return "unresolved-xobject"
+		return 0, "unresolved-xobject"
 	}
-	m := s.Images[0].CTM
+	if reason := mrcLayers(page, s.Images, imageInfo); reason != "" {
+		return 0, reason
+	}
+
+	// Scan.Images is in paint order, so the last placement is the one on top,
+	// and it is the only candidate: an earlier raster is not what the page
+	// shows, and a raster painted after the candidate would be lost by
+	// returning it.
+	top := len(s.Images) - 1
+	if reason := placementReason(s.Images[top], page); reason != "" {
+		// On a layered page the informative fact is that the layers did not
+		// reduce to one raster, not which geometry test the top layer failed.
+		// This is also what keeps genuine tiling reported as tiling.
+		if top > 0 {
+			return 0, "multiple-images"
+		}
+		return 0, reason
+	}
+	if top > 0 {
+		// 16,241 measured Internet Archive pages paint two page-covering images
+		// at the identical CTM, the second hiding the first. That reduces to one
+		// raster only while the top layer really is an opaque cover over
+		// everything below it.
+		if !opaqueCover(s.Images[top], imageInfo) {
+			return 0, "transparent-overlay"
+		}
+		for _, under := range s.Images[:top] {
+			if !contains(s.Images[top].Box, under.Box) {
+				return 0, "multiple-images"
+			}
+		}
+	}
+	return top, ""
+}
+
+// placementReason reports why a placement cannot stand as the page's raster, or
+// "" when it can.
+func placementReason(p content.Placement, page pdfdoc.Rect) string {
+	m := p.CTM
 	if math.Abs(m[1]) > skewTolerance || math.Abs(m[2]) > skewTolerance {
 		return "rotated-placement"
 	}
@@ -152,20 +203,79 @@ func classify(page pdfdoc.Rect, s *content.Scan) string {
 	if m[0] <= 0 || m[3] <= 0 {
 		return "flipped-placement"
 	}
-	if !covers(s.Images[0].Box, page) {
+	if !covers(p.Box, page) {
 		return "not-page-covering"
 	}
 	return ""
 }
 
+// opaqueCover reports whether p can be said to hide whatever is painted under
+// it. Three of the four ways it cannot are dictionary facts — /ImageMask,
+// /SMask, /Mask — and the fourth is the graphics state at the moment of
+// painting, which the walk recorded.
+//
+// An image whose dictionary could not be read is not opaque. Guessing the other
+// way is the one error here that returns a wrong page instead of a divert.
+func opaqueCover(p content.Placement, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
+	if !p.Opaque {
+		return false
+	}
+	info, ok := imageInfo(p.ID)
+	return ok && !info.ImageMask && !info.SMask && !info.Mask
+}
+
+// mrcLayers reports the two-tier MRC shape Google Books emits: a bitonal
+// page-covering base plus a smaller non-bitonal patch.
+//
+// It runs before the take-the-top rule and overrides it. On 153 measured pages
+// of one Internet Archive file the bitonal base is BLANK and the patch carries
+// every word on the page, and only decoding the pixels tells those apart from
+// the pages where the base carries the text. Either layer can be the document,
+// so neither is returned.
+//
+// Compositing the layers is a renderer's job, and byblos-divert established it
+// is not worth building for 0.78% of one corpus.
+func mrcLayers(page pdfdoc.Rect, imgs []content.Placement, imageInfo func(int) (pdfdoc.ImageInfo, bool)) string {
+	pageArea := area(content.Box{LLX: page.LLX, LLY: page.LLY, URX: page.URX, URY: page.URY})
+	if pageArea <= 0 {
+		return ""
+	}
+	var base, patch bool
+	for i, p := range imgs {
+		info, ok := imageInfo(p.ID)
+		if !ok {
+			continue
+		}
+		if info.BPC == 1 || info.ImageMask {
+			// A base is painted under something. A bitonal layer on top is a
+			// stencil over the raster below, which is a transparency question,
+			// not this one.
+			base = base || (i < len(imgs)-1 && covers(p.Box, page))
+			continue
+		}
+		patch = patch || area(p.Box)/pageArea > mrcPatchAreaFrac
+	}
+	if base && patch {
+		return "mrc-layers"
+	}
+	return ""
+}
+
+// contains reports whether outer covers inner, within tolerance.
+func contains(outer, inner content.Box) bool {
+	return outer.LLX <= inner.LLX+coverTolerancePt &&
+		outer.LLY <= inner.LLY+coverTolerancePt &&
+		outer.URX >= inner.URX-coverTolerancePt &&
+		outer.URY >= inner.URY-coverTolerancePt
+}
+
 // covers reports whether box contains the page box, within tolerance. An image
 // larger than the page is fine: it is simply cropped on display.
 func covers(b content.Box, page pdfdoc.Rect) bool {
-	return b.LLX <= page.LLX+coverTolerancePt &&
-		b.LLY <= page.LLY+coverTolerancePt &&
-		b.URX >= page.URX-coverTolerancePt &&
-		b.URY >= page.URY-coverTolerancePt
+	return contains(b, content.Box{LLX: page.LLX, LLY: page.LLY, URX: page.URX, URY: page.URY})
 }
+
+func area(b content.Box) float64 { return (b.URX - b.LLX) * (b.URY - b.LLY) }
 
 // divertClass maps a fine-grained classify reason to the coarse class stored in
 // PageProvenance.Diverted.

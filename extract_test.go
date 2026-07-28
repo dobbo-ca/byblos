@@ -3,6 +3,7 @@ package byblos
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -28,12 +29,38 @@ func TestExtractPageRasterSucceeds(t *testing.T) {
 	}
 }
 
+// Two page-covering placements at the identical CTM are one visible raster: the
+// second. Returning the first would be a silently wrong document, so the
+// assertion is on pixels, not on dimensions — both layers are the same size.
+func TestExtractPageRasterTakesTheOccludingLayer(t *testing.T) {
+	wantGray := corpus.FirstGray(corpus.StackedTopSeed)
+	if wantGray == corpus.FirstGray(corpus.StackedBaseSeed) {
+		t.Fatal("the two stacked layers share a first pixel; the assertion below would pass on either")
+	}
+	for _, name := range []string{"stacked", "stacked-in-form"} {
+		t.Run(name, func(t *testing.T) {
+			img, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, name)), 1)
+			if err != nil {
+				t.Fatalf("ExtractPageRaster() error = %v", err)
+			}
+			r, _, _, _ := img.At(0, 0).RGBA()
+			if got := uint8(r >> 8); got != wantGray {
+				t.Errorf("first pixel = %d; want %d (the top layer). %d is the occluded base",
+					got, wantGray, corpus.FirstGray(corpus.StackedBaseSeed))
+			}
+		})
+	}
+}
+
 func TestExtractPageRasterDiverts(t *testing.T) {
 	for _, tc := range []struct{ doc, reason string }{
 		{"born-digital", "no-image"},
 		{"overlay-text", "has-text"},
 		{"tiled", "multiple-images"},
 		{"overlay-vector", "vector-paint"},
+		{"stacked-smask", "transparent-overlay"},
+		{"stacked-alpha", "transparent-overlay"},
+		{"mrc", "mrc-layers"},
 	} {
 		t.Run(tc.doc, func(t *testing.T) {
 			data := corpusDoc(t, tc.doc)
@@ -122,17 +149,19 @@ func TestExtractPageRasterMalformed(t *testing.T) {
 // upgrade blind spot.
 func TestDivertClassCoversEveryReason(t *testing.T) {
 	want := map[string]string{
-		"no-image":           "not-single-raster",
-		"has-text":           "not-single-raster",
-		"multiple-images":    "not-single-raster",
-		"inline-image":       "not-single-raster",
-		"vector-paint":       "not-single-raster",
-		"shading":            "not-single-raster",
-		"unresolved-xobject": "not-single-raster",
-		"rotated-placement":  "not-single-raster",
-		"flipped-placement":  "not-single-raster",
-		"not-page-covering":  "not-single-raster",
-		"unsupported-codec":  "unsupported-codec",
+		"no-image":            "not-single-raster",
+		"has-text":            "not-single-raster",
+		"multiple-images":     "not-single-raster",
+		"inline-image":        "not-single-raster",
+		"vector-paint":        "not-single-raster",
+		"shading":             "not-single-raster",
+		"unresolved-xobject":  "not-single-raster",
+		"rotated-placement":   "not-single-raster",
+		"flipped-placement":   "not-single-raster",
+		"not-page-covering":   "not-single-raster",
+		"transparent-overlay": "not-single-raster",
+		"mrc-layers":          "not-single-raster",
+		"unsupported-codec":   "unsupported-codec",
 	}
 	for reason, class := range want {
 		if got := divertClass(reason); got != class {
@@ -147,35 +176,141 @@ func TestDivertClassCoversEveryReason(t *testing.T) {
 func TestClassify(t *testing.T) {
 	page := pdfdocRect(0, 0, 612, 792)
 	full := contentBox(0, 0, 612, 792)
+	half := contentBox(0, 0, 306, 792)
+	rightHalf := contentBox(306, 0, 612, 792)
+	patch := contentBox(12, 2, 365, 617)
+	speck := contentBox(0, 0, 60, 60) // 0.7% of the page, under the MRC floor
+
+	bitonal := pdfdoc.ImageInfo{BPC: 1}
+	grey := pdfdoc.ImageInfo{BPC: 8}
 
 	tests := []struct {
 		name string
 		scan *contentScan
-		want string
+		// info is the image-dictionary lookup; nil means every image is an
+		// ordinary opaque 8-bit raster.
+		info    func(int) (pdfdoc.ImageInfo, bool)
+		wantIdx int
+		want    string
 	}{
-		{"clean scan", &contentScan{Images: onePlacement(full)}, ""},
-		{"no image at all", &contentScan{}, "no-image"},
-		{"text present", &contentScan{Images: onePlacement(full), TextOps: 1}, "has-text"},
-		{"two images", &contentScan{Images: twoPlacements(full)}, "multiple-images"},
-		{"inline image", &contentScan{Images: onePlacement(full), InlineImgs: 1}, "inline-image"},
-		{"painted path", &contentScan{Images: onePlacement(full), PaintOps: 1}, "vector-paint"},
-		{"shading", &contentScan{Images: onePlacement(full), ShadingOps: 1}, "shading"},
-		{"unresolved name", &contentScan{Images: onePlacement(full), Unresolved: []string{"X"}}, "unresolved-xobject"},
-		{"rotated placement", &contentScan{Images: rotatedPlacement()}, "rotated-placement"},
+		{name: "clean scan", scan: &contentScan{Images: onePlacement(full)}},
+		{name: "no image at all", scan: &contentScan{}, want: "no-image"},
+		{name: "text present", scan: &contentScan{Images: onePlacement(full), TextOps: 1}, want: "has-text"},
+		{name: "inline image", scan: &contentScan{Images: onePlacement(full), InlineImgs: 1}, want: "inline-image"},
+		{name: "painted path", scan: &contentScan{Images: onePlacement(full), PaintOps: 1}, want: "vector-paint"},
+		{name: "shading", scan: &contentScan{Images: onePlacement(full), ShadingOps: 1}, want: "shading"},
+		{name: "unresolved name", scan: &contentScan{Images: onePlacement(full), Unresolved: []string{"X"}}, want: "unresolved-xobject"},
+		{name: "rotated placement", scan: &contentScan{Images: rotatedPlacement()}, want: "rotated-placement"},
 		// A negative scale term mirrors the raster without introducing any skew,
 		// so the off-diagonal check cannot see it, and UnitSquareBox reports the
 		// same page-covering box for all three. Only the sign of a and d tells
 		// these apart from a clean placement.
-		{"vertically flipped", &contentScan{Images: flippedPlacement(content.Matrix{612, 0, 0, -792, 0, 792})}, "flipped-placement"},
-		{"horizontally flipped", &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, 792, 612, 0})}, "flipped-placement"},
-		{"flipped on both axes", &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, -792, 612, 792})}, "flipped-placement"},
-		{"image covers only half the page", &contentScan{Images: onePlacement(contentBox(0, 0, 306, 792))}, "not-page-covering"},
-		{"half a point of slack is tolerated", &contentScan{Images: onePlacement(contentBox(0.5, 0.5, 611.5, 791.5))}, ""},
+		{name: "vertically flipped", scan: &contentScan{Images: flippedPlacement(content.Matrix{612, 0, 0, -792, 0, 792})}, want: "flipped-placement"},
+		{name: "horizontally flipped", scan: &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, 792, 612, 0})}, want: "flipped-placement"},
+		{name: "flipped on both axes", scan: &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, -792, 612, 792})}, want: "flipped-placement"},
+		{name: "image covers only half the page", scan: &contentScan{Images: onePlacement(half)}, want: "not-page-covering"},
+		{name: "half a point of slack is tolerated", scan: &contentScan{Images: onePlacement(contentBox(0.5, 0.5, 611.5, 791.5))}},
+
+		// The measured Internet Archive shape.
+		{
+			name:    "stacked pair takes the top",
+			scan:    &contentScan{Images: layers(placement(1, full, true), placement(2, full, true))},
+			wantIdx: 1,
+		},
+		{
+			name:    "three stacked layers take the last",
+			scan:    &contentScan{Images: layers(placement(1, full, true), placement(2, full, true), placement(3, full, true))},
+			wantIdx: 2,
+		},
+		// Genuine tiling, which the relaxation must not swallow.
+		{
+			name: "side-by-side rasters divert",
+			scan: &contentScan{Images: layers(placement(1, half, true), placement(2, rightHalf, true))},
+			want: "multiple-images",
+		},
+		{
+			name: "a base the top does not contain diverts",
+			scan: &contentScan{Images: layers(placement(1, contentBox(-20, -20, 632, 812), true), placement(2, full, true))},
+			want: "multiple-images",
+		},
+		{
+			name: "a stamp painted over the cover diverts",
+			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, speck, true))},
+			want: "multiple-images",
+		},
+		// Transparency: the occlusion argument needs the top layer to be opaque.
+		{
+			name: "a top painted under transparency cannot be assumed to occlude",
+			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, full, false))},
+			want: "transparent-overlay",
+		},
+		{
+			name: "a top with an /SMask diverts",
+			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, full, true))},
+			info: facts(map[int]pdfdoc.ImageInfo{1: grey, 2: {BPC: 8, SMask: true}}),
+			want: "transparent-overlay",
+		},
+		{
+			name: "a top with a /Mask diverts",
+			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, full, true))},
+			info: facts(map[int]pdfdoc.ImageInfo{1: grey, 2: {BPC: 8, Mask: true}}),
+			want: "transparent-overlay",
+		},
+		{
+			// A stencil mask paints the fill colour through the mask, so what is
+			// under it shows through the unset bits.
+			name: "an image-mask top diverts",
+			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, full, true))},
+			info: facts(map[int]pdfdoc.ImageInfo{1: grey, 2: {ImageMask: true}}),
+			want: "transparent-overlay",
+		},
+		{
+			name: "an unreadable image dictionary is not assumed opaque",
+			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, full, true))},
+			info: facts(nil),
+			want: "transparent-overlay",
+		},
+		// The MRC guard. Google Books emits a bitonal page-covering base plus a
+		// smaller non-bitonal patch, and on 153 measured pages the base is blank.
+		{
+			name: "a bitonal base with a non-bitonal patch diverts",
+			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, patch, true))},
+			info: facts(map[int]pdfdoc.ImageInfo{1: bitonal, 2: grey}),
+			want: "mrc-layers",
+		},
+		{
+			// The guard runs first on purpose: this page would otherwise reduce
+			// to its top layer, and the base could be the only thing carrying
+			// content.
+			name: "the guard beats the take-the-top rule",
+			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, full, true))},
+			info: facts(map[int]pdfdoc.ImageInfo{1: bitonal, 2: grey}),
+			want: "mrc-layers",
+		},
+		{
+			name: "a bitonal page-covering raster alone is not an MRC page",
+			scan: &contentScan{Images: onePlacement(full)},
+			info: facts(map[int]pdfdoc.ImageInfo{1: bitonal}),
+		},
+		{
+			name: "a non-bitonal speck is too small to be an MRC patch",
+			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, speck, true))},
+			info: facts(map[int]pdfdoc.ImageInfo{1: bitonal, 2: grey}),
+			want: "multiple-images",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := classify(page, tc.scan); got != tc.want {
-				t.Errorf("classify() = %q; want %q", got, tc.want)
+			info := tc.info
+			if info == nil {
+				info = plainFacts
+			}
+			idx, got := classify(page, tc.scan, info)
+			if got != tc.want {
+				t.Fatalf("classify() reason = %q; want %q", got, tc.want)
+			}
+			if got == "" && idx != tc.wantIdx {
+				t.Errorf("classify() index = %d; want %d", idx, tc.wantIdx)
 			}
 		})
 	}
@@ -191,15 +326,34 @@ func contentBox(llx, lly, urx, ury float64) content.Box {
 	return content.Box{LLX: llx, LLY: lly, URX: urx, URY: ury}
 }
 
-func onePlacement(b content.Box) []content.Placement {
-	return []content.Placement{{
-		Name: "Im0", ID: 1, Box: b,
+// placement derives the CTM from the box the way the walker does, so a case
+// cannot accidentally describe a geometry the two disagree about.
+func placement(id int, b content.Box, opaque bool) content.Placement {
+	return content.Placement{
+		Name: fmt.Sprintf("Im%d", id), ID: id, Box: b, Opaque: opaque,
 		CTM: content.Matrix{b.URX - b.LLX, 0, 0, b.URY - b.LLY, b.LLX, b.LLY},
-	}}
+	}
 }
 
-func twoPlacements(b content.Box) []content.Placement {
-	return append(onePlacement(b), onePlacement(b)...)
+func onePlacement(b content.Box) []content.Placement {
+	return layers(placement(1, b, true))
+}
+
+// layers spells out that the arguments are in paint order: the last one is on
+// top.
+func layers(p ...content.Placement) []content.Placement { return p }
+
+// plainFacts reports every image as an ordinary opaque 8-bit greyscale raster,
+// which is what the geometry cases are about.
+func plainFacts(int) (pdfdoc.ImageInfo, bool) { return pdfdoc.ImageInfo{BPC: 8}, true }
+
+// facts serves one dictionary per image id and reports anything else as
+// unknown, which is itself a case worth testing.
+func facts(m map[int]pdfdoc.ImageInfo) func(int) (pdfdoc.ImageInfo, bool) {
+	return func(id int) (pdfdoc.ImageInfo, bool) {
+		info, ok := m[id]
+		return info, ok
+	}
 }
 
 // flippedPlacement builds a placement from m and derives its Box the way the

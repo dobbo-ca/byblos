@@ -145,6 +145,14 @@ func main() {
 					if len(f) < len(hdr) {
 						continue
 					}
+					// pdfimages lists a soft mask as a row of its own, type
+					// "smask". Byblos counts paintings of image XObjects, and a
+					// soft mask is never painted on its own, so keeping those
+					// rows would make the two tools disagree about a document
+					// they both read correctly.
+					if i, ok := col["type"]; ok && i < len(f) && f[i] != "image" {
+						continue
+					}
 					at := func(k string) int {
 						i, ok := col[k]
 						if !ok || i >= len(f) {
