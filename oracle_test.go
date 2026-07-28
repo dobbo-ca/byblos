@@ -170,7 +170,7 @@ func TestExtractedRasterMatchesPdfimages(t *testing.T) {
 			continue
 		}
 		for _, rr := range want.Rasters {
-			img, err := ExtractPageRaster(bytes.NewReader(d.Data), rr.Page)
+			pr, err := ExtractPageRaster(bytes.NewReader(d.Data), rr.Page)
 			if errors.Is(err, ErrNotSingleRaster) || errors.Is(err, ErrUnsupportedImageCodec) {
 				t.Logf("%s page %d: diverted, no disagreement with poppler (%v)", d.Name, rr.Page, err)
 				continue
@@ -180,12 +180,12 @@ func TestExtractedRasterMatchesPdfimages(t *testing.T) {
 					d.Name, rr.Page, err, rr.Width, rr.Height)
 				continue
 			}
-			if b := img.Bounds(); b.Dx() != rr.Width || b.Dy() != rr.Height {
+			if b := pr.Image.Bounds(); b.Dx() != rr.Width || b.Dy() != rr.Height {
 				t.Errorf("%s page %d: raster %dx%d; pdfimages %dx%d",
 					d.Name, rr.Page, b.Dx(), b.Dy(), rr.Width, rr.Height)
 				continue
 			}
-			if got := pixelHash(img); got != rr.Pixels {
+			if got := pixelHash(pr.Image); got != rr.Pixels {
 				t.Errorf("%s page %d: pixels %s; pdfimages %s", d.Name, rr.Page, got, rr.Pixels)
 			}
 			compared++

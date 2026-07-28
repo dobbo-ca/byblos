@@ -120,7 +120,18 @@ func Inspect(r io.ReadSeeker) ([]PageInfo, error)
 // tiled rasters, vector content, or image-plus-overlay.
 var ErrNotSingleRaster = errors.New("byblos: page is not a single page-covering raster")
 
-func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error)
+// PageRaster is the raster and where it sits. byb-b1.3 measured 132 pages
+// whose raster is placed at its own resolution on a nominal page box and does
+// not fill it; those pages extract, so the caller has to be able to tell.
+type PageRaster struct {
+    Image  image.Image
+    Bounds image.Rectangle // where the raster lands, in points
+    Page   image.Rectangle // the page box, in points
+}
+
+func (p PageRaster) CoversPage() bool
+
+func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error)
 
 // --- codecs ---
 

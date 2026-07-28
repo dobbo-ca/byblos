@@ -85,8 +85,39 @@ const mrcPatchAreaFrac = 0.02
 // prevalence measurement used.
 const mrcBaseAreaFrac = 0.90
 
-// ExtractPageRaster returns the single page-covering raster of the given
-// 1-based page.
+// PageRaster is a page's raster and where it sits on the page.
+//
+// It exists because the raster is not always the whole page. byb-b1.3 measured
+// 132 pages across 17 files whose raster is placed at its own resolution on a
+// nominal Letter box — 2384x3321 pixels at 302 DPI is 568.37 x 791.76 points on
+// a 612x792 MediaBox — and those pages extract. Returning a bare image.Image
+// for them would quietly hand a caller 91.74% of a page as if it were the page.
+//
+// Bounds and Page are both in PDF default user space: points, origin
+// lower-left, y increasing upward, the same convention as PageInfo.Bounds.
+// image.Rectangle is used only as a convenient integer rectangle — do not read
+// it as screen coordinates.
+//
+// The residual affine of a deskewed placement (byb-b1.2) is not here; it is on
+// ImageRef.Placement, reached through Inspect. byb-b5.1 designs the stored form
+// of both.
+type PageRaster struct {
+	Image  image.Image
+	Bounds image.Rectangle // where the raster lands
+	Page   image.Rectangle // the page's CropBox
+}
+
+// CoversPage reports whether the raster fills the page box. When it is false
+// the caller is holding the scanned area, not the MediaBox, and the difference
+// between Bounds and Page is the part of the page the scan does not cover.
+//
+// Byblos does not pad the raster out to the page. Synthesising pixels that were
+// never scanned is the same kind of lie as resampling a deskewed raster to
+// straighten it, and on a bilevel JBIG2 scan it would mean decoding and
+// re-encoding the very pages the lossless promise exists for.
+func (p PageRaster) CoversPage() bool { return p.Page.In(p.Bounds) }
+
+// ExtractPageRaster returns the single raster of the given 1-based page.
 //
 // A page may reach that through more than one placement. Scanner pipelines
 // routinely paint two page-covering images at the same matrix, the second
@@ -117,6 +148,14 @@ const mrcBaseAreaFrac = 0.90
 // hide diverts. Nothing is filled, scan-converted or composited to decide this
 // — only painting order and a bounding box.
 //
+// Coverage is not a condition at all when the page has one raster and nothing
+// else. Every other arm of classify has already established that no text, path,
+// shading, inline image or unresolved XObject marks the page, so nothing can
+// put ink outside the placement and that raster IS the page, at any coverage.
+// byb-b1.3 measured 132 such pages; on every one of them the region outside the
+// placement held zero content operators. What the caller gets told is the
+// geometry — PageRaster.CoversPage — not a divert.
+//
 // Past the tolerance the page diverts, and byb-b1.2 settled that this includes
 // the two cases a caller could correct exactly, a quarter turn and a mirror.
 // Recording the affine does weaken the older argument that the caller has no
@@ -124,7 +163,7 @@ const mrcBaseAreaFrac = 0.90
 // image.Image is consumed — OCR, thumbnails, human review — by code that never
 // reads provenance, and a sideways or mirrored raster is wrong there in a way a
 // fraction of a degree is not.
-func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error) {
+func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 	countAttempt()
 
 	d, err := pdfdoc.Open(r)
@@ -149,8 +188,8 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNotSingleRaster, reason)
 	}
 
-	id := scan.Images[idx].ID
-	data, fileType, err := d.RawImage(id)
+	placement := scan.Images[idx]
+	data, fileType, err := d.RawImage(placement.ID)
 	if err != nil {
 		// pdfcpu declines to render some filters by returning a nil reader;
 		// pdfdoc turns that into ErrUnsupportedCodec. That is a divert (the page
@@ -177,7 +216,11 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error) {
 		return nil, fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err)
 	}
 	countExtracted()
-	return img, nil
+	return &PageRaster{
+		Image:  img,
+		Bounds: boxRect(placement.Box),
+		Page:   rectOf(p.CropBox),
+	}, nil
 }
 
 // classify returns the index of the placement that is the page's raster, or the
@@ -236,7 +279,7 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 	// shows, and a raster painted after the candidate would be lost by
 	// returning it.
 	top := len(s.Images) - 1
-	if reason := placementReason(s.Images[top], page); reason != "" {
+	if reason := placementReason(s.Images[top]); reason != "" {
 		// On a layered page the informative fact is that the layers did not
 		// reduce to one raster, not which geometry test the top layer failed.
 		// This is also what keeps genuine tiling reported as tiling.
@@ -245,7 +288,29 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 		}
 		return 0, reason
 	}
+
+	// A lone raster is not asked to cover the page, and byb-b1.3 is why.
+	// 132 measured pages across 17 files place the raster at its own resolution
+	// on a nominal box — 302, 300, 400 DPI, a round number in every dominant
+	// file — and fall short of it. ia-DTIC_ADA383635.pdf p40 covers 91.74% and
+	// leaves a 43.6 point blank strip. Raising coverTolerancePt does not reach
+	// them and the bead measured that too: 1.0 -> 2.0pt buys 7 pages, and
+	// swallowing 90% of the bucket needs about 56pt, which is not a tolerance.
+	//
+	// What reaches them is not a tolerance at all. Every arm above has already
+	// established there is no inked text, no path, no shading, no inline image
+	// and no unresolved XObject anywhere in the stream, so nothing can mark the
+	// page outside the placement and that raster IS the page, whatever fraction
+	// of the box it occupies. On all 132 measured pages the region outside the
+	// placement held zero content operators. The caller learns the geometry from
+	// PageRaster.CoversPage rather than losing the page to a divert.
 	if top > 0 {
+		// That argument does not extend to a stack: an under-layer reaching past
+		// the top one is exactly the ink it says cannot exist. A layered page
+		// still has to be covered.
+		if !covers(s.Images[top].Box, page) {
+			return 0, "multiple-images"
+		}
 		// 16,241 measured Internet Archive pages paint two page-covering images
 		// at the identical CTM, the second hiding the first. That reduces to one
 		// raster only while the top layer really is an opaque cover over
@@ -264,7 +329,11 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 
 // placementReason reports why a placement cannot stand as the page's raster, or
 // "" when it can.
-func placementReason(p content.Placement, page pdfdoc.Rect) string {
+//
+// Everything it asks is about orientation, and nothing about size. Coverage
+// used to be the third test here and byb-b1.3 removed it; classify explains
+// where that went and why a stack still needs it.
+func placementReason(p content.Placement) string {
 	m := p.CTM
 	// A sub-degree rotation here is scanner deskew, and the raster underneath it
 	// is the raw skewed scan: the page is one page-covering raster and extracts,
@@ -281,9 +350,6 @@ func placementReason(p content.Placement, page pdfdoc.Rect) string {
 	// zero-scale placement, leaving a > 0 and d > 0 for everything downstream.
 	if m[0] <= 0 || m[3] <= 0 {
 		return "flipped-placement"
-	}
-	if !covers(p.Box, page) {
-		return "not-page-covering"
 	}
 	return ""
 }
