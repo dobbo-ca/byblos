@@ -97,6 +97,7 @@ func All() []Doc {
 		{"stacked-smask", "the occluding image carries an /SMask, so it cannot be assumed to hide what is below: must divert", stackedPair(true, 0)},
 		{"stacked-alpha", "the occluding image is painted under /ca 0.5: must divert", stackedPair(false, 0.5)},
 		{"mrc", "bitonal page-covering base plus a smaller non-bitonal patch: must divert", mrc()},
+		{"mrc-inset-base", "the MRC shape with the placements Google Books really emits: the base falls short of the page box on every edge", mrcInsetBase()},
 		{"malformed", "the scan document truncated mid-body", malformed()},
 	}
 }
@@ -519,6 +520,57 @@ func mrc() []byte {
 		jbig2Payload())
 	w.fillStream(patch, imageDict(TileImageW, TileImageH), grayPixels(TileImageW, TileImageH, 7))
 	return w.finish(cat)
+}
+
+// mrcInsetBase is the same two-tier shape as mrc, with the placements the
+// measured file really uses. The content stream is verbatim from p105 of
+// ia-municipaldocume00masgoog.pdf, one of the 153 pages whose bitonal base is
+// blank while the JPEG 2000 patch carries every word:
+//
+//	q /GS1 gs 400.080017 0 0 615.600037 9.959999 1.559990 cm /J2i0 Do Q
+//	q /GS1 gs 354.239990 0 0 615.359985 11.879999 1.799990 cm /JXi0 Do Q
+//
+// The difference from mrc, and the whole reason this document exists: the base
+// is placed at its own resolution and falls about 10 points short of the page
+// box on every edge. It covers 94.7% of the page and the patch 83.8%, matching
+// the measurement, but a page-covering test built on covers() rejects it. A
+// guard that recognises only mrc's idealised full-page base is dead code on the
+// file it was written for.
+//
+// The page box is 420x619, the size at which those placements reproduce the
+// measured coverage. The rasters are Flate rather than JBIG2 and JPEG 2000 on
+// purpose: real codecs divert as unsupported-codec whatever classify decided,
+// and that would mask a classification regression rather than expose it. The
+// base is blank, as p105's is.
+func mrcInsetBase() []byte {
+	const (
+		pageW, pageH   = 420, 619
+		baseW, baseH   = 400, 616 // 1 bpc, blank; the real one is 3334x5130
+		patchW, patchH = 369, 641 // 8 bpc; the real one is 738x1282
+	)
+	w := newWriter()
+	cat, pages, page, cont := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	base, patch := w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /ExtGState << /GS1 << /Type /ExtGState /CA 1 /ca 1 >> >>"+
+		" /XObject << /J2i0 %d 0 R /JXi0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, pageW, pageH, base, patch, cont))
+	w.fillStream(cont, "", []byte(
+		"q /GS1 gs 400.080017 0 0 615.600037 9.959999 1.559990 cm /J2i0 Do Q\n"+
+			"q /GS1 gs 354.239990 0 0 615.359985 11.879999 1.799990 cm /JXi0 Do Q\n"))
+	w.fillStream(base, fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d"+
+		" /ColorSpace /DeviceGray /BitsPerComponent 1", baseW, baseH), whitePixels(baseW, baseH))
+	w.fillStream(patch, imageDict(patchW, patchH), grayPixels(patchW, patchH, 9))
+	return w.finish(cat)
+}
+
+// whitePixels returns an all-white 1-bit-per-component raster: the blank base.
+// Rows are padded to a byte boundary (ISO 32000-1 section 8.9.5.1), and a set
+// bit in DeviceGray is white.
+func whitePixels(w, h int) []byte {
+	return bytes.Repeat([]byte{0xFF}, (w+7)/8*h)
 }
 
 // malformed truncates the scan document mid-body, which is what a partial

@@ -85,6 +85,7 @@ func TestExtractPageRasterDiverts(t *testing.T) {
 		{"stacked-smask", "transparent-overlay"},
 		{"stacked-alpha", "transparent-overlay"},
 		{"mrc", "mrc-layers"},
+		{"mrc-inset-base", "mrc-layers"},
 	} {
 		t.Run(tc.doc, func(t *testing.T) {
 			data := corpusDoc(t, tc.doc)
@@ -204,6 +205,10 @@ func TestClassify(t *testing.T) {
 	rightHalf := contentBox(306, 0, 612, 792)
 	patch := contentBox(12, 2, 365, 617)
 	speck := contentBox(0, 0, 60, 60) // 0.7% of the page, under the MRC floor
+	// The base as Google Books actually places it: short of the page box on
+	// every edge, covering 94.8% of it. covers() rejects this at a whole 14.5
+	// points of shortfall, which is why the guard measures area instead.
+	insetBase := contentBox(14.5, 2, 597.5, 790)
 
 	bitonal := pdfdoc.ImageInfo{BPC: 1}
 	grey := pdfdoc.ImageInfo{BPC: 8}
@@ -311,6 +316,16 @@ func TestClassify(t *testing.T) {
 			// content.
 			name: "the guard beats the take-the-top rule",
 			scan: &contentScan{Images: layers(placement(1, full, true), placement(2, full, true))},
+			info: facts(map[int]pdfdoc.ImageInfo{1: bitonal, 2: grey}),
+			want: "mrc-layers",
+		},
+		{
+			// The measured geometry, not an idealised one. On every one of the
+			// 153 pages the base is placed at its own resolution and falls short
+			// of the page box, so a base test built on covers() never fires and
+			// the guard is dead in the field it was written for.
+			name: "a base placed short of the page box is still an MRC base",
+			scan: &contentScan{Images: layers(placement(1, insetBase, true), placement(2, patch, true))},
 			info: facts(map[int]pdfdoc.ImageInfo{1: bitonal, 2: grey}),
 			want: "mrc-layers",
 		},
