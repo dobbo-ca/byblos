@@ -11,7 +11,7 @@ func wantNames() []string {
 		"born-digital", "scan", "scan-rotated", "scan-in-form",
 		"tiled", "overlay-text", "overlay-vector", "mixed",
 		"dup-raster", "jbig2", "stacked", "stacked-in-form",
-		"stacked-smask", "stacked-alpha", "mrc", "malformed",
+		"stacked-smask", "stacked-alpha", "mrc", "mrc-inset-base", "malformed",
 	}
 }
 

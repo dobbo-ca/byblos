@@ -197,6 +197,27 @@ func TestInspectReportsBitonalForOneBitImages(t *testing.T) {
 	}
 }
 
+// The point of the mrc-inset-base document is that its bitonal base is NOT
+// page-covering by the containment test, only by area. If it ever drifts to a
+// full-page base it stops testing anything the mrc document does not, and the
+// MRC guard's field geometry goes uncovered again.
+func TestInspectMRCInsetBaseIsShortOfThePageBox(t *testing.T) {
+	p := inspect(t, "mrc-inset-base")[0]
+	if len(p.Images) != 2 {
+		t.Fatalf("Images = %+v; want the bitonal base and its patch", p.Images)
+	}
+	base, patch := p.Images[0], p.Images[1]
+	if !base.Bitonal || patch.Bitonal {
+		t.Errorf("Bitonal = %v, %v; want a bitonal base under an 8-bit patch", base.Bitonal, patch.Bitonal)
+	}
+	if !base.Bounds.In(p.Bounds) || base.Bounds == p.Bounds {
+		t.Errorf("base Bounds = %v; want it strictly inside the page box %v", base.Bounds, p.Bounds)
+	}
+	if !patch.Bounds.In(base.Bounds) || patch.Bounds == base.Bounds {
+		t.Errorf("patch Bounds = %v; want it strictly inside the base's %v", patch.Bounds, base.Bounds)
+	}
+}
+
 // Both pages of dup-raster are page-covering scans, and Inspect must say so for
 // each independently.
 func TestInspectDupRasterReportsBothPages(t *testing.T) {

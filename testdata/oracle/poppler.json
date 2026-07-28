@@ -106,6 +106,26 @@
       ],
       "has_text": false
     },
+    "mrc-inset-base": {
+      "pages": 1,
+      "page_width_pt": 420,
+      "page_height_pt": 619,
+      "images": [
+        {
+          "page": 1,
+          "width": 400,
+          "height": 616,
+          "bpc": 1
+        },
+        {
+          "page": 1,
+          "width": 369,
+          "height": 641,
+          "bpc": 8
+        }
+      ],
+      "has_text": false
+    },
     "overlay-text": {
       "pages": 1,
       "page_width_pt": 612,

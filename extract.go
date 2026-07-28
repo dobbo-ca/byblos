@@ -49,6 +49,17 @@ const skewTolerance = 1e-6
 // noise; it is not a tuned number.
 const mrcPatchAreaFrac = 0.02
 
+// mrcBaseAreaFrac is how much of the page a bitonal placement must cover to be
+// the base layer of an MRC page.
+//
+// It is an area fraction and not covers(), because the measured bases are not
+// page-covering by that test: Google Books places the base at its own
+// resolution, so it falls about ten points short on every edge and covers 94.7%
+// of the page. A covers()-based test recognises only an idealised base and is
+// dead code on the file this guard exists for. 90% is the threshold the
+// prevalence measurement used.
+const mrcBaseAreaFrac = 0.90
+
 // ExtractPageRaster returns the single page-covering raster of the given
 // 1-based page.
 //
@@ -250,7 +261,7 @@ func mrcLayers(page pdfdoc.Rect, imgs []content.Placement, imageInfo func(int) (
 			// A base is painted under something. A bitonal layer on top is a
 			// stencil over the raster below, which is a transparency question,
 			// not this one.
-			base = base || (i < len(imgs)-1 && covers(p.Box, page))
+			base = base || (i < len(imgs)-1 && area(p.Box)/pageArea >= mrcBaseAreaFrac)
 			continue
 		}
 		patch = patch || area(p.Box)/pageArea > mrcPatchAreaFrac
