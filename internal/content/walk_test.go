@@ -17,6 +17,20 @@ func (e mapEnv) XObject(scope int, name string) (XObject, bool) {
 	return xo, ok
 }
 
+// mapEnv resolves no /ExtGState, so every state it reports is opaque. The
+// documents that care carry a gsEnv instead.
+func (e mapEnv) ExtGStateOpaque(scope int, name string) bool { return true }
+
+// gsEnv names the /ExtGState resources that introduce transparency. Everything
+// else is opaque, which is also how a real document behaves: a graphics state
+// that says nothing about /ca, /CA or /SMask leaves painting opaque.
+type gsEnv struct {
+	mapEnv
+	transparent map[string]bool
+}
+
+func (e gsEnv) ExtGStateOpaque(scope int, name string) bool { return !e.transparent[name] }
+
 func imageEnv(id int) mapEnv {
 	return mapEnv{{"Im0": {Image: true, ID: id}}}
 }
@@ -158,6 +172,70 @@ func TestWalkSeesTextInsideAForm(t *testing.T) {
 	}
 	if s.TextChars != 18 || s.TextOps != 1 {
 		t.Errorf("TextChars = %d, TextOps = %d; want 18, 1", s.TextChars, s.TextOps)
+	}
+}
+
+// Images is z-ordered: index 0 is painted first and the last index is on top.
+// Classification decides which layer is visible from that order alone, so the
+// order has to survive a Form XObject, which is the one place a walk could
+// plausibly reorder it.
+func TestWalkImagesAreInPaintOrder(t *testing.T) {
+	env := mapEnv{
+		{
+			"ImA": {Image: true, ID: 1},
+			"Fm0": {Content: []byte("/ImB Do"), Matrix: Identity, Scope: 1},
+			"ImC": {Image: true, ID: 3},
+		},
+		{"ImB": {Image: true, ID: 2}},
+	}
+	s, err := Walk([]byte("/ImA Do /Fm0 Do /ImC Do"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	var got []int
+	for _, pl := range s.Images {
+		got = append(got, pl.ID)
+	}
+	if len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Errorf("placement ids = %v; want [1 2 3], the order they are painted in", got)
+	}
+}
+
+// Placements are opaque by default and stop being so under an /ExtGState that
+// introduces transparency. Q restores the previous state, so the second
+// placement here is opaque again.
+func TestWalkRecordsGraphicsStateOpacity(t *testing.T) {
+	env := gsEnv{mapEnv{{"Im0": {Image: true, ID: 1}}}, map[string]bool{"GSa": true}}
+	s, err := Walk([]byte("q /GSa gs /Im0 Do Q /Im0 Do"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 2 {
+		t.Fatalf("Images = %+v; want two", s.Images)
+	}
+	if s.Images[0].Opaque {
+		t.Error("placement under /GSa reported Opaque; the state sets transparency")
+	}
+	if !s.Images[1].Opaque {
+		t.Error("placement after Q reported not Opaque; Q restores the graphics state")
+	}
+}
+
+// Transparency set outside a form applies to what the form paints.
+func TestWalkCarriesOpacityIntoForms(t *testing.T) {
+	env := gsEnv{mapEnv{
+		{"Fm0": {Content: []byte("/Im0 Do"), Matrix: Identity, Scope: 1}},
+		{"Im0": {Image: true, ID: 1}},
+	}, map[string]bool{"GSa": true}}
+	s, err := Walk([]byte("q /GSa gs /Fm0 Do Q"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	if s.Images[0].Opaque {
+		t.Error("a placement inside a form reported Opaque; the enclosing state is transparent")
 	}
 }
 

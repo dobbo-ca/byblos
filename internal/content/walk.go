@@ -65,11 +65,16 @@ type XObject struct {
 	Scope   int    // form only: the scope handle for its own resources
 }
 
-// Env resolves XObject resource names encountered during a walk. Scopes are
-// opaque handles into the caller's resource tree; the caller chooses the
-// numbering and Walk only passes them back.
+// Env resolves resource names encountered during a walk. Scopes are opaque
+// handles into the caller's resource tree; the caller chooses the numbering and
+// Walk only passes them back.
 type Env interface {
 	XObject(scope int, name string) (XObject, bool)
+	// ExtGStateOpaque reports whether the named /ExtGState leaves painting
+	// fully opaque: no /ca or /CA below 1 and no soft mask. A name that does
+	// not resolve must be reported as not opaque — a walk cannot vouch for a
+	// dictionary it could not read.
+	ExtGStateOpaque(scope int, name string) bool
 }
 
 // Placement is one painting of an image XObject.
@@ -78,11 +83,21 @@ type Placement struct {
 	ID   int
 	CTM  Matrix
 	Box  Box
+	// Opaque reports the graphics state at the moment of painting, and nothing
+	// else: no /ca, /CA or soft mask was in effect. The image's own /SMask,
+	// /Mask and /ImageMask are dictionary facts a walk never sees, so a caller
+	// deciding whether this placement hides what is under it has to check those
+	// separately.
+	Opaque bool
 }
 
 // Scan is what a content-stream walk observed, including everything reached
 // through Form XObjects.
 type Scan struct {
+	// Images is in paint order: index 0 is painted first and the last index
+	// lands on top. Form XObjects are walked where they are invoked, so a
+	// placement inside a form sits between the placements around the Do that
+	// reached it. Classification reads occlusion straight off this order.
 	Images     []Placement
 	TextChars  int      // bytes shown by Tj, TJ, ' and "
 	TextOps    int      // number of text-showing operators
@@ -111,18 +126,31 @@ const (
 // page-covering; revisit if the divert-rate instrumentation shows it matters.
 func Walk(src []byte, scope int, env Env) (*Scan, error) {
 	s := &Scan{}
-	if err := walk(src, scope, env, Identity, 0, s); err != nil {
+	if err := walk(src, scope, env, gstate{ctm: Identity, opaque: true}, 0, s); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func walk(src []byte, scope int, env Env, ctm Matrix, depth int, s *Scan) error {
+// gstate is the part of the PDF graphics state a walk tracks. q and Q save and
+// restore it as a unit, which is what the spec says and what a separate CTM
+// stack would get wrong for opacity.
+//
+// Known simplification: opacity only ever falls within a q...Q pair. An
+// /ExtGState that restores /ca to 1 after an earlier one lowered it leaves the
+// state reported as not opaque, so a page doing that diverts. No producer has
+// been seen to do it, and the error is in the safe direction.
+type gstate struct {
+	ctm    Matrix
+	opaque bool
+}
+
+func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 	if depth > maxFormDepth {
 		return fmt.Errorf("content: form XObject nesting deeper than %d", maxFormDepth)
 	}
 	l := NewLexer(src)
-	var stack []Matrix
+	var stack []gstate
 	var ops []Token
 	for {
 		tok, err := l.Next()
@@ -148,18 +176,22 @@ func walk(src []byte, scope int, env Env, ctm Matrix, depth int, s *Scan) error 
 
 		switch string(tok.Text) {
 		case "q":
-			stack = append(stack, ctm)
+			stack = append(stack, gs)
 		case "Q":
 			if n := len(stack); n > 0 {
-				ctm = stack[n-1]
+				gs = stack[n-1]
 				stack = stack[:n-1]
 			}
 		case "cm":
 			if m, ok := matrixOperands(ops); ok {
-				ctm = m.Mul(ctm)
+				gs.ctm = m.Mul(gs.ctm)
+			}
+		case "gs":
+			if len(ops) > 0 && ops[len(ops)-1].Kind == KindName {
+				gs.opaque = gs.opaque && env.ExtGStateOpaque(scope, string(ops[len(ops)-1].Text))
 			}
 		case "Do":
-			if err := doXObject(ops, scope, env, ctm, depth, s); err != nil {
+			if err := doXObject(ops, scope, env, gs, depth, s); err != nil {
 				return err
 			}
 		case "Tj", "'", "\"":
@@ -186,7 +218,7 @@ func walk(src []byte, scope int, env Env, ctm Matrix, depth int, s *Scan) error 
 	}
 }
 
-func doXObject(ops []Token, scope int, env Env, ctm Matrix, depth int, s *Scan) error {
+func doXObject(ops []Token, scope int, env Env, gs gstate, depth int, s *Scan) error {
 	if len(ops) == 0 || ops[len(ops)-1].Kind != KindName {
 		return nil
 	}
@@ -197,10 +229,13 @@ func doXObject(ops []Token, scope int, env Env, ctm Matrix, depth int, s *Scan) 
 		return nil
 	}
 	if xo.Image {
-		s.Images = append(s.Images, Placement{Name: name, ID: xo.ID, CTM: ctm, Box: ctm.UnitSquareBox()})
+		s.Images = append(s.Images, Placement{
+			Name: name, ID: xo.ID, CTM: gs.ctm, Box: gs.ctm.UnitSquareBox(), Opaque: gs.opaque,
+		})
 		return nil
 	}
-	return walk(xo.Content, xo.Scope, env, xo.Matrix.Mul(ctm), depth+1, s)
+	gs.ctm = xo.Matrix.Mul(gs.ctm)
+	return walk(xo.Content, xo.Scope, env, gs, depth+1, s)
 }
 
 // matrixOperands reads the six numbers a cm operator takes.

@@ -98,6 +98,21 @@ func TestInspectTiledReportsBothHalves(t *testing.T) {
 	}
 }
 
+// Both layers of a stacked page are real placements. Inspect reports what the
+// page contains; deciding that only the upper one is visible is classification's
+// job, not Inspect's.
+func TestInspectStackedReportsBothLayers(t *testing.T) {
+	p := inspect(t, "stacked")[0]
+	if len(p.Images) != 2 {
+		t.Fatalf("Images = %+v; want two", p.Images)
+	}
+	for i, img := range p.Images {
+		if img.Bounds != fullPage {
+			t.Errorf("layer %d Bounds = %v; want %v (both are page-covering)", i, img.Bounds, fullPage)
+		}
+	}
+}
+
 // The image lives inside a Form XObject, so its placement can only be found by
 // composing the form's /Matrix with the page CTM.
 func TestInspectSeesThroughAForm(t *testing.T) {

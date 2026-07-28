@@ -55,12 +55,19 @@ var ErrUnsupportedCodec = errors.New("byblos/pdfdoc: image codec cannot be rende
 type Rect struct{ LLX, LLY, URX, URY float64 }
 
 // ImageInfo describes an image XObject as its own dictionary declares it.
+//
+// SMask, Mask and ImageMask are the three ways an image can fail to be an
+// opaque rectangle of pixels. They are recorded as presence, not as content:
+// what the mask actually does needs a renderer, and for deciding whether this
+// image hides what is painted under it, "it has one" is the whole answer.
 type ImageInfo struct {
 	Name          string
 	ObjNr         int
-	Width, Height int // pixels
-	BPC           int // /BitsPerComponent; 0 when absent
-	ImageMask     bool
+	Width, Height int  // pixels
+	BPC           int  // /BitsPerComponent; 0 when absent
+	ImageMask     bool // /ImageMask: a stencil painted in the fill colour
+	SMask         bool // /SMask: a soft mask supplies per-pixel alpha
+	Mask          bool // /Mask: a stencil mask or a colour-key range
 }
 
 // Page is one page's geometry, content, and resource scope.
@@ -77,8 +84,9 @@ type Page struct {
 type Doc interface {
 	PageCount() int
 	Page(n int) (*Page, error)
-	// XObject implements content.Env.
+	// XObject and ExtGStateOpaque implement content.Env.
 	XObject(scope int, name string) (content.XObject, bool)
+	ExtGStateOpaque(scope int, name string) bool
 	// ImageInfo returns the dictionary facts for an image resolved by XObject,
 	// keyed by the ID that XObject returned.
 	ImageInfo(id int) (ImageInfo, bool)
@@ -178,7 +186,7 @@ func (d *doc) addScope(res types.Dict, parent int) int {
 }
 
 func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
-	obj, ok := d.lookupXObject(sc, name)
+	obj, ok := d.lookupResource(sc, "XObject", name)
 	if !ok {
 		return content.XObject{}, false
 	}
@@ -201,6 +209,8 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 			Height:    d.intEntry(sd.Dict, "Height"),
 			BPC:       d.intEntry(sd.Dict, "BitsPerComponent"),
 			ImageMask: d.boolEntry(sd.Dict, "ImageMask"),
+			SMask:     hasEntry(sd.Dict, "SMask"),
+			Mask:      hasEntry(sd.Dict, "Mask"),
 		}
 		// Keep the stream dictionary. RawImage renders from this rather than
 		// asking pdfcpu which objects a page uses, because that answer comes
@@ -232,14 +242,15 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 	return content.XObject{}, false
 }
 
-// lookupXObject walks the scope chain so a form that declares only /Font still
-// resolves images through its parent.
-func (d *doc) lookupXObject(sc int, name string) (types.Object, bool) {
+// lookupResource walks the scope chain so a form that declares only /Font still
+// resolves images through its parent. category is a resource dictionary key:
+// "XObject", "ExtGState".
+func (d *doc) lookupResource(sc int, category, name string) (types.Object, bool) {
 	for i := sc; i >= 0 && i < len(d.scopes); {
 		res := d.scopes[i].res
 		if res != nil {
-			if xod, err := d.ctx.XRefTable.DereferenceDict(res["XObject"]); err == nil && xod != nil {
-				if o, ok := xod.Find(name); ok {
+			if cat, err := d.ctx.XRefTable.DereferenceDict(res[category]); err == nil && cat != nil {
+				if o, ok := cat.Find(name); ok {
 					return o, true
 				}
 			}
@@ -250,6 +261,40 @@ func (d *doc) lookupXObject(sc int, name string) (types.Object, bool) {
 		}
 	}
 	return nil, false
+}
+
+// ExtGStateOpaque reports whether the named graphics state leaves painting
+// fully opaque.
+//
+// A name that does not resolve, or a value that is not a dictionary, is
+// reported as not opaque. That is the direction that costs a divert rather than
+// a wrong document: the caller uses this to decide whether an image hides what
+// is painted beneath it.
+func (d *doc) ExtGStateOpaque(sc int, name string) bool {
+	obj, ok := d.lookupResource(sc, "ExtGState", name)
+	if !ok {
+		return false
+	}
+	gs, ok := d.deref(obj).(types.Dict)
+	if !ok {
+		return false
+	}
+	// /ca is the non-stroking alpha and /CA the stroking one. An image is
+	// painted with /ca, but a state that sets either is not one to reason about
+	// occlusion from.
+	for _, key := range []string{"ca", "CA"} {
+		if v, ok := d.number(gs[key]); ok && v < 1 {
+			return false
+		}
+	}
+	// /SMask /None is how a graphics state says it has no soft mask. Anything
+	// else is a mask, and reading it would mean rendering it.
+	if sm, ok := gs.Find("SMask"); ok {
+		if n, isName := d.deref(sm).(types.Name); !isName || n.Value() != "None" {
+			return false
+		}
+	}
+	return true
 }
 
 // identify returns a stable id for an XObject: its PDF object number when it is
@@ -360,6 +405,14 @@ func (d *doc) dictEntry(dict types.Dict, key string) types.Dict {
 		return v
 	}
 	return nil
+}
+
+// hasEntry reports whether dict declares key at all. /SMask and /Mask are read
+// this way on purpose: an indirect reference, a stream and an array are all
+// "there is a mask", and dereferencing to learn which would say nothing more.
+func hasEntry(dict types.Dict, key string) bool {
+	_, ok := dict.Find(key)
+	return ok
 }
 
 func (d *doc) arrayEntry(dict types.Dict, key string) types.Array {
