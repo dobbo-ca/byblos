@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/dobbo-ca/byblos/internal/corpus"
 )
 
 func TestCapabilitiesIsSortedAndStable(t *testing.T) {
@@ -65,6 +67,26 @@ func TestProvenanceJSONRoundTrip(t *testing.T) {
 	}
 	if out.Pages[1].Diverted != "not-single-raster" {
 		t.Errorf("Pages[1].Diverted = %q; want \"not-single-raster\"", out.Pages[1].Diverted)
+	}
+}
+
+// byb-b1.2: a page whose raster was stored skewed keeps its placement matrix in
+// the record, because the raster is re-embedded as stored rather than
+// straightened. Six numbers, in PDF matrix order, through the same JSON the PDF
+// carries.
+func TestPageProvenanceCarriesThePlacement(t *testing.T) {
+	m := corpus.DeskewPlacement
+	in := PageProvenance{Applied: []string{"extract-raster"}, Placement: m[:]}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var out PageProvenance
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !slices.Equal(out.Placement, in.Placement) {
+		t.Errorf("Placement = %v; want %v (from %s)", out.Placement, in.Placement, raw)
 	}
 }
 

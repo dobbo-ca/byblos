@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -76,6 +77,40 @@ func TestExtractPageRasterExtractsUnderAnInvisibleTextLayer(t *testing.T) {
 	}
 }
 
+// byb-b1.2: 147 of the 159 off-axis placements measured on govdocs1 were
+// sub-degree scanner deskew, and projection-variance on four of them confirmed
+// the stored raster is the raw skewed scan with the correction in the placement
+// matrix. Such a page is one page-covering raster and must extract — and what
+// comes back is the raster as stored. Straightening it here would mean
+// resampling, and those rasters are bilevel JBIG2: interpolation would destroy
+// the lossless promise on exactly the pages Byblos most wants to serve.
+func TestExtractPageRasterKeepsADeskewedRasterAsStored(t *testing.T) {
+	got, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan-deskewed")), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster(scan-deskewed) error = %v", err)
+	}
+	// scan and scan-deskewed hold the same raster object; only the placement
+	// differs, so anything but pixel equality means the raster was rewritten.
+	want, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan")), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster(scan) error = %v", err)
+	}
+	if got.Bounds() != want.Bounds() {
+		t.Fatalf("raster bounds = %v; want %v", got.Bounds(), want.Bounds())
+	}
+	b := want.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			gr, gg, gb, ga := got.At(x, y).RGBA()
+			wr, wg, wb, wa := want.At(x, y).RGBA()
+			if gr != wr || gg != wg || gb != wb || ga != wa {
+				t.Fatalf("pixel (%d,%d) = %v; want %v — the deskewed raster was resampled, not returned as stored",
+					x, y, got.At(x, y), want.At(x, y))
+			}
+		}
+	}
+}
+
 func TestExtractPageRasterDiverts(t *testing.T) {
 	for _, tc := range []struct{ doc, reason string }{
 		{"born-digital", "no-image"},
@@ -86,6 +121,13 @@ func TestExtractPageRasterDiverts(t *testing.T) {
 		{"stacked-alpha", "transparent-overlay"},
 		{"mrc", "mrc-layers"},
 		{"mrc-inset-base", "mrc-layers"},
+		// byb-b1.2 settles these two deliberately: a quarter turn and a mirror are
+		// exactly correctable, and the affine is now recorded, but the returned
+		// image.Image is consumed — OCR, thumbnails, human review — before anyone
+		// reads provenance, and a sideways or mirrored page is wrong there in a way
+		// a fraction of a degree is not. See ExtractPageRaster's doc comment.
+		{"scan-quarter-turn", "rotated-placement"},
+		{"scan-mirrored", "flipped-placement"},
 	} {
 		t.Run(tc.doc, func(t *testing.T) {
 			data := corpusDoc(t, tc.doc)
@@ -198,6 +240,45 @@ func TestDivertClassCoversEveryReason(t *testing.T) {
 	}
 }
 
+// The bug byb-b1.2 records: the old gate compared m[1] and m[2] — placement
+// matrix entries, in points — against 1e-6. At the 560-point scale of a real
+// page that is an exact-zero test, roughly 1e-7 degrees, so whether a rotation
+// was tolerated depended on how large the raster was. An angle does not.
+func TestSkewDegreesIsScaleInvariant(t *testing.T) {
+	const deg = 0.5
+	r := deg * math.Pi / 180
+	for _, scale := range []float64{1, 72, 612, 5000} {
+		m := content.Matrix{
+			scale * math.Cos(r), scale * math.Sin(r),
+			-scale * math.Sin(r), scale * math.Cos(r),
+			0, 0,
+		}
+		if got := skewDegrees(m); math.Abs(got-deg) > 1e-9 {
+			t.Errorf("skewDegrees at scale %v = %v; want %v", scale, got, deg)
+		}
+	}
+}
+
+// The page byb-b1.2 was measured on. Its whole content stream is
+//
+//	q
+//	560.65283 -0.56462 0.76572 760.3374 14.97417 16.36581 cm
+//	/Im0 Do
+//	Q
+//
+// govdocs1/005393.pdf p91: no text, no paint, one image, and a deskew rotation
+// two orders of magnitude larger than the old tolerance could see.
+func TestSkewDegreesOnTheMeasuredPage(t *testing.T) {
+	m := content.Matrix{560.65283, -0.56462, 0.76572, 760.3374, 14.97417, 16.36581}
+	got := skewDegrees(m)
+	if math.Abs(got-0.0577) > 0.0005 {
+		t.Errorf("skewDegrees = %v degrees; the measured page is 0.0577", got)
+	}
+	if got > maxSkewDeg {
+		t.Errorf("skewDegrees = %v exceeds maxSkewDeg %v; the measured page still diverts", got, maxSkewDeg)
+	}
+}
+
 func TestClassify(t *testing.T) {
 	page := pdfdocRect(0, 0, 612, 792)
 	full := contentBox(0, 0, 612, 792)
@@ -233,13 +314,24 @@ func TestClassify(t *testing.T) {
 		{name: "shading", scan: &contentScan{Images: onePlacement(full), ShadingOps: 1}, want: "shading"},
 		{name: "unresolved name", scan: &contentScan{Images: onePlacement(full), Unresolved: []string{"X"}}, want: "unresolved-xobject"},
 		{name: "rotated placement", scan: &contentScan{Images: rotatedPlacement()}, want: "rotated-placement"},
+		// byb-b1.2: of 159 off-axis placements measured on govdocs1, 147 were
+		// scanner deskew, all but one under a degree, median 0.13. The raster is
+		// the raw skewed scan and the placement matrix carries the correction, so
+		// these pages are single page-covering rasters and must extract.
+		{name: "median scanner deskew", scan: &contentScan{Images: deskewedPlacement(0.13)}},
+		{name: "the widest deskew measured", scan: &contentScan{Images: deskewedPlacement(1.09)}},
+		{name: "a rotation exactly at the tolerance", scan: &contentScan{Images: deskewedPlacement(maxSkewDeg)}},
+		{name: "a rotation past the tolerance", scan: &contentScan{Images: deskewedPlacement(2.5)}, want: "rotated-placement"},
+		// A shear is not a rotation: the x axis is square to the page and the y
+		// axis is not. Checking only one axis would let it through as clean.
+		{name: "sheared placement", scan: &contentScan{Images: placementOf(content.Matrix{612, 0, 80, 792, 0, 0})}, want: "rotated-placement"},
 		// A negative scale term mirrors the raster without introducing any skew,
 		// so the off-diagonal check cannot see it, and UnitSquareBox reports the
 		// same page-covering box for all three. Only the sign of a and d tells
 		// these apart from a clean placement.
-		{name: "vertically flipped", scan: &contentScan{Images: flippedPlacement(content.Matrix{612, 0, 0, -792, 0, 792})}, want: "flipped-placement"},
-		{name: "horizontally flipped", scan: &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, 792, 612, 0})}, want: "flipped-placement"},
-		{name: "flipped on both axes", scan: &contentScan{Images: flippedPlacement(content.Matrix{-612, 0, 0, -792, 612, 792})}, want: "flipped-placement"},
+		{name: "vertically flipped", scan: &contentScan{Images: placementOf(content.Matrix{612, 0, 0, -792, 0, 792})}, want: "flipped-placement"},
+		{name: "horizontally flipped", scan: &contentScan{Images: placementOf(content.Matrix{-612, 0, 0, 792, 612, 0})}, want: "flipped-placement"},
+		{name: "flipped on both axes", scan: &contentScan{Images: placementOf(content.Matrix{-612, 0, 0, -792, 612, 792})}, want: "flipped-placement"},
 		{name: "image covers only half the page", scan: &contentScan{Images: onePlacement(half)}, want: "not-page-covering"},
 		{name: "half a point of slack is tolerated", scan: &contentScan{Images: onePlacement(contentBox(0.5, 0.5, 611.5, 791.5))}},
 
@@ -398,11 +490,24 @@ func facts(m map[int]pdfdoc.ImageInfo) func(int) (pdfdoc.ImageInfo, bool) {
 	}
 }
 
-// flippedPlacement builds a placement from m and derives its Box the way the
-// walker does. Deriving rather than hardcoding is the point: it shows the Box
-// really is page-covering, so classify cannot detect the mirror from geometry.
-func flippedPlacement(m content.Matrix) []content.Placement {
+// placementOf builds a placement from m and derives its Box the way the walker
+// does. Deriving rather than hardcoding is the point: it shows the Box really is
+// page-covering, so classify cannot tell these cases apart from geometry alone.
+func placementOf(m content.Matrix) []content.Placement {
 	return []content.Placement{{Name: "Im0", ID: 1, CTM: m, Box: m.UnitSquareBox()}}
+}
+
+// deskewedPlacement is a page-covering raster rotated by deg degrees, the way a
+// deskewing scanner writes one: the pixels are the raw scan and the rotation
+// lives in the placement matrix. The raster is the size of the page, so the
+// rotated box still covers it at the angles this tests.
+func deskewedPlacement(deg float64) []content.Placement {
+	r := deg * math.Pi / 180
+	return placementOf(content.Matrix{
+		612 * math.Cos(r), 612 * math.Sin(r),
+		-792 * math.Sin(r), 792 * math.Cos(r),
+		0, 0,
+	})
 }
 
 func rotatedPlacement() []content.Placement {
