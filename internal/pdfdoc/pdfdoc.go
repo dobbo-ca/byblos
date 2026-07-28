@@ -27,6 +27,10 @@
 //     an indirect /Resources on a Form XObject, so every dictionary read that
 //     feeds a Byblos type goes through the deref helpers at the bottom of this
 //     file.
+//   - pdfcpu's own page tree walk falls into that same trap: it reads /Kids with
+//     ArrayEntry, so a /Pages node holding an indirect /Kids looks childless and
+//     PageDict returns that node as the dictionary of every page, with no error.
+//     Open repairs the tree before anything walks it; see normalizePageTree.
 package pdfdoc
 
 import (
@@ -126,12 +130,64 @@ func Open(rs io.ReadSeeker) (Doc, error) {
 	if err := ctx.EnsurePageCount(); err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: page count: %w", err)
 	}
+	if root, err := ctx.XRefTable.Pages(); err == nil && root != nil {
+		normalizePageTree(ctx.XRefTable, *root, map[int]bool{})
+	}
 	return &doc{
 		ctx:     ctx,
 		images:  map[int]ImageInfo{},
 		streams: map[int]*types.StreamDict{},
 		nextID:  -1,
 	}, nil
+}
+
+// normalizePageTree replaces an indirect /Kids with the array it refers to,
+// throughout the page tree.
+//
+// ISO 32000-1 section 7.3.10 allows any object that is not a stream to be
+// indirect, and Google Books PDF Converter writes /Kids that way. pdfcpu reads
+// /Kids with types.Dict.ArrayEntry, which returns nil for an indirect reference
+// instead of following it, so such a node has no children as far as the walk is
+// concerned. The walk treats a childless node as the page it was looking for:
+// PageDict then returns the /Pages node itself for every page number, with no
+// error, and that dictionary has neither /MediaBox nor /Contents.
+//
+// Repairing at Open rather than reacting to the symptom in Page is deliberate.
+// A missing /MediaBox is only how the damage shows when the bad node is the
+// root; an intermediate /Pages node that happens to carry inheritable
+// attributes yields a page dict that looks entirely plausible and is silently
+// the wrong page.
+//
+// Rewriting the parsed dictionary is enough, and it is confined to this
+// in-memory context: pdfcpu re-reads the object from the same xref table on
+// every call, and Byblos never writes this context back out.
+func normalizePageTree(xt *model.XRefTable, ref types.IndirectRef, seen map[int]bool) {
+	objNr := ref.ObjectNumber.Value()
+	if seen[objNr] {
+		// A cycle, or a node reachable twice. pdfcpu rejects both when it walks
+		// the tree; this pass only has to avoid looping before it gets there.
+		return
+	}
+	seen[objNr] = true
+
+	d, err := xt.DereferenceDict(ref)
+	if err != nil || d == nil {
+		return
+	}
+	kids, ok := d.Find("Kids")
+	if !ok {
+		return // a leaf page
+	}
+	arr, err := xt.DereferenceArray(kids)
+	if err != nil || arr == nil {
+		return
+	}
+	d["Kids"] = arr
+	for _, k := range arr {
+		if kr, ok := k.(types.IndirectRef); ok {
+			normalizePageTree(xt, kr, seen)
+		}
+	}
 }
 
 func (d *doc) PageCount() int { return d.ctx.PageCount }

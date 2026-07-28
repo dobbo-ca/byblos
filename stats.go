@@ -8,8 +8,11 @@ import "sync"
 // The design of Byblos rests on the premise that a page which is not a single
 // page-covering raster is rare (design spec section 2). These counters are how
 // that premise is checked against reality rather than assumed. Export
-// DivertRate from your application; if it is not small, the premise is wrong
+// UnhandledRate from your application; if it is not small, the premise is wrong
 // and the design needs revisiting.
+//
+// Every attempt increments exactly one of Extracted, Diverted and Failed, so
+// those three always sum to Attempted.
 type ExtractCounters struct {
 	Attempted uint64
 	Extracted uint64
@@ -21,11 +24,33 @@ type ExtractCounters struct {
 // DivertRate is the fraction of attempted pages that diverted. Failures are
 // excluded from the numerator but not the denominator: a document Byblos could
 // not read is a different problem from one it read and declined.
+//
+// That makes DivertRate the wrong number to watch on its own, and byb-5kk is
+// the demonstration: a page-tree bug made 1,266 pages of a real archive sample
+// unreadable, and because every one of them landed in Failed, the defect pushed
+// the measured divert rate *down*. A whole document class became unprocessable
+// while the metric meant to detect exactly that moved in the reassuring
+// direction. Watch UnhandledRate; reach for this one to split the total.
 func (c ExtractCounters) DivertRate() float64 {
 	if c.Attempted == 0 {
 		return 0
 	}
 	return float64(c.Diverted) / float64(c.Attempted)
+}
+
+// UnhandledRate is the fraction of attempted pages that produced no raster,
+// whether Byblos declined them or could not read them at all.
+//
+// This is the premise check. It has no blind spot by construction — it is
+// 1 - Extracted/Attempted — so no outcome can grow without moving it, and no
+// change to the divert vocabulary can quietly stop counting a class of page.
+// Diverted and Failed remain readable side by side when the number is bad and
+// the question becomes which problem it is.
+func (c ExtractCounters) UnhandledRate() float64 {
+	if c.Attempted == 0 {
+		return 0
+	}
+	return float64(c.Diverted+c.Failed) / float64(c.Attempted)
 }
 
 var (

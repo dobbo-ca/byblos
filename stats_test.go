@@ -54,6 +54,47 @@ func TestExtractStatsCountsOutcomes(t *testing.T) {
 	if got, want := c.DivertRate(), 0.5; math.Abs(got-want) > 1e-9 {
 		t.Errorf("DivertRate() = %v; want %v", got, want)
 	}
+	if got, want := c.UnhandledRate(), 0.75; math.Abs(got-want) > 1e-9 {
+		t.Errorf("UnhandledRate() = %v; want %v (2 diverted and 1 failed of 4)", got, want)
+	}
+}
+
+// The metric half of byb-5kk. A whole document class that cannot be read at all
+// must move the number the design tells operators to watch. DivertRate does not
+// see it — that is deliberate, failures are a different problem from declines —
+// and it is why UnhandledRate exists.
+func TestUnhandledRateSeesFailuresThatDivertRateDoesNot(t *testing.T) {
+	ResetExtractStats()
+	bad := corpusDoc(t, "malformed")
+	for i := 0; i < 3; i++ {
+		if _, err := ExtractPageRaster(bytes.NewReader(bad), 1); err == nil {
+			t.Fatal("malformed: want an error")
+		}
+	}
+	c := ExtractStats()
+	if c.Failed != 3 || c.Diverted != 0 {
+		t.Fatalf("Failed = %d, Diverted = %d; want 3 and 0", c.Failed, c.Diverted)
+	}
+	if got := c.DivertRate(); got != 0 {
+		t.Errorf("DivertRate() = %v; want 0: no page was read and declined", got)
+	}
+	if got, want := c.UnhandledRate(), 1.0; math.Abs(got-want) > 1e-9 {
+		t.Errorf("UnhandledRate() = %v; want %v: not one page produced a raster", got, want)
+	}
+}
+
+// Extracted + Diverted + Failed == Attempted is what makes UnhandledRate free of
+// blind spots. A new outcome that forgets to increment one of them breaks here.
+func TestEveryAttemptLandsInExactlyOneOutcome(t *testing.T) {
+	ResetExtractStats()
+	for _, name := range []string{"scan", "tiled", "born-digital", "jbig2", "indirect-kids", "malformed"} {
+		data := corpusDoc(t, name)
+		_, _ = ExtractPageRaster(bytes.NewReader(data), 1)
+	}
+	c := ExtractStats()
+	if got := c.Extracted + c.Diverted + c.Failed; got != c.Attempted {
+		t.Errorf("Extracted+Diverted+Failed = %d; Attempted = %d", got, c.Attempted)
+	}
 }
 
 func TestExtractStatsSnapshotIsACopy(t *testing.T) {
@@ -70,10 +111,14 @@ func TestExtractStatsSnapshotIsACopy(t *testing.T) {
 	}
 }
 
-func TestDivertRateWithNoAttempts(t *testing.T) {
+func TestRatesWithNoAttempts(t *testing.T) {
 	ResetExtractStats()
-	if got := ExtractStats().DivertRate(); got != 0 {
+	c := ExtractStats()
+	if got := c.DivertRate(); got != 0 {
 		t.Errorf("DivertRate() with no attempts = %v; want 0", got)
+	}
+	if got := c.UnhandledRate(); got != 0 {
+		t.Errorf("UnhandledRate() with no attempts = %v; want 0", got)
 	}
 }
 

@@ -107,6 +107,43 @@ func TestOpenMultiPage(t *testing.T) {
 	}
 }
 
+// A /Pages node may hold its /Kids as an indirect reference, and Google Books
+// PDF Converter output does. pdfcpu reads /Kids with types.Dict.ArrayEntry,
+// which does not dereference, so such a node looks childless and PageDict
+// returns it — no /MediaBox, no /Contents — as the dictionary of every page.
+// Open repairs the tree; without that, both pages here fail with
+// "no dictionary or no MediaBox". See byb-5kk.
+func TestPageTreeWithIndirectKids(t *testing.T) {
+	d := open(t, "indirect-kids")
+	if got := d.PageCount(); got != 2 {
+		t.Fatalf("PageCount() = %d; want 2", got)
+	}
+	want := Rect{0, 0, corpus.PageWidthPt, corpus.PageHeightPt}
+	for n := 1; n <= 2; n++ {
+		p, err := d.Page(n)
+		if err != nil {
+			t.Fatalf("Page(%d) error = %v", n, err)
+		}
+		if p.MediaBox != want {
+			t.Errorf("page %d: MediaBox = %+v; want %+v", n, p.MediaBox, want)
+		}
+		if !strings.Contains(string(p.Content), "/Im0 Do") {
+			t.Errorf("page %d: Content = %q; want it to contain \"/Im0 Do\"", n, p.Content)
+		}
+		// The page's own /Resources is an indirect reference too, so a repair
+		// that fixed only /Kids would still resolve nothing here.
+		if _, ok := d.XObject(p.Scope, "Im0"); !ok {
+			t.Errorf("page %d: Im0 does not resolve in the page scope", n)
+		}
+	}
+	// Each page must resolve its own raster: returning the same dictionary for
+	// every page is exactly the bug, and it would pass every assertion above if
+	// the two pages shared an image.
+	if id1, id2 := image0(t, d, 1), image0(t, d, 2); id1 == id2 {
+		t.Errorf("both pages resolved to image id %d; want one image object each", id1)
+	}
+}
+
 func TestPageOutOfRange(t *testing.T) {
 	d := open(t, "scan")
 	for _, n := range []int{0, 2, -1} {

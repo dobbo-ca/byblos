@@ -5,6 +5,9 @@
 // number. Run it over a real archive sample before anyone argues from
 // intuition.
 //
+// Read the unhandled rate, not the divert rate: a page Byblos cannot read at
+// all is not a page it handled, and only the former counts both.
+//
 //	byblos-divert /path/to/pdfs
 package main
 
@@ -73,8 +76,9 @@ func main() {
 		_ = enc.Encode(struct {
 			Files, Pages, Unreadable int
 			byblos.ExtractCounters
-			DivertRate float64
-		}{files, pages, unreadable, c, c.DivertRate()})
+			DivertRate    float64
+			UnhandledRate float64
+		}{files, pages, unreadable, c, c.DivertRate(), c.UnhandledRate()})
 		return
 	}
 
@@ -84,6 +88,9 @@ func main() {
 	fmt.Printf("extracted   %d\n", c.Extracted)
 	fmt.Printf("diverted    %d  (%.2f%%)\n", c.Diverted, 100*c.DivertRate())
 	fmt.Printf("failed      %d\n", c.Failed)
+	// The headline number. Reporting the divert rate alone is what let byb-5kk
+	// hide 1,266 unreadable pages behind a reassuring percentage.
+	fmt.Printf("unhandled   %d  (%.2f%%)\n", c.Diverted+c.Failed, 100*c.UnhandledRate())
 	if len(c.Reasons) > 0 {
 		fmt.Println("reasons:")
 		keys := make([]string, 0, len(c.Reasons))
