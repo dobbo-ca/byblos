@@ -143,6 +143,7 @@ func All() []Doc {
 		{"stacked-alpha", "the occluding image is painted under /ca 0.5: must divert", stackedPair(false, 0.5)},
 		{"mrc", "bitonal page-covering base plus a smaller non-bitonal patch: must divert", mrc()},
 		{"mrc-inset-base", "the MRC shape with the placements Google Books really emits: the base falls short of the page box on every edge", mrcInsetBase()},
+		{"indirect-kids", "page tree whose /Kids is an indirect reference: both pages must still read", indirectKids()},
 		{"malformed", "the scan document truncated mid-body", malformed()},
 	}
 }
@@ -623,6 +624,49 @@ func mrcInsetBase() []byte {
 // bit in DeviceGray is white.
 func whitePixels(w, h int) []byte {
 	return bytes.Repeat([]byte{0xFF}, (w+7)/8*h)
+}
+
+// indirectKids is the page tree Google Books PDF Converter (rel 1 21/8/06)
+// emits, reduced to two pages. Three things about it are load-bearing, and all
+// three were measured on ia-revistadasocied03portgoog.pdf (byb-5kk):
+//
+//   - The /Pages node's /Kids is an indirect reference to the array object
+//     rather than the array itself. ISO 32000-1 section 7.3.10 permits any
+//     object that is not a stream to be indirect, so this is legal, and poppler
+//     reads these files without complaint.
+//   - Every page carries its own /MediaBox and an indirect /Resources.
+//   - The page tree is flat: one /Pages node with every page as a direct kid.
+//
+// The first of those is the regression this document guards. pdfcpu's page tree
+// walk reads /Kids with types.Dict.ArrayEntry, which returns nil rather than
+// dereferencing, so an unrepaired /Pages node looks like a childless leaf and
+// PageDict hands that node back as the dictionary of every page in the file.
+func indirectKids() []byte {
+	w := newWriter()
+	cat, pages, kids := w.reserve(), w.reserve(), w.reserve()
+	p1, res1, cont1, img1, annot := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	p2, res2, cont2, img2 := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	body := fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)
+
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids %d 0 R /Count 2 /Rotate 0 >>", kids))
+	w.fill(kids, fmt.Sprintf("[ %d 0 R %d 0 R ]", p1, p2))
+
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /Resources %d 0 R /Contents %d 0 R"+
+		" /MediaBox [ 0 0 %d %d ] /Annots [%d 0 R] >>",
+		pages, res1, cont1, PageWidthPt, PageHeightPt, annot))
+	w.fill(res1, fmt.Sprintf("<< /XObject << /Im0 %d 0 R >> >>", img1))
+	w.fillStream(cont1, "", []byte(body))
+	w.fillStream(img1, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	w.fill(annot, "<< /Type /Annot /Subtype /Square /Rect [ 0 0 0 0 ] /F 2 >>")
+
+	w.fill(p2, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /Resources %d 0 R /Contents %d 0 R"+
+		" /MediaBox [ 0 0 %d %d ] >>",
+		pages, res2, cont2, PageWidthPt, PageHeightPt))
+	w.fill(res2, fmt.Sprintf("<< /XObject << /Im0 %d 0 R >> >>", img2))
+	w.fillStream(cont2, "", []byte(body))
+	w.fillStream(img2, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 6))
+	return w.finish(cat)
 }
 
 // malformed truncates the scan document mid-body, which is what a partial
