@@ -78,14 +78,61 @@ func TestUpgradeCandidates(t *testing.T) {
 			current: []string{"ccitt-g4", "inspect", "jbig2-generic"},
 			want:    []string{"jbig2-generic"},
 		},
+		// --- a codec divert is a decoder problem, not a renderer problem ---
+		//
+		// byb-97q. A renderer cannot read a raster whose codec Byblos cannot
+		// decode, so nominating one for these pages recommends the largest
+		// piece of work in the Cadmus/Byblos family for a page that needs a
+		// decoder. Measured over the survey corpora, the page-covering raster
+		// on a scan-shaped page was undecodable on 56.9% of dc_random, 67.2%
+		// of commons and 91.3% of ia pages.
 		{
-			name: "unsupported-codec diverts are also render candidates",
+			name: "unsupported-codec is NOT a render candidate",
 			prov: &Provenance{
 				Capabilities: []string{"extract-raster", "inspect"},
 				Pages:        []PageProvenance{{Diverted: "unsupported-codec"}},
 			},
 			current: []string{"extract-raster", "inspect", "render"},
+			want:    nil,
+		},
+		{
+			name: "unsupported-codec nominates every decoder",
+			prov: &Provenance{
+				Capabilities: []string{"extract-raster", "inspect"},
+				Pages:        []PageProvenance{{Diverted: "unsupported-codec"}},
+			},
+			current: []string{"decode-jbig2", "decode-jpx", "decode-tiff", "extract-raster", "inspect", "render"},
+			want:    []string{"decode-jbig2", "decode-jpx", "decode-tiff"},
+		},
+		{
+			name: "not-single-raster nominates the renderer and no decoder",
+			prov: &Provenance{
+				Capabilities: []string{"extract-raster", "inspect"},
+				Pages:        []PageProvenance{{Diverted: "not-single-raster"}},
+			},
+			current: []string{"decode-jbig2", "decode-jpx", "decode-tiff", "extract-raster", "inspect", "render"},
 			want:    []string{"render"},
+		},
+		{
+			name: "a document carrying both divert classes wants both",
+			prov: &Provenance{
+				Capabilities: []string{"extract-raster", "inspect"},
+				Pages: []PageProvenance{
+					{Diverted: "not-single-raster"},
+					{Diverted: "unsupported-codec"},
+				},
+			},
+			current: []string{"decode-jbig2", "decode-jpx", "decode-tiff", "extract-raster", "inspect", "render"},
+			want:    []string{"decode-jbig2", "decode-jpx", "decode-tiff", "render"},
+		},
+		{
+			name: "a fully processed document wants no decoder",
+			prov: &Provenance{
+				Capabilities: []string{"extract-raster", "inspect"},
+				Pages:        []PageProvenance{{Applied: []string{"jbig2-generic"}}},
+			},
+			current: []string{"decode-jbig2", "decode-jpx", "decode-tiff", "extract-raster", "inspect"},
+			want:    nil,
 		},
 		{
 			name: "only the diverted page matters, not the handled ones",
@@ -148,7 +195,10 @@ func TestEveryCapabilityHasARule(t *testing.T) {
 // Every capability string named in FUTURE.md must already have a rule, so that
 // shipping one of them needs no change here.
 func TestFutureCapabilitiesHaveRules(t *testing.T) {
-	for _, c := range []string{"jbig2-symbol", "ccitt-g4", "render", "pdfa", "page-cleanup"} {
+	for _, c := range []string{
+		"jbig2-symbol", "ccitt-g4", "render", "pdfa", "page-cleanup",
+		"decode-jbig2", "decode-jpx", "decode-tiff",
+	} {
 		if _, ok := capabilityRules[c]; !ok {
 			t.Errorf("FUTURE.md capability %q has no rule in capabilityRules", c)
 		}

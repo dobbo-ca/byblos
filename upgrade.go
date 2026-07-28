@@ -28,10 +28,37 @@ var capabilityRules = map[string]func(*Provenance) bool{
 	// improves a document; it is only ever chosen deliberately (FUTURE.md).
 	"ccitt-g4": never,
 
-	// A renderer turns diverted pages into processable ones, and nothing else.
-	"render": anyPageDiverted("not-single-raster", "unsupported-codec"),
+	// A renderer turns pages Byblos understood but could not reduce to one
+	// page-covering raster into processable ones, and nothing else: tiled
+	// rasters, image-plus-vector-overlay, mixed content (FUTURE.md).
+	//
+	// "unsupported-codec" is deliberately NOT here (byb-97q). That class means
+	// the page was understood and its raster could not be *decoded*. A renderer
+	// cannot read those bytes either; a decoder can. Including it recommended
+	// the largest piece of work in the Cadmus/Byblos family for up to 91% of
+	// pages on an archive-shaped corpus.
+	"render": anyPageDiverted("not-single-raster"),
 
-	// Codec capabilities: gaining one does not improve a document that was
+	// Raster decoders. One capability per codec, because "which documents want
+	// a JPX decoder" and "which want a JBIG2 decoder" are different questions
+	// with very different answers by corpus — jpx dominates web-archive scans,
+	// jbig2 dominates document-conversion output.
+	//
+	// All three key on the same stored class, so today they nominate the same
+	// document set: PageProvenance.Diverted records only "unsupported-codec",
+	// not which codec it was. That is the existing conservative bias — a wasted
+	// re-run beats a hidden upgrade — and it is a record-format question, not a
+	// rule question (byb-z8j). The capability strings are separate now so that
+	// a finer record later needs no change to any caller.
+	//
+	// The names are "decode-<codec>" and not "<codec>-decode" on purpose:
+	// "jbig2-decode" would match the "jbig2-" prefix that page-cleanup below
+	// tests for.
+	"decode-jbig2": anyPageDiverted("unsupported-codec"),
+	"decode-jpx":   anyPageDiverted("unsupported-codec"),
+	"decode-tiff":  anyPageDiverted("unsupported-codec"),
+
+	// Output-side capabilities: gaining one does not improve a document that was
 	// already processed with it, and we cannot tell from the record whether a
 	// page that missed it had content it would have helped. Conservatively
 	// never - a false positive here means re-processing the whole archive.
