@@ -130,6 +130,7 @@ func All() []Doc {
 		{"tiled", "two half-page images: must divert", tiled()},
 		{"overlay-text", "page-covering image plus text inside a Form XObject: must divert", overlayText()},
 		{"overlay-vector", "page-covering image plus a stroked rectangle: must divert", overlayVector()},
+		{"background-wash", "page-covering image over a background wash painted first: must NOT divert", backgroundWash()},
 		{"invisible-text", "page-covering image under an invisible OCR layer (3 Tr): must NOT divert", ocrScan(ocrTextContent, "")},
 		{"invisible-text-in-form", "the OCR layer, and its 3 Tr, inside a Form XObject: must NOT divert", ocrScan("q /Fm0 Do Q\n", ocrTextContent)},
 		{"invisible-text-form-inherits", "3 Tr set by the page, the OCR layer shown inside a form: must NOT divert", ocrScan("q 3 Tr /Fm0 Do Q\n", ocrTextInheritedMode)},
@@ -390,6 +391,59 @@ func ocrScan(pageText, formText string) []byte {
 			" /Resources << /Font << /F1 %d 0 R >> >>", PageWidthPt, PageHeightPt, font),
 			[]byte(formText))
 	}
+	return w.finish(cat)
+}
+
+// backgroundWashContent is the shape byb-b1.5 measured: a full-page rectangle
+// filled in an explicit background colour, and then a page-covering raster
+// painted over it. 117 of the 126 pages in that bucket set a background fill
+// before the first Do — 90 white, 27 the PowerPoint slide colour.
+//
+// The operators are govdocs1/005697.pdf's entire 132-byte content stream, which
+// is identical on all 45 pages of that file:
+//
+//	/Cs6 cs 1 1 1 scn
+//	/GS1 gs
+//	0.029999 0.03009 610.5 791.94 re
+//	f
+//	0 0 0 scn
+//	q
+//	610.559937 0 0 792.000061 -0.000012 -0.000031 cm
+//	/Im1 Do
+//	Q
+//
+// Two numbers differ here. The wash is widened to 611.94 and the placement to
+// the full page, because the measured raster is 610.56 points wide on a 612
+// point MediaBox and so falls foul of covers() — that page is in byb-b1.3's
+// bucket, not this one, and a fixture that diverted for the other reason would
+// prove nothing about this one. The measured geometry is asserted directly in
+// TestClassifyOnTheMeasuredWashPage instead.
+const backgroundWashContent = "/Cs6 cs 1 1 1 scn\n" +
+	"/GS1 gs\n" +
+	"0.029999 0.03009 611.94 791.94 re\n" +
+	"f\n" +
+	"0 0 0 scn\n" +
+	"q\n" +
+	"612 0 0 792 0 0 cm\n" +
+	"/Im0 Do\n" +
+	"Q\n"
+
+func backgroundWash() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	// /Cs6 and /GS1 are declared so the stream references live resources, as the
+	// measured document does. Byblos resolves neither — it records the colour
+	// space by name and never reads an ExtGState — but poppler generates the
+	// differential golden from these same bytes, and an undefined resource is a
+	// difference in the fixture rather than in what is under test.
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> /ColorSpace << /Cs6 /DeviceRGB >>"+
+		" /ExtGState << /GS1 << /Type /ExtGState >> >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img, cont))
+	w.fillStream(cont, "", []byte(backgroundWashContent))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
 	return w.finish(cat)
 }
 

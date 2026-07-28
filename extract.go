@@ -16,10 +16,14 @@ import (
 )
 
 // ErrNotSingleRaster reports a page that is not one page-covering image:
-// tiled rasters, vector content, or image-plus-overlay. The wrapped message
-// names the specific reason. Callers divert such documents for review; design
-// spec section 2 explains why detecting rather than rendering is the whole
-// reason this project is tractable.
+// tiled rasters, visible vector content, or image-plus-overlay. The wrapped
+// message names the specific reason. Callers divert such documents for review;
+// design spec section 2 explains why detecting rather than rendering is the
+// whole reason this project is tractable.
+//
+// "Visible" is doing work in that sentence. A path painted before the raster
+// and inside its placement box marks nothing anyone can see, and byb-b1.5
+// measured 126 scan-shaped pages diverting on exactly that. See paintsHidden.
 var ErrNotSingleRaster = errors.New("byblos: page is not a single page-covering raster")
 
 // ErrUnsupportedImageCodec reports a page raster stored in a codec Byblos
@@ -105,6 +109,13 @@ const mrcBaseAreaFrac = 0.90
 // PageProvenance.Placement. Byblos does not straighten them: resampling a
 // bilevel raster to take out a tenth of a degree would break the lossless
 // promise on exactly the pages this library exists for.
+//
+// Vector paint is judged the same way: by what the content stream proves, not
+// by rendering it. A path painted before the raster and landing inside its
+// placement box is behind an opaque image and cannot be seen, so the page is
+// still one page-covering raster and still extracts. Paint the raster does not
+// hide diverts. Nothing is filled, scan-converted or composited to decide this
+// — only painting order and a bounding box.
 //
 // Past the tolerance the page diverts, and byb-b1.2 settled that this includes
 // the two cases a caller could correct exactly, a quarter turn and a mirror.
@@ -199,7 +210,17 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 		return 0, "has-text"
 	case s.InlineImgs > 0:
 		return 0, "inline-image"
-	case s.PaintOps > 0:
+	// Not every painted path is content. A background wash laid down before the
+	// raster and then covered by it is invisible, and byb-b1.5 measured 126
+	// scan-shaped pages diverting on exactly that: 117 of them set a background
+	// fill colour before the first Do. Only paint the raster does not hide
+	// diverts a page.
+	//
+	// The candidate is the top placement, for the reason given below where top
+	// is taken. Testing here rather than after the geometry checks keeps the
+	// reported reason the most informative one: a page carrying visible vector
+	// content says so, whatever else is also wrong with it.
+	case !paintsHidden(s.Images[len(s.Images)-1], s.Paints, imageInfo):
 		return 0, "vector-paint"
 	case s.ShadingOps > 0:
 		return 0, "shading"
@@ -325,6 +346,54 @@ func contains(outer, inner content.Box) bool {
 		outer.LLY <= inner.LLY+coverTolerancePt &&
 		outer.URX >= inner.URX-coverTolerancePt &&
 		outer.URY >= inner.URY-coverTolerancePt
+}
+
+// paintTolerancePt is how far a path may stray outside the raster and still
+// count as hidden by it. A thousandth of a point is a two-hundredth of a pixel
+// at 300 DPI, so it forgives arithmetic and nothing else.
+//
+// It is deliberately not coverTolerancePt. That one point is an allowance for
+// where a page's own edge is, on the reasoning that a raster falling a point
+// short still covers the page. Reusing it here would allow a point of ink to
+// fall outside the raster and still be called invisible, which is the opposite
+// direction — and it would exactly cancel the stroke spread that recordPaint
+// adds for a 2-point pen.
+const paintTolerancePt = 1e-3
+
+// paintsHidden reports whether the raster hides every path-painting operator on
+// the page: the raster is an opaque cover, and each path was painted before it
+// and landed inside its placement box.
+//
+// This is a graphics-state test, not a renderer (design spec section 2). It
+// asks only what the content stream and the image dictionaries prove — the
+// order operators were issued in, where their paths landed, and whether the
+// raster is see-through — and never what any pixel ends up being.
+//
+// The opacity check is what makes dropping a wash safe. A stencil /ImageMask
+// paints only through its 1 bits, so a wash beneath one stays visible: of the
+// 126 pages byb-b1.5 measured, 27 fill the PowerPoint slide colour rather than
+// white, and on those the wash is the page background. opaqueCover rejects a
+// mask, an /SMask, a /Mask and a lowered /ca or /CA alike, so none of them
+// reaches the geometry test.
+func paintsHidden(raster content.Placement, paints []content.Paint, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
+	if len(paints) == 0 {
+		return true
+	}
+	if !opaqueCover(raster, imageInfo) {
+		return false
+	}
+	for _, p := range paints {
+		if p.Index > raster.Index {
+			return false
+		}
+		if p.Box.LLX < raster.Box.LLX-paintTolerancePt ||
+			p.Box.LLY < raster.Box.LLY-paintTolerancePt ||
+			p.Box.URX > raster.Box.URX+paintTolerancePt ||
+			p.Box.URY > raster.Box.URY+paintTolerancePt {
+			return false
+		}
+	}
+	return true
 }
 
 // covers reports whether box contains the page box, within tolerance. An image
