@@ -76,6 +76,32 @@ func TestInspectSingleImageScan(t *testing.T) {
 	}
 }
 
+// byb-b1.2: Bounds is the axis-aligned bounding box of the placement, so it
+// reports the same page-covering rectangle for a clean scan and for one a
+// scanner deskewed by a fraction of a degree. Placement is what carries that
+// residual affine out — to PageProvenance, and to anyone mapping raster
+// coordinates back onto the page.
+func TestInspectReportsThePlacementMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		doc  string
+		want [6]float64
+	}{
+		{"scan", [6]float64{corpus.PageWidthPt, 0, 0, corpus.PageHeightPt, 0, 0}},
+		{"scan-deskewed", corpus.DeskewPlacement},
+		{"scan-mirrored", corpus.MirrorPlacement},
+	} {
+		t.Run(tc.doc, func(t *testing.T) {
+			p := inspect(t, tc.doc)[0]
+			if len(p.Images) != 1 {
+				t.Fatalf("Images = %+v; want exactly one", p.Images)
+			}
+			if got := p.Images[0].Placement; got != tc.want {
+				t.Errorf("Placement = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInspectTiledReportsBothHalves(t *testing.T) {
 	p := inspect(t, "tiled")[0]
 	if len(p.Images) != 2 {

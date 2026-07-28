@@ -34,9 +34,18 @@ type Provenance struct {
 // divertClass in extract.go is the one place that maps the fine reason to the
 // value stored here, and capabilityRules in upgrade.go is what matches on it.
 // The two must agree; TestDivertClassCoversEveryReason is the tripwire.
+//
+// Placement, when present, is the affine the page's raster was painted with, in
+// PDF matrix order [a b c d e f] — the same six numbers as ImageRef.Placement.
+// It is recorded, not applied: a scanner's deskew rotation stays in the
+// placement matrix and the raster is kept as stored, because resampling a
+// bilevel raster to straighten it would break the lossless guarantee this
+// library exists for (byb-b1.2). It is empty for an axis-aligned placement,
+// which is almost every page.
 type PageProvenance struct {
-	Applied  []string `json:"applied,omitempty"`
-	Diverted string   `json:"diverted,omitempty"`
+	Applied   []string  `json:"applied,omitempty"`
+	Diverted  string    `json:"diverted,omitempty"`
+	Placement []float64 `json:"placement,omitempty"`
 }
 
 // buildCapabilities is what this build of Byblos can do. Every entry MUST also

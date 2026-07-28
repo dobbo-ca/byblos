@@ -15,8 +15,15 @@ import (
 // Bounds is where the image lands, in PDF default user space: points, origin
 // lower-left, y increasing upward. image.Rectangle is used only as a convenient
 // integer rectangle — do not read it as screen coordinates.
+//
+// Placement is the matrix the image was painted with, in PDF matrix order
+// [a b c d e f] (ISO 32000-1 section 8.3.3), mapping the image's unit square
+// into user space. Bounds is its axis-aligned bounding box and reports the same
+// rectangle for a clean placement and for one a scanner deskewed by a fraction
+// of a degree; this is where that rotation is visible.
 type ImageRef struct {
 	Bounds        image.Rectangle
+	Placement     [6]float64
 	Width, Height int  // pixel dimensions of the stored raster
 	Bitonal       bool // 1 bit per component, or an image mask
 }
@@ -71,7 +78,7 @@ func inspectPage(d pdfdoc.Doc, n int) (*PageInfo, *content.Scan, error) {
 		TextChars: s.TextChars,
 	}
 	for _, pl := range s.Images {
-		ref := ImageRef{Bounds: boxRect(pl.Box)}
+		ref := ImageRef{Bounds: boxRect(pl.Box), Placement: [6]float64(pl.CTM)}
 		if info, ok := d.ImageInfo(pl.ID); ok {
 			ref.Width = info.Width
 			ref.Height = info.Height

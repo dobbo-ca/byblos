@@ -39,9 +39,30 @@ var ErrUnsupportedImageCodec = errors.New("byblos: page raster uses an image cod
 // on real scans, revisit it here before revisiting the design.
 const coverTolerancePt = 1.0
 
-// skewTolerance is how far a placement matrix's off-diagonal terms may stray
-// from zero before the image is treated as rotated or sheared.
-const skewTolerance = 1e-6
+// maxSkewDeg is how far a placement's axes may lie from the page's before the
+// image is treated as rotated or sheared.
+//
+// It is an angle rather than a matrix entry for a reason recorded in byb-b1.2:
+// the tolerance used to be 1e-6 compared against the off-diagonal terms, which
+// are in points. At a page scale of 560 that is an exact-zero test — about 1e-7
+// degrees — so it rejected all 147 sub-degree scanner deskews in the
+// measurement. Two degrees clears the widest of them (1.09) with room to spare
+// and stays nowhere near a quarter turn.
+const maxSkewDeg = 2.0
+
+// skewDegrees returns how far the placement's axes lie from the page's axes, in
+// degrees, taking the larger of the two: zero for an axis-aligned placement, the
+// rotation angle for a rotation, and the worse of the two for a shear.
+//
+// Each axis is measured against its own scale term, so the answer does not
+// depend on the size of the raster or on the two axes being scaled alike. Signs
+// are dropped, which keeps a mirror at zero: a mirrored placement is square to
+// the page and classify catches it by the sign of the scale terms instead.
+func skewDegrees(m content.Matrix) float64 {
+	x := math.Atan2(math.Abs(m[1]), math.Abs(m[0]))
+	y := math.Atan2(math.Abs(m[2]), math.Abs(m[3]))
+	return max(x, y) * 180 / math.Pi
+}
 
 // mrcPatchAreaFrac is how much of the page a non-bitonal placement must cover
 // before it counts as an MRC patch rather than a stamp or a logo. Google Books
@@ -76,10 +97,22 @@ const mrcBaseAreaFrac = 0.90
 // content space, so a rotated page still extracts cleanly. The returned image
 // is the raster as stored; applying /Rotate is the caller's business.
 //
-// Orientation within content space is a different matter and is not the
-// caller's business, because the caller has no way to recover it: a placement
-// that rotates, skews or mirrors the raster diverts rather than returning an
-// image the caller would have no signal to correct.
+// Orientation within content space is a narrower promise: the returned raster
+// is the page as it reads, to within maxSkewDeg. Scanner deskew lives inside
+// that tolerance — a bulk scanner writes a fraction of a degree into the
+// placement matrix and leaves the pixels raw — so those pages extract as stored,
+// with the residual affine recorded in ImageRef.Placement and, at write time, in
+// PageProvenance.Placement. Byblos does not straighten them: resampling a
+// bilevel raster to take out a tenth of a degree would break the lossless
+// promise on exactly the pages this library exists for.
+//
+// Past the tolerance the page diverts, and byb-b1.2 settled that this includes
+// the two cases a caller could correct exactly, a quarter turn and a mirror.
+// Recording the affine does weaken the older argument that the caller has no
+// signal to correct them by. What it does not weaken is the reason: the returned
+// image.Image is consumed — OCR, thumbnails, human review — by code that never
+// reads provenance, and a sideways or mirrored raster is wrong there in a way a
+// fraction of a degree is not.
 func ExtractPageRaster(r io.ReadSeeker, page int) (image.Image, error) {
 	countAttempt()
 
@@ -212,7 +245,10 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 // "" when it can.
 func placementReason(p content.Placement, page pdfdoc.Rect) string {
 	m := p.CTM
-	if math.Abs(m[1]) > skewTolerance || math.Abs(m[2]) > skewTolerance {
+	// A sub-degree rotation here is scanner deskew, and the raster underneath it
+	// is the raw skewed scan: the page is one page-covering raster and extracts,
+	// with the matrix recorded in ImageRef.Placement (byb-b1.2).
+	if skewDegrees(m) > maxSkewDeg {
 		return "rotated-placement"
 	}
 	// The off-diagonal terms do not pin orientation. A negative scale mirrors
