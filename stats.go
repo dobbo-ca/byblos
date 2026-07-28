@@ -6,7 +6,7 @@ import "sync"
 // start, or since the last ResetExtractStats.
 //
 // The design of Byblos rests on the premise that a page which is not a single
-// page-covering raster is rare (design spec section 2). These counters are how
+// raster is rare (design spec section 2). These counters are how
 // that premise is checked against reality rather than assumed. Export
 // UnhandledRate from your application; if it is not small, the premise is wrong
 // and the design needs revisiting.
@@ -16,9 +16,18 @@ import "sync"
 type ExtractCounters struct {
 	Attempted uint64
 	Extracted uint64
-	Diverted  uint64            // page understood, but not a single page-covering raster
-	Failed    uint64            // could not be read at all: damaged file, missing page
-	Reasons   map[string]uint64 // divert reason to count; see classify in extract.go
+	// Partial counts the extracted pages whose raster does not fill the page
+	// box. It is not a fourth outcome — it is a subset of Extracted, and does
+	// not disturb the sum above.
+	//
+	// It exists because byb-b1.3 retired the "not-page-covering" divert reason.
+	// Those 132 measured pages are ordinary scans placed at their natural
+	// resolution and they now extract, which is correct, but without this they
+	// would vanish from the instrumentation the whole design is checked by.
+	Partial  uint64
+	Diverted uint64            // page understood, but not a single raster
+	Failed   uint64            // could not be read at all: damaged file, missing page
+	Reasons  map[string]uint64 // divert reason to count; see classify in extract.go
 }
 
 // DivertRate is the fraction of attempted pages that diverted. Failures are
@@ -85,9 +94,12 @@ func countAttempt() {
 	statsMu.Unlock()
 }
 
-func countExtracted() {
+func countExtracted(coversPage bool) {
 	statsMu.Lock()
 	stats.Extracted++
+	if !coversPage {
+		stats.Partial++
+	}
 	statsMu.Unlock()
 }
 

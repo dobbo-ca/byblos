@@ -15,16 +15,20 @@ import (
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
-// ErrNotSingleRaster reports a page that is not one page-covering image:
-// tiled rasters, visible vector content, or image-plus-overlay. The wrapped
-// message names the specific reason. Callers divert such documents for review;
+// ErrNotSingleRaster reports a page that is not one visible image: tiled
+// rasters, visible vector content, or image-plus-overlay. The wrapped message
+// names the specific reason.
+//
+// How much of the page that one image covers is not part of the test, because
+// nothing in the content stream can mark the rest of it (byb-b1.3).
+// PageRaster.CoversPage is what tells the caller. Callers divert such documents for review;
 // design spec section 2 explains why detecting rather than rendering is the
 // whole reason this project is tractable.
 //
 // "Visible" is doing work in that sentence. A path painted before the raster
 // and inside its placement box marks nothing anyone can see, and byb-b1.5
 // measured 126 scan-shaped pages diverting on exactly that. See paintsHidden.
-var ErrNotSingleRaster = errors.New("byblos: page is not a single page-covering raster")
+var ErrNotSingleRaster = errors.New("byblos: page is not a single raster")
 
 // ErrUnsupportedImageCodec reports a page raster stored in a codec Byblos
 // cannot decode: JBIG2, JPEG 2000, or CMYK images pdfcpu re-renders as TIFF.
@@ -115,7 +119,16 @@ type PageRaster struct {
 // never scanned is the same kind of lie as resampling a deskewed raster to
 // straighten it, and on a bilevel JBIG2 scan it would mean decoding and
 // re-encoding the very pages the lossless promise exists for.
-func (p PageRaster) CoversPage() bool { return p.Page.In(p.Bounds) }
+// A zero Page is not covered by anything. image.Rectangle.In answers true for
+// an empty receiver, so without this the zero PageRaster — what every error
+// return hands back — would report itself as a full-page scan, and a caller
+// that read CoversPage before err would never notice.
+func (p PageRaster) CoversPage() bool {
+	if p.Page.Empty() {
+		return false
+	}
+	return p.Page.In(p.Bounds)
+}
 
 // ExtractPageRaster returns the single raster of the given 1-based page.
 //
@@ -215,12 +228,13 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 		countDivert("unsupported-codec")
 		return nil, fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err)
 	}
-	countExtracted()
-	return &PageRaster{
+	out := &PageRaster{
 		Image:  img,
 		Bounds: boxRect(placement.Box),
 		Page:   rectOf(p.CropBox),
-	}, nil
+	}
+	countExtracted(out.CoversPage())
+	return out, nil
 }
 
 // classify returns the index of the placement that is the page's raster, or the
@@ -299,11 +313,20 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 	//
 	// What reaches them is not a tolerance at all. Every arm above has already
 	// established there is no inked text, no path, no shading, no inline image
-	// and no unresolved XObject anywhere in the stream, so nothing can mark the
-	// page outside the placement and that raster IS the page, whatever fraction
-	// of the box it occupies. On all 132 measured pages the region outside the
-	// placement held zero content operators. The caller learns the geometry from
-	// PageRaster.CoversPage rather than losing the page to a divert.
+	// and no unresolved XObject anywhere in the stream, so nothing in the
+	// CONTENT STREAM can mark the page outside the placement and that raster IS
+	// the page, whatever fraction of the box it occupies. On all 132 measured
+	// pages the region outside the placement held zero content operators. The
+	// caller learns the geometry from PageRaster.CoversPage rather than losing
+	// the page to a divert.
+	//
+	// "Content stream" is the exact width of the claim, and two things sit
+	// outside it. Annotations are never read at all — pdfdoc.Page reads the
+	// content stream and nothing else — so an annotation appearance stream in
+	// the uncovered strip is dropped silently (byb-b1.11). And Walk ignores a
+	// form /BBox and every clip path, so Bounds can overstate what is visible
+	// (byb-b1.12). Neither is new here; both were masked for these pages by the
+	// gate this replaced, which is why they are named rather than assumed away.
 	if top > 0 {
 		// That argument does not extend to a stack: an under-layer reaching past
 		// the top one is exactly the ink it says cannot exist. A layered page
