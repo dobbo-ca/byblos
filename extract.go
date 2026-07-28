@@ -140,7 +140,18 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 	switch {
 	case len(s.Images) == 0:
 		return 0, "no-image"
-	case s.TextOps > 0:
+	// Only text that deposits ink is a reason to divert. Rendering mode 3 paints
+	// no glyphs, and an invisible OCR layer is what nearly every scan pipeline
+	// ships; keying on TextOps diverted 100% of a real ScanSnap corpus, and
+	// 98.7% of the pages it diverted over a page-covering raster carried no ink
+	// at all.
+	//
+	// Known simplification: this ignores z-order. Text painted BEFORE an opaque
+	// page-covering image is hidden by it and contributes nothing either, which
+	// was 36 pages of the measurement against 210 for the rendering-mode cases.
+	// Those pages divert, which is the safe direction; fixing them means
+	// tracking paint order, not pretending operator order does not matter.
+	case s.InkedTextOps > 0:
 		return 0, "has-text"
 	case s.InlineImgs > 0:
 		return 0, "inline-image"

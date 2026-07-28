@@ -9,7 +9,10 @@ import (
 func wantNames() []string {
 	return []string{
 		"born-digital", "scan", "scan-rotated", "scan-in-form",
-		"tiled", "overlay-text", "overlay-vector", "mixed",
+		"tiled", "overlay-text", "overlay-vector",
+		"invisible-text", "invisible-text-in-form",
+		"invisible-text-form-inherits", "invisible-text-bracketed",
+		"mixed",
 		"dup-raster", "jbig2", "stacked", "stacked-in-form",
 		"stacked-smask", "stacked-alpha", "mrc", "malformed",
 	}
