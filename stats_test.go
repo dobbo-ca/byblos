@@ -97,6 +97,49 @@ func TestEveryAttemptLandsInExactlyOneOutcome(t *testing.T) {
 	}
 }
 
+// byb-b1.3 retired the "not-page-covering" divert reason: a raster that does not
+// fill the page box now extracts. That removed 132 measured pages from the
+// instrumentation entirely — they moved from a named divert reason into the
+// undifferentiated Extracted total. Partial is what keeps them countable, and
+// counting them is how the next byblos-divert run checks the decision.
+func TestExtractStatsCountsPartialPages(t *testing.T) {
+	ResetExtractStats()
+	if _, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan")), 1); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if _, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan-natural-dpi")), 1); err != nil {
+		t.Fatalf("scan-natural-dpi: %v", err)
+	}
+	c := ExtractStats()
+	if c.Extracted != 2 {
+		t.Errorf("Extracted = %d; want 2", c.Extracted)
+	}
+	if c.Partial != 1 {
+		t.Errorf("Partial = %d; want 1 (the natural-DPI page only, not the page-covering scan)", c.Partial)
+	}
+}
+
+// Partial counts a subset of Extracted, so a page that diverted or failed must
+// never reach it — and it must not disturb the invariant that the three
+// outcomes sum to Attempted.
+func TestPartialCountsOnlyExtractedPages(t *testing.T) {
+	ResetExtractStats()
+	if _, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "tiled")), 1); err == nil {
+		t.Fatal("tiled: want a divert")
+	}
+	if _, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "malformed")), 1); err == nil {
+		t.Fatal("malformed: want a failure")
+	}
+	c := ExtractStats()
+	if c.Partial != 0 {
+		t.Errorf("Partial = %d; want 0 — one divert and one failure produced no raster at all", c.Partial)
+	}
+	if c.Extracted+c.Diverted+c.Failed != c.Attempted {
+		t.Errorf("Extracted+Diverted+Failed = %d; want Attempted = %d",
+			c.Extracted+c.Diverted+c.Failed, c.Attempted)
+	}
+}
+
 func TestExtractStatsSnapshotIsACopy(t *testing.T) {
 	ResetExtractStats()
 	data := corpusDoc(t, "tiled")

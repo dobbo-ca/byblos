@@ -86,6 +86,12 @@ func main() {
 	fmt.Printf("unreadable  %d\n", unreadable)
 	fmt.Printf("pages       %d\n", c.Attempted)
 	fmt.Printf("extracted   %d\n", c.Extracted)
+	// Of the extracted pages, those whose raster does not fill the page box.
+	// byb-b1.3 retired the "not-page-covering" reason, and these are the pages
+	// it used to name: ordinary scans placed at their natural resolution. They
+	// are worth watching anyway, because a page that is 3% raster is a page
+	// whose scanner did something strange, and nothing else reports it.
+	fmt.Printf("  partial   %d\n", c.Partial)
 	fmt.Printf("diverted    %d  (%.2f%%)\n", c.Diverted, 100*c.DivertRate())
 	fmt.Printf("failed      %d\n", c.Failed)
 	// The headline number. Reporting the divert rate alone is what let byb-5kk

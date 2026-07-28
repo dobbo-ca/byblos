@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"image"
 	"math"
 	"strings"
 	"testing"
@@ -33,6 +34,22 @@ func TestExtractPageRasterSucceeds(t *testing.T) {
 					b.Dx(), b.Dy(), corpus.ScanImageW, corpus.ScanImageH)
 			}
 		})
+	}
+}
+
+// The zero value must not claim to be the full page. It is what every error
+// return hands back, and image.Rectangle.In answers true for an empty receiver,
+// so the natural implementation reports a page nobody extracted as covered. A
+// caller that checks CoversPage before checking err would read every failure as
+// a clean full-page scan.
+func TestZeroPageRasterDoesNotCoverThePage(t *testing.T) {
+	if (PageRaster{}).CoversPage() {
+		t.Error("PageRaster{}.CoversPage() = true; want false")
+	}
+	// The same trap one step in: a real raster, but the page box never filled.
+	half := PageRaster{Bounds: image.Rect(0, 0, 306, 792)}
+	if half.CoversPage() {
+		t.Error("CoversPage() = true for a zero Page box; want false")
 	}
 }
 

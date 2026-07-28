@@ -164,10 +164,16 @@ const (
 // Walk interprets a decoded content stream, resolving resource names in scope
 // through env.
 //
-// Known simplification: a Form XObject's /BBox clips its content, and Walk
-// ignores that clip. A form whose BBox crops an oversized image will therefore
-// report an oversized placement. This errs toward accepting a page as
-// page-covering; revisit if the divert-rate instrumentation shows it matters.
+// Known simplification: a Form XObject's /BBox clips its content, as does any
+// clip path, and Walk ignores both. A form whose BBox crops an oversized image
+// will therefore report an oversized placement.
+//
+// That used to err in the safe direction, toward calling a page page-covering,
+// because the box was only ever read by a gate — and the instrumentation this
+// comment used to point at, the "not-page-covering" divert reason, no longer
+// exists. byb-b1.3 removed the gate and returns the box to the caller as
+// PageRaster.Bounds, so an overstated box is now an overstated answer rather
+// than a lenient test. byb-b1.12 tracks it.
 //
 // The same simplification runs the other way for paint. An oversized Paint.Box
 // is one a raster is less likely to contain, so a clipped-away path errs toward
