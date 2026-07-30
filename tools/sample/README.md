@@ -63,7 +63,7 @@ seq -f "$B/%03g.zip" 0 50 950 | xargs $PY tools/sample/govdocs1_pdfs.py $S/govdo
 tools/sample/ia_sample.sh dticarchive    150 $S/ia/pdfs 20260730 >> $S/manifest.tsv
 tools/sample/ia_sample.sh ciareadingroom 150 $S/ia/pdfs 20260730 >> $S/manifest.tsv
 
-DOCUMENTCLOUD_USER=you@example.com DOCUMENTCLOUD_PASS=... tools/sample/dc_sample.sh 520 $S/dc/pdfs 20260730 >> $S/manifest.tsv
+tools/sample/dc_sample.sh 520 $S/dc/pdfs 20260730 >> $S/manifest.tsv   # credentials from .env
 ```
 
 The seed alone does not reproduce a draw: archive.org's scrape API gives no
@@ -88,6 +88,20 @@ so every rate computed here runs pessimistic against the original mix.
 largest concentration of the invisible-text shape; that whole population is
 absent.
 
+The dc leg is a random draw from the 6,000 most recently uploaded public
+DocumentCloud documents, not from all 7,175,565 of them. The API paginates by
+cursor, so the frame can only be walked forward from the newest; there is no
+uniform draw available at this cost. Recency is the bias to hold in mind, and
+it is not obviously neutral — upload cohorts cluster by uploader and by
+scanning generation.
+
+Two filters were deliberately NOT used to widen it. Querying `redacted` or
+`subpoena` would have scattered the frame nicely and biased it straight toward
+the thing being measured; a stamp rate drawn from documents selected for
+carrying stamps is not a rate. `page_count:[N TO M]` does work and is the
+neutral option if stratification is ever wanted (`created_at` ranges return
+zero — wrong syntax, not an empty corpus).
+
 A disagreement with a bead's number therefore means the sampling frame differs.
 It is a reason to look at the sample, not to change the code.
 
@@ -104,5 +118,19 @@ paints at all (the silent loss), how many of those had a raster that fell short
 of the page box (what byb-b1.3 newly exposed), and how many have ink landing
 outside the raster entirely (the blank strip). See the command's doc comment.
 
-Measured 2026-07-30 over govdocs1 + ia, 151,077 pages, 18,610 of them
-extracted: **6 / 1 / 0**.
+Measured 2026-07-30 over all three rebuildable sets — 166,423 pages, 22,050 of
+them extracted: **7 / 1 / 0**.
+
+| set | pages | extracted | A: paints | B: not covering | C: outside | diverted + paints |
+|---|---|---|---|---|---|---|
+| govdocs1 | 136,134 | 3,667 | 6 | 1 | 0 | 369 |
+| ia | 14,943 | 14,943 | 0 | 0 | 0 | 0 |
+| dc | 15,346 | 3,440 | 1 | 0 | 0 | 348 |
+
+dc_random was the leg expected to move this — FOIA and court material is where
+redaction stamps live, and it does carry them (35 Stamp, 43 Watermark, 66 Ink,
+against govdocs1's near-pure Widget). It moved nothing. Those annotations land
+on pages that were **already diverting for other reasons**: unsupported-codec
+alone accounts for 5,431 of dc's 11,906 diverts. 717 diverted pages across the
+sample carry painting ink and are safe today only because something else
+declined them first — which is the reservoir to watch, not the current rate.

@@ -35,6 +35,7 @@ fi
 : "${DOCUMENTCLOUD_USER:?set DOCUMENTCLOUD_USER in .env (your MuckRock login email)}"
 : "${DOCUMENTCLOUD_PASS:?set DOCUMENTCLOUD_PASS in .env (your MuckRock password)}"
 MAX_CALLS="${DC_MAX_API_CALLS:-80}"
+PAGES="${DC_PAGES:-60}"   # 100 documents each; the enumeration frame
 
 UA="byblos-corpus/1.0 (chris@dobbo.ca)"
 IDS_DIR="$(dirname "$OUT")/../ids"
@@ -57,12 +58,15 @@ mint() {
   # request already in flight.
   [ -n "$ACCESS" ] && [ $((now - MINTED)) -lt 240 ] && return 0
   spend
+  # Form-encoded, not a hand-built JSON body. The endpoint accepts either, and
+  # "{'username':...,'password':...}" inside a nested command substitution gets
+  # brace-expanded by the shell on the comma before python ever sees it — the
+  # dict arrives as two separate arguments with the braces stripped.
+  # --data-urlencode also means the password is never pasted into a string this
+  # script has to quote correctly.
   ACCESS=$(curl -sS -X POST "https://accounts.muckrock.com/api/token/" \
-    -H "Content-Type: application/json" \
-    -d "$(python3 -c "
-import json,os
-print(json.dumps({'username':os.environ['DOCUMENTCLOUD_USER'],
-                  'password':os.environ['DOCUMENTCLOUD_PASS']}))")" \
+    --data-urlencode "username=$DOCUMENTCLOUD_USER" \
+    --data-urlencode "password=$DOCUMENTCLOUD_PASS" \
     | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -83,23 +87,45 @@ mint
 echo "auth ok (token minted; $CALLS/$MAX_CALLS calls used)" >&2
 
 if [ ! -s "$IDS" ]; then
-  : > "$IDS"
+  # Staged through .part and moved only when the walk finishes. An enumeration
+  # that stops early -- the call cap, a 429, a dropped connection -- otherwise
+  # leaves a short list that the next run reuses as though it were the whole
+  # population, and every later draw is silently from a truncated frame.
+  : > "$IDS.part"
+  # CURSOR pagination, not &page=N. The API accepts a page parameter and
+  # ignores it: page=1 and page=2 return byte-identical results, so walking it
+  # re-fetches the same 100 documents forever. The first attempt at this drew
+  # 6,000 rows holding 101 distinct ids and nobody would have noticed from the
+  # row count alone. The cursor is in each response's "next" URL, which already
+  # carries the query and per_page, so it is followed verbatim.
+  url="https://api.www.documentcloud.org/api/documents/search/?q=%2Baccess%3Apublic&per_page=100"
   page=1
-  while [ "$page" -le 60 ]; do
-    api "https://api.www.documentcloud.org/api/documents/search/?q=%2Baccess%3Apublic&per_page=100&page=$page" \
-        "$IDS_DIR/.dc-page.json"
-    n=$(python3 -c "
+  while [ -n "$url" ] && [ "$page" -le "$PAGES" ]; do
+    api "$url" "$IDS_DIR/.dc-page.json"
+    url=$(python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
 rs=d.get('results',[])
 with open(sys.argv[2],'a') as f:
     for r in rs:
         f.write('%s\t%s\n' % (r['id'], r.get('slug','')))
-print(len(rs))" "$IDS_DIR/.dc-page.json" "$IDS")
-    [ "$n" = "0" ] && break
+sys.stderr.write('page %s: %d results\n' % (sys.argv[3], len(rs)))
+print(d.get('next') or '')" "$IDS_DIR/.dc-page.json" "$IDS.part" "$page")
     page=$((page+1))
     sleep 0.5
   done
+  # Guard the invariant the page walk violated silently. A frame with far fewer
+  # distinct ids than rows means pagination is repeating itself again, and a
+  # draw from it is not the sample it claims to be.
+  python3 -c "
+import sys
+rows=[l.split('\t')[0] for l in open(sys.argv[1]) if l.strip()]
+u=len(set(rows))
+sys.stderr.write('enumerated %d rows, %d distinct\n' % (len(rows), u))
+if u < 0.9*len(rows):
+    sys.stderr.write('ABORT: pagination is repeating; refusing to cache this frame\n')
+    sys.exit(1)" "$IDS.part"
+  mv "$IDS.part" "$IDS"
 else
   echo "reusing cached enumeration ($(wc -l < "$IDS") ids); 0 API calls" >&2
 fi
