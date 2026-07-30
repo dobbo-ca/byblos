@@ -2,6 +2,7 @@ package pdfdoc
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -302,5 +303,40 @@ func TestAnnotsStampInTheNaturalDPIStrip(t *testing.T) {
 	}
 	if got[0].Rect.URX > 612 {
 		t.Errorf("Rect.URX = %v; want within the page box 612", got[0].Rect.URX)
+	}
+}
+
+// pdfcpu's skipTJ indexes s[0] in three places with no length check, so a TJ
+// array the content stream ends inside walks off the end. PageDict parses
+// content, which is why the crash arrives from what looks like a dictionary
+// read, and pdfcpu's fault.Catch does not recover it.
+//
+// "[(a)" is the shortest trigger: the string literal is consumed, the loop
+// comes round, and TrimLeftFunc leaves nothing to index. "[" alone does NOT do
+// it — that path returns a clean errTJExpressionCorrupt — so the array has to
+// contain something before it runs out.
+//
+// govdocs1/050734.pdf page 19 is the real file this reproduces: it killed a
+// byblos-annots run over 4,840 files outright. Without the recover this test
+// does not fail, it takes the whole test binary down with it. See byb-avp.
+func TestMalformedTJIsAnErrorNotAPanic(t *testing.T) {
+	body := "[(a)"
+	data := buildPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(body), body),
+	})
+
+	d, err := Open(bytes.NewReader(data))
+	if err != nil {
+		if !errors.Is(err, ErrMalformed) {
+			t.Fatalf("Open error = %v; want ErrMalformed", err)
+		}
+		return // caught one level up, which is equally fine
+	}
+	if _, err := d.Page(1); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Page(1) error = %v; want ErrMalformed. If nil, the fixture no "+
+			"longer reproduces the panic and this test is proving nothing.", err)
 	}
 }

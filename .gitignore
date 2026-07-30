@@ -8,3 +8,6 @@ testdata/corpus/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Local credentials for tools/sample (never commit)
+.env

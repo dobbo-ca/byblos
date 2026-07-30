@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Draw a reproducible sample of public DocumentCloud documents.
 #
-#   DOCUMENTCLOUD_USER=you@example.com DOCUMENTCLOUD_PASS=... dc_sample.sh <n> <outdir> [seed]
+#   dc_sample.sh <n> <outdir> [seed]
+#
+# Credentials come from .env at the repo root (see .env.example); the
+# environment wins if both are set. .env is gitignored.
 #
 # This is the "dc_random" set the B1 beads measured. It is FOIA and court
 # material, which is the population most likely to carry redaction stamps and
@@ -10,29 +13,50 @@
 #
 # AUTHENTICATION. DocumentCloud has no API token to copy out of the UI. You
 # exchange your MuckRock username and password at accounts.muckrock.com for a
-# JWT access token, and that token is good for FIVE MINUTES. A sample of this
-# size takes far longer than that, so the script re-mints on a timer rather
-# than authenticating once at the start; a run that mints once dies partway
-# through with 403s.
+# JWT, and that JWT is good for FIVE MINUTES. A sample of this size takes far
+# longer, so this re-mints on a timer; a run that authenticates once dies
+# partway through with 403s.
 #
-# Anonymous access is not an option here: the unauthenticated quota is 500
-# calls per 24 hours and this needs more than that in metadata calls alone.
+# RATE LIMITS. Three things keep this cheap. Enumeration costs one call per 100
+# documents and is cached in ids/.ids-documentcloud.txt, so a second run makes
+# ZERO enumeration calls -- delete that file only if you want a fresh
+# population. Downloads come from public S3 and need no API call at all. And
+# DC_MAX_API_CALLS is a hard ceiling that aborts the run rather than continuing
+# past it. A preflight call checks the credentials before any of that, so a
+# typo costs one call instead of eighty.
 set -euo pipefail
 
 N="$1"; OUT="$2"; SEED="${3:-20260730}"
-: "${DOCUMENTCLOUD_USER:?set DOCUMENTCLOUD_USER (your MuckRock login email)}"
-: "${DOCUMENTCLOUD_PASS:?set DOCUMENTCLOUD_PASS (your MuckRock password)}"
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [ -f "$ROOT/.env" ]; then
+  set -a; . "$ROOT/.env"; set +a
+fi
+: "${DOCUMENTCLOUD_USER:?set DOCUMENTCLOUD_USER in .env (your MuckRock login email)}"
+: "${DOCUMENTCLOUD_PASS:?set DOCUMENTCLOUD_PASS in .env (your MuckRock password)}"
+MAX_CALLS="${DC_MAX_API_CALLS:-80}"
+
 UA="byblos-corpus/1.0 (chris@dobbo.ca)"
 IDS_DIR="$(dirname "$OUT")/../ids"
 mkdir -p "$OUT" "$IDS_DIR"
 IDS="$IDS_DIR/.ids-documentcloud.txt"
 
+CALLS=0
+spend() {
+  CALLS=$((CALLS+1))
+  if [ "$CALLS" -gt "$MAX_CALLS" ]; then
+    echo "ABORT: hit DC_MAX_API_CALLS=$MAX_CALLS. Nothing further requested." >&2
+    exit 1
+  fi
+}
+
 ACCESS=""; MINTED=0
 mint() {
   local now; now=$(date +%s)
-  # Re-mint at four minutes. The token expires at five, and the margin covers a
-  # slow request already in flight.
+  # Re-mint at four minutes. The token dies at five; the margin covers a slow
+  # request already in flight.
   [ -n "$ACCESS" ] && [ $((now - MINTED)) -lt 240 ] && return 0
+  spend
   ACCESS=$(curl -sS -X POST "https://accounts.muckrock.com/api/token/" \
     -H "Content-Type: application/json" \
     -d "$(python3 -c "
@@ -50,8 +74,13 @@ print(d['access'])")
 
 api() {  # api <url> <outfile>
   mint
+  spend
   curl -sS -A "$UA" -H "Authorization: Bearer $ACCESS" "$1" -o "$2"
 }
+
+# Preflight: prove the credentials work before spending the enumeration budget.
+mint
+echo "auth ok (token minted; $CALLS/$MAX_CALLS calls used)" >&2
 
 if [ ! -s "$IDS" ]; then
   : > "$IDS"
@@ -71,6 +100,8 @@ print(len(rs))" "$IDS_DIR/.dc-page.json" "$IDS")
     page=$((page+1))
     sleep 0.5
   done
+else
+  echo "reusing cached enumeration ($(wc -l < "$IDS") ids); 0 API calls" >&2
 fi
 echo "population documentcloud: $(wc -l < "$IDS")" >&2
 
@@ -84,8 +115,8 @@ print('\n'.join(random.sample(rows, min(int(sys.argv[2]), len(rows)))))
 while IFS=$'\t' read -r id slug; do
   [ -z "$id" ] && continue
   [ -s "$OUT/dc-$id.pdf" ] && continue
-  # Assets are on public S3 and need no Authorization header; only the API
-  # calls above are authenticated.
+  # Assets are on public S3 and need no Authorization header, so downloads do
+  # not touch the API quota at all.
   url="https://s3.documentcloud.org/documents/$id/$slug.pdf"
   code=$(curl -sS -L -A "$UA" --retry 5 --retry-delay 5 --retry-all-errors \
          -o "$OUT/dc-$id.pdf.part" -w '%{http_code}' "$url")
@@ -98,3 +129,5 @@ while IFS=$'\t' read -r id slug; do
     "$(shasum -a 256 "$OUT/dc-$id.pdf" | cut -d' ' -f1)"
   sleep 0.3
 done < "$IDS_DIR/.sample-documentcloud.txt"
+
+echo "done: $CALLS/$MAX_CALLS API calls used" >&2

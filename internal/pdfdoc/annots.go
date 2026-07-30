@@ -34,7 +34,8 @@ type Annot struct {
 // each call Page, so filling it there would dereference every annotation twice
 // on every extract, forever, to serve a measurement. Move it onto Page when
 // classification actually consumes it.
-func (d *doc) Annots(n int) ([]Annot, error) {
+func (d *doc) Annots(n int) (out []Annot, err error) {
+	defer catchPanic(fmt.Sprintf("annots page %d", n), &err)
 	if n < 1 || n > d.ctx.PageCount {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d out of range 1..%d", n, d.ctx.PageCount)
 	}
@@ -53,7 +54,7 @@ func (d *doc) Annots(n int) ([]Annot, error) {
 		return nil, nil
 	}
 
-	out := make([]Annot, 0, len(arr))
+	out = make([]Annot, 0, len(arr))
 	for _, o := range arr {
 		// An entry naming an object that is free in the xref dereferences to a
 		// nil dictionary and a nil error, so presence has to be checked, not

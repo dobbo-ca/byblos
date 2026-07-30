@@ -137,6 +137,8 @@ func All() []Doc {
 			scanPlaced(cmOperands(DeskewPlacement), 0)},
 		{"scan-natural-dpi", "raster placed at its own 302 DPI on a nominal Letter box, 43.6 points short: must NOT divert",
 			scanPlaced(cmOperands(NaturalDPIPlacement), 0)},
+		{"scan-stamped", "natural-DPI raster plus a /Stamp with an appearance stream in the uncovered strip: must extract, and report the stamp it cannot include",
+			stampedScan()},
 		{"scan-mirrored", "page-covering image placed with a vertical mirror: must divert",
 			scanPlaced(cmOperands(MirrorPlacement), 0)},
 		{"scan-quarter-turn", "page-covering image placed with a true 90 degree rotation: must divert",
@@ -297,6 +299,39 @@ func scanPlaced(cm string, rotate int) []byte {
 		pages, PageWidthPt, PageHeightPt, rot, img, cont))
 	w.fillStream(cont, "", []byte(fmt.Sprintf("q %s cm /Im0 Do Q\n", cm)))
 	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	return w.finish(cat)
+}
+
+// stampedScan is the natural-DPI placement carrying a /Stamp in the 43.6 point
+// strip the raster does not reach.
+//
+// This is the byb-b1.11 shape. classify sees a lone raster and no content
+// operator anywhere outside it, so the page extracts — correctly, on the
+// content stream's own evidence — and the stamp a reader would see is not in
+// the returned image. It is the page that must change behaviour if the
+// decision on that bead is ever revisited from "report it" to "divert on it".
+//
+// The /AP dictionary is DIRECT, which is the common form in real documents and
+// the one pdfcpu's own Annotation helper cannot see, because that reads /AP
+// with IndirectRefEntry. Only the appearance stream itself is indirect.
+func stampedScan() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	annot, ap := w.reserve(), w.reserve()
+
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R /Annots [%d 0 R] >>",
+		pages, PageWidthPt, PageHeightPt, img, cont, annot))
+	w.fillStream(cont, "", []byte(fmt.Sprintf("q %s cm /Im0 Do Q\n", cmOperands(NaturalDPIPlacement))))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	// Rect sits beyond the raster's 568.3708 right edge and inside the 612 point
+	// page: the blank strip, which nothing in the content stream marks.
+	w.fill(annot, fmt.Sprintf("<< /Type /Annot /Subtype /Stamp /Rect [575 100 605 200]"+
+		" /F 4 /AP << /N %d 0 R >> >>", ap))
+	w.fillStream(ap, "/Type /XObject /Subtype /Form /BBox [0 0 30 100]",
+		[]byte("0 0 0 rg 0 0 30 100 re f\n"))
 	return w.finish(cat)
 }
 

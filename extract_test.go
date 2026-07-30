@@ -772,3 +772,53 @@ func rotatedPlacement() []content.Placement {
 		Box: contentBox(0, 0, 612, 792),
 	}}
 }
+
+// A page whose raster falls short of the box and carries a stamp in the strip
+// extracts, and says what it could not include.
+//
+// This is byb-b1.11's decision made visible. classify is right to extract: the
+// content stream proves nothing marks the strip, and it is the annotation --
+// which is not in the content stream at all -- that puts ink there. Poppler
+// renders that stamp as black where the un-annotated page is white, so the
+// returned raster really is missing something a reader sees. The caller is told
+// rather than refused, because the measurement found 6 such pages in 18,610.
+func TestExtractPageRasterReportsAStampItCannotInclude(t *testing.T) {
+	pr, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan-stamped")), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster error = %v; the page must still extract", err)
+	}
+	if pr.CoversPage() {
+		t.Errorf("CoversPage() = true; the natural-DPI raster leaves a strip")
+	}
+	if pr.DroppedAnnots != 1 {
+		t.Errorf("DroppedAnnots = %d; want 1", pr.DroppedAnnots)
+	}
+}
+
+// The same placement without the annotation reports nothing, so the count
+// tracks the stamp and not the geometry.
+func TestExtractPageRasterReportsNoAnnotsWhenThereAreNone(t *testing.T) {
+	for _, name := range []string{"scan-natural-dpi", "scan", "scan-deskewed"} {
+		t.Run(name, func(t *testing.T) {
+			pr, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, name)), 1)
+			if err != nil {
+				t.Fatalf("ExtractPageRaster error = %v", err)
+			}
+			if pr.DroppedAnnots != 0 {
+				t.Errorf("DroppedAnnots = %d; want 0", pr.DroppedAnnots)
+			}
+		})
+	}
+}
+
+// The decoy in indirect-kids is hidden, zero-area and has no appearance. A
+// viewer draws nothing for it, so neither does this count.
+func TestExtractPageRasterIgnoresANonPaintingAnnotation(t *testing.T) {
+	pr, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "indirect-kids")), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster error = %v", err)
+	}
+	if pr.DroppedAnnots != 0 {
+		t.Errorf("DroppedAnnots = %d for a hidden zero-area annotation with no /AP; want 0", pr.DroppedAnnots)
+	}
+}
