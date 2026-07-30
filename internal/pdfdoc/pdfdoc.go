@@ -54,6 +54,32 @@ import (
 // job, not this package's.
 var ErrUnsupportedCodec = errors.New("byblos/pdfdoc: image codec cannot be rendered")
 
+// ErrMalformed reports a document pdfcpu could not parse without panicking.
+//
+// pdfcpu indexes unchecked in several parsers — skipTJ walks off an empty
+// operand slice on a malformed TJ array, and PageDict parses content, so the
+// crash arrives from inside what looks like a dictionary read. Its own
+// fault.Catch recovers only its own panic type, so nothing below this package
+// stops it.
+//
+// A library for processing archives cannot die on one damaged file out of five
+// thousand, which is what this cost before byb-avp: a whole run lost, and not
+// even a counter left behind to say a page had been skipped. Recovering at
+// this seam is what makes a malformed page an outcome the caller can count
+// rather than an exit. It is the same boundary ErrUnsupportedCodec sits on —
+// pdfcpu's misbehaviour becomes a Byblos error here or nowhere.
+var ErrMalformed = errors.New("byblos/pdfdoc: malformed document")
+
+// catchPanic converts a panic from pdfcpu into *err.
+//
+// Deferred with a named return, so it can only turn a crash into an error and
+// never mask one that was already being returned.
+func catchPanic(what string, err *error) {
+	if r := recover(); r != nil {
+		*err = fmt.Errorf("%w: %s: %v", ErrMalformed, what, r)
+	}
+}
+
 // Rect is a rectangle in PDF default user space: points, origin lower-left,
 // y increasing upward.
 type Rect struct{ LLX, LLY, URX, URY float64 }
@@ -122,7 +148,8 @@ type scope struct {
 //
 // rs is read once, here. Nothing below re-reads it, so a file this function
 // accepts cannot later be rejected by a validator Byblos opted out of.
-func Open(rs io.ReadSeeker) (Doc, error) {
+func Open(rs io.ReadSeeker) (d Doc, err error) {
+	defer catchPanic("open", &err)
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: seek: %w", err)
 	}
@@ -195,7 +222,8 @@ func normalizePageTree(xt *model.XRefTable, ref types.IndirectRef, seen map[int]
 
 func (d *doc) PageCount() int { return d.ctx.PageCount }
 
-func (d *doc) Page(n int) (*Page, error) {
+func (d *doc) Page(n int) (p *Page, err error) {
+	defer catchPanic(fmt.Sprintf("page %d", n), &err)
 	if n < 1 || n > d.ctx.PageCount {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d out of range 1..%d", n, d.ctx.PageCount)
 	}
@@ -208,7 +236,7 @@ func (d *doc) Page(n int) (*Page, error) {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d has no dictionary or no MediaBox", n)
 	}
 
-	p := &Page{
+	p = &Page{
 		Index:    n,
 		MediaBox: rectOf(inh.MediaBox),
 		Rotate:   ((inh.Rotate % 360) + 360) % 360,
