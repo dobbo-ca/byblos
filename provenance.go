@@ -42,10 +42,20 @@ type Provenance struct {
 // bilevel raster to straighten it would break the lossless guarantee this
 // library exists for (byb-b1.2). It is empty for an axis-aligned placement,
 // which is almost every page.
+//
+// DroppedAnnots is how many annotations painted on this page and are not in the
+// raster that was stored. Like Placement it is recorded, not applied: the
+// appearance streams are still in the PDF, and drawing them into the raster
+// would be a renderer (design spec section 2). What the record carries is the
+// fact that the stored image is not the whole of what a reader would see, so a
+// later pass can find those pages without re-measuring the archive. It is zero
+// for almost every page — byb-b1.11 measured 6 in 18,610 extracted — and
+// omitted when zero, so the ordinary record does not grow.
 type PageProvenance struct {
-	Applied   []string  `json:"applied,omitempty"`
-	Diverted  string    `json:"diverted,omitempty"`
-	Placement []float64 `json:"placement,omitempty"`
+	Applied       []string  `json:"applied,omitempty"`
+	Diverted      string    `json:"diverted,omitempty"`
+	Placement     []float64 `json:"placement,omitempty"`
+	DroppedAnnots int       `json:"dropped_annots,omitempty"`
 }
 
 // buildCapabilities is what this build of Byblos can do. Every entry MUST also

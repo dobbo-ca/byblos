@@ -109,6 +109,26 @@ type PageRaster struct {
 	Image  image.Image
 	Bounds image.Rectangle // where the raster lands
 	Page   image.Rectangle // the page's CropBox
+	// DroppedAnnots counts the annotations on this page that paint and are not
+	// in Image.
+	//
+	// Annotations live beside the content stream, not in it, so classify never
+	// sees them and no raster ever contains them: a stamp, a signature or a
+	// form field on a scanned page is shown by a viewer and absent here. That
+	// is true of every extracted page and always has been — byb-b1.3 did not
+	// introduce it, it only removed the coverage gate that had been catching
+	// some of it by accident.
+	//
+	// Non-zero means the caller is holding an image that is missing ink a
+	// reader would see. What to do about it is the caller's policy, which is
+	// why this is reported rather than diverted: byb-b1.11 measured 6 such
+	// pages in 18,610 extracted, and refusing 6 real pages to avoid 6
+	// incomplete ones is the worse trade for an archive. Run byblos-annots for
+	// the breakdown by subtype.
+	//
+	// Rendering the appearance streams into the raster would be a renderer,
+	// which design spec section 2 puts out of scope.
+	DroppedAnnots int
 }
 
 // CoversPage reports whether the raster fills the page box. When it is false
@@ -233,6 +253,22 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 		Bounds: boxRect(placement.Box),
 		Page:   rectOf(p.CropBox),
 	}
+	// Only on the success path. A divert has already told the caller it is
+	// getting no raster, and 97% of a real archive diverts, so reading and
+	// dereferencing every annotation there would be work spent on an answer
+	// nobody receives.
+	//
+	// An unreadable /Annots is not a reason to fail a page whose raster is
+	// fine. It leaves the count at zero, which understates the loss, so the
+	// error is dropped here and byblos-annots reports the read failures
+	// separately.
+	if annots, err := d.Annots(page); err == nil {
+		for _, a := range annots {
+			if a.Paints() {
+				out.DroppedAnnots++
+			}
+		}
+	}
 	countExtracted(out.CoversPage())
 	return out, nil
 }
@@ -321,12 +357,22 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 	// the page to a divert.
 	//
 	// "Content stream" is the exact width of the claim, and two things sit
-	// outside it. Annotations are never read at all — pdfdoc.Page reads the
-	// content stream and nothing else — so an annotation appearance stream in
-	// the uncovered strip is dropped silently (byb-b1.11). And Walk ignores a
-	// form /BBox and every clip path, so Bounds can overstate what is visible
-	// (byb-b1.12). Neither is new here; both were masked for these pages by the
-	// gate this replaced, which is why they are named rather than assumed away.
+	// outside it. Annotations are not in it, so an appearance stream in the
+	// uncovered strip is not something any arm above can see (byb-b1.11). And
+	// Walk ignores a form /BBox and every clip path, so Bounds can overstate
+	// what is visible (byb-b1.12). Neither is new here; both were masked for
+	// these pages by the gate this replaced, which is why they are named rather
+	// than assumed away.
+	//
+	// byb-b1.11 has since been measured rather than left as a caveat. Over
+	// 151,077 pages, 18,610 of them extracted: 6 carry an annotation that
+	// paints, exactly ONE of those had a raster short of the page box — the
+	// case this branch admits — and ZERO had ink landing outside the raster.
+	// So removing the gate widened the loss by one page in 151,077. It is
+	// reported instead of diverted, on PageRaster.DroppedAnnots, because
+	// refusing six real pages to avoid six incomplete ones is the worse trade
+	// for an archive. Note the count is non-zero on covered pages too: the loss
+	// was never particular to this branch, and 5 of the 6 predate it.
 	if top > 0 {
 		// That argument does not extend to a stack: an under-layer reaching past
 		// the top one is exactly the ink it says cannot exist. A layered page
