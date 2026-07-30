@@ -88,6 +88,9 @@ type Page struct {
 type Doc interface {
 	PageCount() int
 	Page(n int) (*Page, error)
+	// Annots returns page n's annotations. They are not part of Page because
+	// nothing in classification reads them yet; see annots.go.
+	Annots(n int) ([]Annot, error)
 	// XObject and ExtGStateOpaque implement content.Env.
 	XObject(scope int, name string) (content.XObject, bool)
 	ExtGStateOpaque(scope int, name string) bool
