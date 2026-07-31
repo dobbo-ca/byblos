@@ -359,7 +359,7 @@ func minimalPDFWithFont(t *testing.T, text string) []byte {
 	fill(descr, fmt.Sprintf("<< /Type /FontDescriptor /FontName /BbyblosGlyphless /Flags 32"+
 		" /FontBBox [0 0 0 0] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700"+
 		" /StemV 80 /FontFile2 %d 0 R >>", fontFile))
-	fillRawStream(fontFile, "", Font)
+	fillRawStream(fontFile, fmt.Sprintf("/Length1 %d", len(Font)), Font)
 
 	start := buf.Len()
 	fmt.Fprintf(&buf, "xref\n0 %d\n0000000000 65535 f \n", len(offsets)+1)
@@ -370,14 +370,26 @@ func minimalPDFWithFont(t *testing.T, text string) []byte {
 	return buf.Bytes()
 }
 
-// TestPdftotextExtractsStampedText is the acceptance criterion in byb-b4
-// exercised against just the font: text shown through it, at render mode 3,
-// still round-trips through pdftotext. It skips cleanly when poppler is not
-// installed (see oracle_test.go:52 for the established pattern) rather than
-// failing CI on a tool this repo does not depend on.
+// TestPdftotextExtractsStampedText is the acceptance criterion in byb-b4: text
+// shown through this font at render mode 3 round-trips through pdftotext, and
+// the embedded font program itself is one poppler actually loads. Those are
+// two separate claims -- pdftotext resolves glyphs from the content stream's
+// /Encoding, never from FontFile2, so it round-trips the text even when the
+// embedded program is garbage (verified: swapping Font for 8 bytes of junk
+// still makes pdftotext print "Hello Byblos", it just also prints "Syntax
+// Error: Embedded font file may be invalid" to a stream this test would
+// otherwise ignore). pdftoppm does consult FontFile2 to rasterize glyphs and
+// reports that same syntax error on stderr when the program fails to parse,
+// so a silent pdftoppm run is what actually proves the glyf/loca/head/hmtx
+// tables this package generates are well-formed. Both tools skip cleanly when
+// not installed (see oracle_test.go:52 for the established pattern) rather
+// than failing CI on tools this repo does not depend on.
 func TestPdftotextExtractsStampedText(t *testing.T) {
 	if _, err := exec.LookPath("pdftotext"); err != nil {
 		t.Skip("pdftotext not installed")
+	}
+	if _, err := exec.LookPath("pdftoppm"); err != nil {
+		t.Skip("pdftoppm not installed")
 	}
 	const want = "Hello Byblos"
 	pdf := minimalPDFWithFont(t, want)
@@ -393,5 +405,18 @@ func TestPdftotextExtractsStampedText(t *testing.T) {
 	}
 	if got := string(bytes.TrimSpace(out)); got != want {
 		t.Errorf("pdftotext extracted %q, want %q", got, want)
+	}
+
+	// pdftoppm forces poppler to load FontFile2 to rasterize the page, unlike
+	// pdftotext above. A malformed font doesn't fail the process -- poppler
+	// substitutes a fallback and only reports the problem on stderr -- so the
+	// exit code proves nothing here; the stderr text is the only signal that
+	// the font itself, not just the content stream, survived the round trip.
+	ppOut, err := exec.Command("pdftoppm", path, dir+"/page").CombinedOutput()
+	if err != nil {
+		t.Fatalf("pdftoppm: %v: %s", err, ppOut)
+	}
+	if len(ppOut) != 0 {
+		t.Errorf("pdftoppm reported a problem loading the embedded font: %s", ppOut)
 	}
 }
