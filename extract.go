@@ -254,9 +254,23 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		// TIFF is what pdfcpu emits for CMYK rasters; golang.org/x/image/tiff
-		// support arrives with B3. As above, the reason carries fileType so a
-		// TIFF divert nominates decode-tiff and nothing else (byb-z8j).
+		// As above, the reason carries fileType so the divert nominates one
+		// decoder rather than all three (byb-z8j).
+		//
+		// Do NOT read this as "CMYK rasters divert". They do not. pdfcpu renders
+		// a CMYK raster to TIFF (writeImage.go:385, :705 — note it returns the
+		// type as "tif", not "tiff"; divertClass maps that), and TIFF is ALREADY
+		// decodable here: github.com/hhrutter/tiff calls image.RegisterFormat
+		// for both endiannesses (reader.go:882-883) and is linked into every
+		// binary containing this package, transitively through
+		// internal/pdfdoc -> pdfcpu. Measured 2026-07-31: image.DecodeConfig on
+		// TIFF magic returns format "tiff", against "image: unknown format" for
+		// a control.
+		//
+		// So this site is reached for a TIFF only when that registered decoder
+		// REJECTS it — an unsupported compression, not a colour space. That is a
+		// much narrower set than the stale comment here used to claim, and it is
+		// why decode-tiff is rare in practice rather than dead.
 		countDivert("unsupported-codec-" + fileType)
 		return nil, fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err)
 	}
