@@ -46,8 +46,23 @@ type Provenance struct {
 	// therefore be read as "not known to have been rewritten by Optimize",
 	// never as "confirmed pass-through".
 	//
-	// "rewritten" is the only value emitted so far: pdfcpu's optimized bytes
-	// were kept. Reserve, do not yet emit, "passed-through".
+	// "rewritten" means pdfcpu's optimized bytes were kept and the input was
+	// not linearized, so nothing was lost to get them.
+	//
+	// "rewritten-delinearized" means the same, EXCEPT that the input carried a
+	// linearization parameter dictionary and the output does not. That is a
+	// real property traded for bytes, and it is the one case where the "no
+	// quality tradeoff" claim above does not hold. It is recorded separately
+	// rather than folded into "rewritten" because the two need different
+	// answers: a caller that re-linearizes downstream can ignore the first and
+	// must act on the second. Kleio's born-digital path exists precisely to
+	// produce linearized files (its compress stage runs ocrmypdf in
+	// linearize-only mode and does nothing else), so a later Optimize pass
+	// quietly undoing that is a regression byblos must not hide. Tracked as
+	// byb-k48, which will remove the case entirely by linearizing rather than
+	// by reporting.
+	//
+	// Reserve, do not yet emit, "passed-through".
 	//
 	// The converse also holds and is just as important: a pass-through run
 	// carries whatever record the input already had forward untouched, so

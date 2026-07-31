@@ -3,7 +3,12 @@ package byblos
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"go/build"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -367,6 +372,71 @@ func TestOptimizeLinearizeRefused(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("Optimize with Linearize:true wrote %d bytes despite erroring", out.Len())
 	}
+	assertNotImplemented(t, err, "linearize")
+}
+
+// assertNotImplemented pins the shape a caller actually branches on. A bare
+// non-nil error is not enough: Kleio has to tell "this build cannot do it, fall
+// back for every document" apart from "this document failed", and it must do
+// that with errors.Is/As rather than by matching on message text, which is not
+// API and would break on any rewording.
+func assertNotImplemented(t *testing.T, err error, wantCapability string) {
+	t.Helper()
+	if !errors.Is(err, ErrNotImplemented) {
+		t.Errorf("errors.Is(err, ErrNotImplemented) = false for %v; a caller cannot "+
+			"distinguish a missing capability from a failed document", err)
+	}
+	var ni *NotImplemented
+	if !errors.As(err, &ni) {
+		t.Fatalf("errors.As(err, *NotImplemented) = false for %v", err)
+	}
+	if ni.Capability != wantCapability {
+		t.Errorf("Capability = %q; want %q", ni.Capability, wantCapability)
+	}
+	if ni.Why == "" || ni.Issue == "" {
+		t.Errorf("NotImplemented{Capability:%q} has Why=%q Issue=%q; both must be set, "+
+			"or the error says no more than a bool would", ni.Capability, ni.Why, ni.Issue)
+	}
+	// The message has to carry the same facts, because most of the time it is
+	// all that reaches a log.
+	for _, want := range []string{wantCapability, ni.Issue} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message %q does not mention %q", err.Error(), want)
+		}
+	}
+}
+
+// TestEveryNotImplementedNamesAKnownCapability stops the two vocabularies
+// drifting apart. NotImplemented.Capability is documented as being from the
+// same set provenance and UpgradeCandidates use, which is the whole reason a
+// caller can feed it back to UpgradeCandidates later to ask whether a newer
+// build would now handle what it fell back on. A capability string that exists
+// only inside an error message cannot be used that way, and nothing else would
+// catch the typo.
+func TestEveryNotImplementedNamesAKnownCapability(t *testing.T) {
+	in := corpusDoc(t, passThroughFixture)
+	for _, tc := range []struct {
+		opts OptimizeOptions
+		want string
+	}{
+		{OptimizeOptions{Linearize: true}, "linearize"},
+		{OptimizeOptions{RecompressJPEG: true}, "jpeg-recompress"},
+	} {
+		var out bytes.Buffer
+		err := Optimize(&out, bytes.NewReader(in), tc.opts)
+		var ni *NotImplemented
+		if !errors.As(err, &ni) {
+			t.Fatalf("%+v: want a *NotImplemented, got %v", tc.opts, err)
+		}
+		if _, ok := capabilityRules[ni.Capability]; !ok {
+			t.Errorf("%+v reports capability %q, which has no entry in capabilityRules "+
+				"(upgrade.go): it cannot be handed to UpgradeCandidates, so the error "+
+				"names something no other part of byblos knows about", tc.opts, ni.Capability)
+		}
+		if ni.Capability != tc.want {
+			t.Errorf("%+v: Capability = %q; want %q", tc.opts, ni.Capability, tc.want)
+		}
+	}
 }
 
 // TestOptimizeRecompressJPEGRefused checks OptimizeOptions.RecompressJPEG's
@@ -382,6 +452,7 @@ func TestOptimizeRecompressJPEGRefused(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("Optimize with RecompressJPEG:true wrote %d bytes despite erroring", out.Len())
 	}
+	assertNotImplemented(t, err, "jpeg-recompress")
 }
 
 // TestOptimizeCorruptProvenanceFallsBack checks that a byblos-provenance
@@ -404,5 +475,122 @@ func TestOptimizeCorruptProvenanceFallsBack(t *testing.T) {
 	}
 	if _, err := pdfdoc.ReadProperties(bytes.NewReader(out.Bytes())); err != nil {
 		t.Fatalf("Optimize output does not validate: %v", err)
+	}
+}
+
+// --- linearization ----------------------------------------------------------
+//
+// pdfcpu's rewrite strips linearization (see OptimizeOptions.Linearize), so on
+// a linearized input the rewritten branch trades a real property for bytes.
+// Optimize records that separately from an ordinary rewrite. These tests pin
+// the detection and the marker; byb-k48 tracks removing the case altogether by
+// linearizing rather than by reporting.
+
+// linearizedFixture returns a REAL linearized PDF, produced by some other
+// tool, not one this repo hand-built. pdfcpu ships two in its own testdata and
+// the module cache is already on disk because the build needs it.
+//
+// This is an oracle, so it skips when absent -- but it is a stronger fixture
+// than a synthetic one would be, and deliberately so: a hand-built
+// linearization dictionary would only prove that isLinearized finds the string
+// this test just wrote, which is the vacuity trap that has bitten this repo
+// before. A file from elsewhere cannot be tuned to the assertion.
+func linearizedFixture(t *testing.T) []byte {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(
+		build.Default.GOPATH, "pkg", "mod", "github.com", "pdfcpu",
+		"pdfcpu@*", "pkg", "testdata", "bookletTest.pdf"))
+	if err != nil || len(matches) == 0 {
+		t.Skipf("pdfcpu testdata not in the module cache; no real linearized PDF available (err %v)", err)
+	}
+	in, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Skipf("reading %s: %v", matches[0], err)
+	}
+	if !bytes.Contains(in[:min(len(in), linearizationWindow)], []byte("/Linearized")) {
+		t.Fatalf("%s is no longer linearized; this fixture cannot test what it claims to", matches[0])
+	}
+	return in
+}
+
+func TestIsLinearizedSeparatesRealFilesBothWays(t *testing.T) {
+	if got := isLinearized(linearizedFixture(t)); !got {
+		t.Error("isLinearized(bookletTest.pdf) = false; want true")
+	}
+	// Every corpus document is hand-rolled and none is linearized, so this is
+	// the negative half against real byblos output rather than against a
+	// crafted buffer.
+	for _, name := range []string{passThroughFixture, nonPassThroughFixture} {
+		if isLinearized(corpusDoc(t, name)) {
+			t.Errorf("isLinearized(%s) = true; want false", name)
+		}
+	}
+}
+
+// Annex F.2.2 puts the whole linearization parameter dictionary inside the
+// first 1024 bytes. A /Linearized token past that does NOT make a file
+// linearized, and treating it as if it did would misreport an ordinary
+// document that merely mentions the word.
+func TestIsLinearizedIgnoresAMarkerPastTheWindow(t *testing.T) {
+	buf := append(bytes.Repeat([]byte("%comment padding\n"), 200), []byte("/Linearized 1")...)
+	if len(buf) <= linearizationWindow {
+		t.Fatalf("fixture is %d bytes; it must exceed the %d-byte window to test anything",
+			len(buf), linearizationWindow)
+	}
+	if isLinearized(buf) {
+		t.Error("isLinearized() = true for a marker past the Annex F.2.2 window; want false")
+	}
+	// A file shorter than the window must not panic on the slice bound.
+	if isLinearized([]byte("%PDF-1.7\n")) {
+		t.Error("isLinearized() = true for a short non-linearized file; want false")
+	}
+}
+
+// The end-to-end claim: a linearized input taking the rewritten branch comes
+// back delinearized, and the record says so rather than reporting a plain
+// "rewritten" that reads as free.
+func TestOptimizeRecordsThatTheRewriteDelinearized(t *testing.T) {
+	in := linearizedFixture(t)
+
+	var out bytes.Buffer
+	if err := Optimize(&out, bytes.NewReader(in), OptimizeOptions{}); err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if out.Len() >= len(in) {
+		t.Fatalf("output is %d bytes for a %d-byte input; the rewritten branch did not run, "+
+			"so this test proves nothing about delinearization", out.Len(), len(in))
+	}
+	if isLinearized(out.Bytes()) {
+		t.Fatal("output is still linearized; pdfcpu's behaviour has changed and " +
+			"OptimizeOptions.Linearize's measurement needs redoing")
+	}
+	p, err := ReadProvenance(bytes.NewReader(out.Bytes()))
+	if err != nil {
+		t.Fatalf("ReadProvenance: %v", err)
+	}
+	if p.Optimized != "rewritten-delinearized" {
+		t.Errorf("Optimized = %q; want %q -- the loss of linearization must not be "+
+			"reported as an ordinary rewrite", p.Optimized, "rewritten-delinearized")
+	}
+}
+
+// The converse, so the marker cannot degenerate into "rewritten always says
+// delinearized": a NON-linearized input on the same branch records the plain
+// value.
+func TestOptimizeRecordsAPlainRewriteWhenNothingWasLost(t *testing.T) {
+	in := corpus.DupRasterWithInfo(provenanceKey, "")
+	var out bytes.Buffer
+	if err := Optimize(&out, bytes.NewReader(in), OptimizeOptions{}); err != nil {
+		t.Fatalf("Optimize: %v", err)
+	}
+	if bytes.Equal(out.Bytes(), in) {
+		t.Fatal("output is byte-identical to input: the pass-through branch ran, not the rewrite")
+	}
+	p, err := ReadProvenance(bytes.NewReader(out.Bytes()))
+	if err != nil {
+		t.Fatalf("ReadProvenance: %v", err)
+	}
+	if p.Optimized != "rewritten" {
+		t.Errorf("Optimized = %q; want %q", p.Optimized, "rewritten")
 	}
 }
