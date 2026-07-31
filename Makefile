@@ -1,4 +1,4 @@
-.PHONY: build test lint corpus oracle
+.PHONY: build test lint corpus oracle glyphless
 
 build:
 	CGO_ENABLED=0 go build ./...
@@ -26,3 +26,8 @@ corpus:
 # never run in CI. Commit the result.
 oracle: corpus
 	CGO_ENABLED=0 go run testdata/oracle/gen.go
+
+# Regenerates internal/glyphless/glyphless.ttf, the invisible-text font byb-b4
+# stamps with. Manual step, never run in CI. Commit the result.
+glyphless:
+	CGO_ENABLED=0 go run internal/glyphless/gen.go
