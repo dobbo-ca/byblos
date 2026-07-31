@@ -1,4 +1,4 @@
-.PHONY: build test lint corpus oracle glyphless
+.PHONY: build test lint corpus oracle glyphless jbig2-goldens
 
 build:
 	CGO_ENABLED=0 go build ./...
@@ -31,3 +31,9 @@ oracle: corpus
 # stamps with. Manual step, never run in CI. Commit the result.
 glyphless:
 	CGO_ENABLED=0 go run internal/glyphless/gen.go
+
+# Regenerates the committed JBIG2 encoder goldens. Requires jbig2dec, which
+# verifies each stream round-trips losslessly before the golden is written.
+# Manual step -- never run in CI. Commit the results.
+jbig2-goldens:
+	go test ./internal/jbig2/ -run TestEncoderGoldens -update -v

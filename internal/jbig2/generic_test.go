@@ -77,6 +77,46 @@ func TestSLTPContextDecomposition(t *testing.T) {
 	}
 }
 
+// TestSLTPContextIsPinnedAgainstCollision closes the hole TestEncodeGenericRegionAnnexH1
+// documents: none of the fixtures in fixtureBitmaps() ever code an ordinary
+// pixel in context 0x9B25 (or the mutant 0x9B24), so a transcription error in
+// sltpContextTemplate0 passes every golden and every decode round trip on this
+// lane's corpus. This bitmap is built so that ordinary pixel coding at (6, 4)
+// visits exactly 0x9B25 -- row y-2 (x=4..8) is 10011, row y-1 (x=3..9) is
+// 0110010, row y (x=2..5) is 0101, per T.88 Figure 8 -- which collides with the
+// SLTP context under TPGDON. Verified by mutation 2026-07-31: changing
+// sltpContextTemplate0 to 0x9B24 changes byte 8 of the region data from 0xBF to
+// 0xEF; without this fixture that mutation is invisible to every other test in
+// the package.
+func TestSLTPContextIsPinnedAgainstCollision(t *testing.T) {
+	b := NewBitmap(16, 8)
+	for i, v := range []int{1, 0, 0, 1, 1} { // row y-2, x=4..8
+		if v == 1 {
+			b.Set(4+i, 2, 1)
+		}
+	}
+	for i, v := range []int{0, 1, 1, 0, 0, 1, 0} { // row y-1, x=3..9
+		if v == 1 {
+			b.Set(3+i, 3, 1)
+		}
+	}
+	for i, v := range []int{0, 1, 0, 1} { // row y, x=2..5
+		if v == 1 {
+			b.Set(2+i, 4, 1)
+		}
+	}
+	if got := contextTemplate0(b, 6, 4); got != sltpContextTemplate0 {
+		t.Fatalf("fixture context at (6,4) = %#04x; want %#04x (sltpContextTemplate0)",
+			got, sltpContextTemplate0)
+	}
+	want := []byte{0xBE, 0x68, 0x17, 0x23, 0x56, 0xE8, 0x8F, 0xBF, 0xFF, 0xAC}
+	got := EncodeGenericRegion(b, true)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("region data mismatch\ngot  (%d): % 02X\nwant (%d): % 02X",
+			len(got), got, len(want), want)
+	}
+}
+
 // TestEncodeGenericRegionAnnexH1 is the T.88 Annex H.1 segment 11 conformance
 // vector (doc p. 135): a 54x44 bitmap coded with GBTEMPLATE 0, TPGDON = 1 and
 // nominal AT pixels produces exactly these nine bytes.
@@ -93,10 +133,14 @@ func TestSLTPContextDecomposition(t *testing.T) {
 // this test and still emit a stream a conforming decoder mis-decodes on some
 // other image.
 //
-// What closes that hole is a decode round trip (plan Task 8), not another
-// encoder golden -- a golden can only pin the contexts this one image happens
-// to visit. Until Task 8 lands, sltpContextTemplate0 is checked against T.88
-// 6.2.5.7 by reading it, not by testing it.
+// A decode round trip (plan Task 8) does NOT close this hole either: it is
+// strictly downstream of the encoder's bytes, and on every fixture in
+// fixtureBitmaps() ordinary pixel coding never visits context 0x9B25 or
+// 0x9B24, so the mutation produces byte-identical output and the round trip
+// stays green (confirmed by mutation 2026-07-31). What actually closes it is
+// TestSLTPContextIsPinnedAgainstCollision below: a bitmap built so that
+// ordinary pixel coding visits 0x9B25 at the same position the SLTP bit does,
+// which turns a wrong constant into a wrong byte.
 func TestEncodeGenericRegionAnnexH1(t *testing.T) {
 	want := []byte{0x04, 0xEE, 0xED, 0x87, 0xFB, 0xCB, 0x2B, 0xFF, 0xAC}
 	got := EncodeGenericRegion(figureH6(), true)
@@ -193,5 +237,63 @@ func TestEncodeGenericRegionCorpusWellFormed(t *testing.T) {
 		if got[len(got)-2] != 0xFF || got[len(got)-1] != 0xAC {
 			t.Errorf("%s: stream tail = % 02X; want ... FF AC", name, got[len(got)-2:])
 		}
+	}
+}
+
+// encodeGenericRegionReference is the straightforward implementation: it calls
+// contextTemplate0 for every pixel. It exists only so the optimised encoder has
+// something to be proven equal to.
+func encodeGenericRegionReference(b *Bitmap, tpgdon bool) []byte {
+	b.MaskPadding()
+	cx := make(contexts, 1<<16)
+	e := newEncoder()
+	ltp := 0
+	for y := 0; y < b.H; y++ {
+		if tpgdon {
+			next := 0
+			if b.RowEqualAbove(y) {
+				next = 1
+			}
+			e.encode(cx, sltpContextTemplate0, next^ltp)
+			ltp = next
+			if ltp == 1 {
+				continue
+			}
+		}
+		for x := 0; x < b.W; x++ {
+			e.encode(cx, contextTemplate0(b, x, y), b.Get(x, y))
+		}
+	}
+	return e.flush()
+}
+
+// The sliding-window context update must be bit-for-bit equivalent to forming
+// each context from scratch, on every fixture and with TPGD both ways.
+func TestEncodeGenericRegionMatchesReference(t *testing.T) {
+	for name, b := range fixtureBitmaps() {
+		for _, tpgdon := range []bool{true, false} {
+			want := encodeGenericRegionReference(b, tpgdon)
+			got := EncodeGenericRegion(b, tpgdon)
+			if !bytes.Equal(got, want) {
+				t.Errorf("%s (tpgdon=%v): optimised encoder differs from reference\ngot  (%d): % 02X\nwant (%d): % 02X",
+					name, tpgdon, len(got), got, len(want), want)
+			}
+		}
+	}
+}
+
+func BenchmarkEncodeGenericRegionTextPage(bench *testing.B) {
+	b := textPageBitmap(2550, 3300) // A4 at 300 DPI
+	bench.ResetTimer()
+	for i := 0; i < bench.N; i++ {
+		EncodeGenericRegion(b, true)
+	}
+}
+
+func BenchmarkEncodeGenericRegionReferenceTextPage(bench *testing.B) {
+	b := textPageBitmap(2550, 3300)
+	bench.ResetTimer()
+	for i := 0; i < bench.N; i++ {
+		encodeGenericRegionReference(b, true)
 	}
 }
