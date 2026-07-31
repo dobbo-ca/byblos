@@ -127,6 +127,11 @@ type Doc interface {
 	// bytes and the file type pdfcpu inferred. The id is the one XObject
 	// returned; an id this document has not resolved is an error.
 	RawImage(id int) (data []byte, fileType string, err error)
+	// ReplaceImage and Write are the write half; see write.go. They are on the
+	// same interface because writing requires the context Open normalized, so
+	// there is no way to reach them from a document Byblos did not read.
+	ReplaceImage(id int, img EncodedImage) error
+	Write(w io.Writer) error
 }
 
 type doc struct {
@@ -134,6 +139,7 @@ type doc struct {
 	scopes  []scope
 	images  map[int]ImageInfo
 	streams map[int]*types.StreamDict // image stream dicts, keyed like images
+	refs    map[int]types.IndirectRef // xref identity of those streams, for writing
 	nextID  int                       // synthetic ids for direct (non-indirect) image objects
 }
 
@@ -167,6 +173,7 @@ func Open(rs io.ReadSeeker) (d Doc, err error) {
 		ctx:     ctx,
 		images:  map[int]ImageInfo{},
 		streams: map[int]*types.StreamDict{},
+		refs:    map[int]types.IndirectRef{},
 		nextID:  -1,
 	}, nil
 }
@@ -303,6 +310,11 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 		// asking pdfcpu which objects a page uses, because that answer comes
 		// from the optimize pass, which deduplicates identical rasters.
 		d.streams[id] = sd
+		// And its xref identity, which ReplaceImage needs to write the
+		// substituted stream back: sd is a copy, not a handle (see write.go).
+		if r, ok := indirectRefOf(obj); ok {
+			d.refs[id] = r
+		}
 		return content.XObject{Image: true, ID: id}, true
 
 	case "Form":
@@ -387,15 +399,24 @@ func (d *doc) ExtGStateOpaque(sc int, name string) bool {
 // identify returns a stable id for an XObject: its PDF object number when it is
 // an indirect reference, and a negative synthetic id otherwise.
 func (d *doc) identify(o types.Object) int {
-	switch v := o.(type) {
-	case types.IndirectRef:
-		return v.ObjectNumber.Value()
-	case *types.IndirectRef:
-		return v.ObjectNumber.Value()
+	if r, ok := indirectRefOf(o); ok {
+		return r.ObjectNumber.Value()
 	}
 	id := d.nextID
 	d.nextID--
 	return id
+}
+
+// indirectRefOf reports the indirect reference o is, if it is one. pdfcpu
+// yields both the value and the pointer form depending on the parse path.
+func indirectRefOf(o types.Object) (types.IndirectRef, bool) {
+	switch v := o.(type) {
+	case types.IndirectRef:
+		return v, true
+	case *types.IndirectRef:
+		return *v, true
+	}
+	return types.IndirectRef{}, false
 }
 
 func (d *doc) ImageInfo(id int) (ImageInfo, bool) {
