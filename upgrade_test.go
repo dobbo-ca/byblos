@@ -125,6 +125,34 @@ func TestUpgradeCandidates(t *testing.T) {
 			current: []string{"decode-jbig2", "decode-jpx", "decode-tiff", "extract-raster", "inspect", "render"},
 			want:    []string{"decode-jbig2", "decode-jpx", "decode-tiff", "render"},
 		},
+		// --- byb-z8j: a codec-specific class narrows which decoder is wanted ---
+		{
+			name: "jbig2-diverted page wants decode-jbig2 and not decode-jpx or decode-tiff",
+			prov: &Provenance{
+				Capabilities: []string{"extract-raster", "inspect"},
+				Pages:        []PageProvenance{{Diverted: "unsupported-codec-jbig2"}},
+			},
+			current: []string{"decode-jbig2", "decode-jpx", "decode-tiff", "extract-raster", "inspect"},
+			want:    []string{"decode-jbig2"},
+		},
+		{
+			name: "jpx-diverted page wants only decode-jpx",
+			prov: &Provenance{
+				Capabilities: []string{"extract-raster", "inspect"},
+				Pages:        []PageProvenance{{Diverted: "unsupported-codec-jpx"}},
+			},
+			current: []string{"decode-jbig2", "decode-jpx", "decode-tiff", "extract-raster", "inspect"},
+			want:    []string{"decode-jpx"},
+		},
+		{
+			name: "tiff-diverted page wants only decode-tiff",
+			prov: &Provenance{
+				Capabilities: []string{"extract-raster", "inspect"},
+				Pages:        []PageProvenance{{Diverted: "unsupported-codec-tiff"}},
+			},
+			current: []string{"decode-jbig2", "decode-jpx", "decode-tiff", "extract-raster", "inspect"},
+			want:    []string{"decode-tiff"},
+		},
 		{
 			name: "a fully processed document wants no decoder",
 			prov: &Provenance{

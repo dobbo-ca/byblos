@@ -107,9 +107,11 @@ than the output side; on the one raw-consumer-scanner corpus it is not a gate at
 all. Settle what Kleio actually ingests before ordering B2 and B3.
 
 **Upgrade path:** documents whose provenance records
-`diverted: unsupported-codec`. Note that the stored record does not say *which*
-codec, so all three capabilities currently nominate the same document set. That
-is deliberately conservative; making the record finer is `byb-z8j`.
+`diverted: unsupported-codec-jbig2` / `-jpx` / `-tiff` nominate only the
+matching decoder (`byb-z8j`). A document written before `byb-z8j`, or one whose
+codec pdfcpu declined to name, still carries the coarse
+`diverted: unsupported-codec` and nominates all three, since nothing can tell
+after the fact which codec it held.
 
 ---
 
