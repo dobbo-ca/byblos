@@ -562,15 +562,19 @@ func area(b content.Box) float64 { return (b.URX - b.LLX) * (b.URY - b.LLY) }
 // counter key.
 //
 // byb-z8j: for the codec case that answer now names the codec.
-// "unsupported-codec-jbig2"/"-jpx"/"-tiff" pass straight through, so
-// decode-jbig2/-jpx/-tiff (upgrade.go) can each nominate only the pages that
-// want that specific decoder. Anything else that starts with
-// "unsupported-codec" — the coarse legacy string a pre-byb-z8j build wrote,
-// where nothing can say after the fact which codec it carried, and any codec
-// name this build does not yet special-case — collapses to the coarse
-// "unsupported-codec" class, which every decode-* rule still matches
-// (TestDivertClassCoversEveryReason and the compatibility test in
-// upgrade_test.go pin this). A codec problem never falls through to
+// "unsupported-codec-jbig2"/"-jpx" pass straight through, and
+// "unsupported-codec-tif" — the file type pdfcpu v0.13.0 actually returns for
+// a rendered TIFF (writeImage.go renderDeviceCMYKToTIFF and
+// renderIndexedCMYKToTIFF both return "tif", never "tiff") — normalizes to
+// "unsupported-codec-tiff" so the stored class matches the readable rule name
+// decode-tiff (upgrade.go) keys on. decode-jbig2/-jpx/-tiff (upgrade.go) can
+// each nominate only the pages that want that specific decoder. Anything else
+// that starts with "unsupported-codec" — the coarse legacy string a
+// pre-byb-z8j build wrote, where nothing can say after the fact which codec
+// it carried, and any codec name this build does not yet special-case —
+// collapses to the coarse "unsupported-codec" class, which every decode-*
+// rule still matches (TestDivertClassCoversEveryReason and the compatibility
+// test in upgrade_test.go pin this). A codec problem never falls through to
 // "not-single-raster": that class nominates a renderer, and byb-97q is why a
 // renderer is never the answer to an undecodable codec.
 //
@@ -581,8 +585,10 @@ func area(b content.Box) float64 { return (b.URX - b.LLX) * (b.URY - b.LLY) }
 // capability with no rule.
 func divertClass(reason string) string {
 	switch reason {
-	case "unsupported-codec-jbig2", "unsupported-codec-jpx", "unsupported-codec-tiff":
+	case "unsupported-codec-jbig2", "unsupported-codec-jpx":
 		return reason
+	case "unsupported-codec-tif":
+		return "unsupported-codec-tiff"
 	}
 	if strings.HasPrefix(reason, "unsupported-codec") {
 		return "unsupported-codec"

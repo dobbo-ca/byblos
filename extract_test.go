@@ -295,7 +295,13 @@ func TestDivertClassCoversEveryReason(t *testing.T) {
 		// straight through so each decode-* rule can key on its own class.
 		"unsupported-codec-jbig2": "unsupported-codec-jbig2",
 		"unsupported-codec-jpx":   "unsupported-codec-jpx",
-		"unsupported-codec-tiff":  "unsupported-codec-tiff",
+		// pdfcpu v0.13.0 names this file type "tif", never "tiff"
+		// (writeImage.go renderDeviceCMYKToTIFF / renderIndexedCMYKToTIFF both
+		// return "tif"), so "unsupported-codec-tif" is the reason extract.go
+		// actually emits. divertClass normalizes it to "unsupported-codec-tiff"
+		// -- the class name decode-tiff (upgrade.go) keys on -- so the rule
+		// name stays readable even though pdfcpu's abbreviation is not.
+		"unsupported-codec-tif": "unsupported-codec-tiff",
 		// An unrecognised codec suffix is still a codec problem, not a
 		// rendering one: falling back to "not-single-raster" here would
 		// nominate a renderer for a page whose codec no decoder can help
