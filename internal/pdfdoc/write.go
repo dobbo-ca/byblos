@@ -46,6 +46,7 @@ import (
 	"io"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
@@ -261,6 +262,30 @@ func (d *doc) Write(w io.Writer) (err error) {
 	defer catchPanic("write", &err)
 	if err := api.WriteContext(d.ctx, w); err != nil {
 		return fmt.Errorf("byblos/pdfdoc: write: %w", err)
+	}
+	return nil
+}
+
+// Validate reports whether r parses as a structurally valid PDF: xref offsets
+// resolve and the page tree's /Count agrees with its /Kids. It checks
+// structure only, not pixel content — a stream whose filter claims a codec
+// its bytes do not actually hold still validates, and so does a stream whose
+// /Length is wrong but still parses (pdfcpu trusts the declared /Length when
+// reading; it does not recompute it from the bytes between `stream` and
+// `endstream`).
+//
+// This exists for BuildPDF (byb-c3o): a hand-rolled writer has no reader of
+// its own to round-trip through, and pdfcpu's validator is the independent
+// check that the bytes it emits are a PDF at all. The one property this
+// cannot check — /Length matching the stream — is instead guaranteed by
+// construction in pdfbuild's writer: fillStream writes /Length from
+// len(payload) immediately before writing payload itself
+// (internal/pdfbuild/pdfbuild.go), so the two cannot diverge without editing
+// that one function.
+func Validate(r io.ReadSeeker) (err error) {
+	defer catchPanic("validate", &err)
+	if err := api.Validate(r, model.NewDefaultConfiguration()); err != nil {
+		return fmt.Errorf("byblos/pdfdoc: validate: %w", err)
 	}
 	return nil
 }

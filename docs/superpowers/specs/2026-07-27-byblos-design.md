@@ -16,13 +16,14 @@ Byblos was the port that traded papyrus to Greece; "biblion", and eventually
 Kleio's document pipeline shells out to a container image bundling `ocrmypdf`,
 `tesseract`, `ghostscript`, `jbig2enc`, `pngquant`, `poppler`, `unpaper`, and
 `img2pdf`. [Cadmus](https://github.com/dobbo-ca/cadmus) removes `tesseract` and
-the OCR half of `ocrmypdf`. Byblos removes the rest.
+the OCR half of `ocrmypdf`. Byblos removes the rest except `unpaper`, deferred
+(see FUTURE.md).
 
 ### Goals
 
 | # | Goal |
 |---|------|
-| G1 | Eliminate Kleio's PDF-side binary dependencies: `ghostscript`, `jbig2enc`, `pngquant`, `poppler`, `img2pdf`, `unpaper` |
+| G1 | Eliminate Kleio's PDF-side binary dependencies: `ghostscript`, `jbig2enc`, `pngquant`, `poppler`, `img2pdf` |
 | G2 | Keep compression quality competitive with the `ocrmypdf` pipeline it replaces |
 | G3 | Make processed documents **upgradeable**: when Byblos gains a capability, identify precisely which stored documents would benefit |
 

@@ -144,6 +144,7 @@ type PageProvenance struct {
 // Append to this list as each epic lands. Do not remove entries: a capability
 // string is a permanent identifier that older documents' provenance refers to.
 var buildCapabilities = []string{
+	"build-pdf",
 	"extract-raster",
 	"inspect",
 	"jbig2-generic",
