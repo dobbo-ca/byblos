@@ -48,6 +48,17 @@ func contextTemplate0(b *Bitmap, x, y int) int {
 // The context array is allocated fresh on every call, which is what T.88
 // 7.4.6.4 step 2 requires: arithmetic coding statistics are reset to zero at
 // the start of every generic region segment, never carried across segments.
+//
+// b IS WRITTEN TO. The first thing this does is mask b's padding — the bits
+// past W in each row's last byte, plus any whole trailing bytes of a
+// non-minimal Stride. No pixel is lost, because those bits are not pixels, but
+// a caller keeping its own bookkeeping there will find it zeroed.
+//
+// The masking is load-bearing, not hygienic, which is why it is not simply
+// dropped: RowEqualAbove compares whole stride bytes, so unmasked padding would
+// make two rows with identical pixels compare unequal and cost TPGD its match.
+// The cost of that is a larger stream, never a wrong one — which is exactly why
+// it would go unnoticed.
 func EncodeGenericRegion(b *Bitmap, tpgdon bool) []byte {
 	b.MaskPadding()
 

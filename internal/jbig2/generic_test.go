@@ -81,10 +81,22 @@ func TestSLTPContextDecomposition(t *testing.T) {
 // vector (doc p. 135): a 54x44 bitmap coded with GBTEMPLATE 0, TPGDON = 1 and
 // nominal AT pixels produces exactly these nine bytes.
 //
-// This single assertion pins the context bit order, the SLTP context value, the
-// TPGD state machine, the out-of-bounds rule and the MQ flush convention all at
-// once. If it fails, one of those five is wrong -- and the MQ coder is already
-// proven by Task 2, so it is one of the other four.
+// It is this lane's acceptance gate, but it does NOT pin everything it looks
+// like it pins, and the difference matters to anyone changing this package.
+//
+// Measured by mutation 2026-07-31: perturbing one entry of the Qe table turns
+// this test red, so the MQ probability state is genuinely constrained. Changing
+// sltpContextTemplate0 from 0x9B25 to 0x9B24 leaves the output BYTE-IDENTICAL.
+// Every MQ context starts at the same state (I = 0, MPS = 0), and on this image
+// neither value collides with a context the pixel coding also touches, so the
+// two evolve in lockstep. A transcription error in that constant would pass
+// this test and still emit a stream a conforming decoder mis-decodes on some
+// other image.
+//
+// What closes that hole is a decode round trip (plan Task 8), not another
+// encoder golden -- a golden can only pin the contexts this one image happens
+// to visit. Until Task 8 lands, sltpContextTemplate0 is checked against T.88
+// 6.2.5.7 by reading it, not by testing it.
 func TestEncodeGenericRegionAnnexH1(t *testing.T) {
 	want := []byte{0x04, 0xEE, 0xED, 0x87, 0xFB, 0xCB, 0x2B, 0xFF, 0xAC}
 	got := EncodeGenericRegion(figureH6(), true)
