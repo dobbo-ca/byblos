@@ -1,6 +1,7 @@
 package byblos
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -98,6 +99,58 @@ func TestPageProvenanceOmitsEmptyFields(t *testing.T) {
 	}
 	if string(raw) != "{}" {
 		t.Errorf("Marshal(PageProvenance{}) = %s; want {}", raw)
+	}
+}
+
+// byb-0dz: the serialization half of B5. WriteProvenance/ReadProvenance must
+// round-trip a Provenance through a real PDF's Info dictionary, with no
+// dependency on extraction (b1) or the text layer (b4) -- born-digital is a
+// document neither of those touches.
+func TestWriteReadProvenanceRoundTrip(t *testing.T) {
+	in := Provenance{
+		Version:      Version,
+		Capabilities: Capabilities(),
+		ProcessedAt:  time.Date(2026, 7, 31, 9, 0, 0, 0, time.UTC),
+		Pages: []PageProvenance{
+			{Applied: []string{"extract-raster"}},
+			{Diverted: "unsupported-codec-jbig2"},
+		},
+	}
+	var out bytes.Buffer
+	if err := WriteProvenance(bytes.NewReader(corpusDoc(t, "born-digital")), &out, in); err != nil {
+		t.Fatalf("WriteProvenance() error = %v", err)
+	}
+	got, err := ReadProvenance(bytes.NewReader(out.Bytes()))
+	if err != nil {
+		t.Fatalf("ReadProvenance() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("ReadProvenance() = nil; want the record just written")
+	}
+	if got.Version != in.Version || !slices.Equal(got.Capabilities, in.Capabilities) {
+		t.Errorf("round trip = %+v; want %+v", got, in)
+	}
+	if !got.ProcessedAt.Equal(in.ProcessedAt) {
+		t.Errorf("ProcessedAt = %v; want %v", got.ProcessedAt, in.ProcessedAt)
+	}
+	if len(got.Pages) != 2 ||
+		!slices.Equal(got.Pages[0].Applied, in.Pages[0].Applied) ||
+		got.Pages[1].Diverted != in.Pages[1].Diverted {
+		t.Errorf("Pages = %+v; want %+v", got.Pages, in.Pages)
+	}
+}
+
+// A document no Byblos build has processed carries no provenance key at all.
+// ReadProvenance must report that as "nothing known" (nil, nil), not an error
+// -- UpgradeCandidates already treats a nil *Provenance as every capability
+// being a candidate, so this is the natural way to describe a never-seen file.
+func TestReadProvenanceAbsent(t *testing.T) {
+	got, err := ReadProvenance(bytes.NewReader(corpusDoc(t, "born-digital")))
+	if err != nil {
+		t.Fatalf("ReadProvenance() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("ReadProvenance() = %+v; want nil", got)
 	}
 }
 

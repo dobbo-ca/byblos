@@ -286,7 +286,27 @@ func TestDivertClassCoversEveryReason(t *testing.T) {
 		"not-page-covering":   "not-single-raster",
 		"transparent-overlay": "not-single-raster",
 		"mrc-layers":          "not-single-raster",
-		"unsupported-codec":   "unsupported-codec",
+		// The coarse legacy class. A record written before byb-z8j, or one
+		// where the codec could not be determined (pdfdoc.ErrUnsupportedCodec:
+		// pdfcpu returns a nil reader before naming a file type), still carries
+		// exactly this string and must still match all three decode-* rules.
+		"unsupported-codec": "unsupported-codec",
+		// byb-z8j: the fine reason names the codec, and divertClass passes it
+		// straight through so each decode-* rule can key on its own class.
+		"unsupported-codec-jbig2": "unsupported-codec-jbig2",
+		"unsupported-codec-jpx":   "unsupported-codec-jpx",
+		// pdfcpu v0.13.0 names this file type "tif", never "tiff"
+		// (writeImage.go renderDeviceCMYKToTIFF / renderIndexedCMYKToTIFF both
+		// return "tif"), so "unsupported-codec-tif" is the reason extract.go
+		// actually emits. divertClass normalizes it to "unsupported-codec-tiff"
+		// -- the class name decode-tiff (upgrade.go) keys on -- so the rule
+		// name stays readable even though pdfcpu's abbreviation is not.
+		"unsupported-codec-tif": "unsupported-codec-tiff",
+		// An unrecognised codec suffix is still a codec problem, not a
+		// rendering one: falling back to "not-single-raster" here would
+		// nominate a renderer for a page whose codec no decoder can help
+		// either, exactly what byb-97q ruled out for the coarse class.
+		"unsupported-codec-cmyk": "unsupported-codec",
 	}
 	for reason, class := range want {
 		if got := divertClass(reason); got != class {

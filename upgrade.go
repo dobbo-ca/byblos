@@ -44,19 +44,23 @@ var capabilityRules = map[string]func(*Provenance) bool{
 	// with very different answers by corpus — jpx dominates web-archive scans,
 	// jbig2 dominates document-conversion output.
 	//
-	// All three key on the same stored class, so today they nominate the same
-	// document set: PageProvenance.Diverted records only "unsupported-codec",
-	// not which codec it was. That is the existing conservative bias — a wasted
-	// re-run beats a hidden upgrade — and it is a record-format question, not a
-	// rule question (byb-z8j). The capability strings are separate now so that
-	// a finer record later needs no change to any caller.
+	// byb-z8j gave divertClass (extract.go) a codec-specific class per codec,
+	// so each rule now also keys on its own "unsupported-codec-<codec>" class
+	// and nominates only the pages that actually want that decoder. The coarse
+	// "unsupported-codec" stays in every rule below: a document a pre-byb-z8j
+	// build wrote, or one whose codec this build could not name (RawImage's
+	// ErrUnsupportedCodec path — pdfcpu gives up before naming a file type),
+	// carries only the coarse class, and nothing can tell after the fact which
+	// codec it held. Conservative bias unchanged — a wasted re-run beats a
+	// hidden upgrade — it now only costs that on the pages the fine reason
+	// could not reach.
 	//
 	// The names are "decode-<codec>" and not "<codec>-decode" on purpose:
 	// "jbig2-decode" would match the "jbig2-" prefix that page-cleanup below
 	// tests for.
-	"decode-jbig2": anyPageDiverted("unsupported-codec"),
-	"decode-jpx":   anyPageDiverted("unsupported-codec"),
-	"decode-tiff":  anyPageDiverted("unsupported-codec"),
+	"decode-jbig2": anyPageDiverted("unsupported-codec", "unsupported-codec-jbig2"),
+	"decode-jpx":   anyPageDiverted("unsupported-codec", "unsupported-codec-jpx"),
+	"decode-tiff":  anyPageDiverted("unsupported-codec", "unsupported-codec-tiff"),
 
 	// Output-side capabilities: gaining one does not improve a document that was
 	// already processed with it, and we cannot tell from the record whether a

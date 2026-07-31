@@ -7,6 +7,7 @@ import (
 	"image"
 	"io"
 	"math"
+	"strings"
 
 	_ "image/jpeg"
 	_ "image/png"
@@ -227,6 +228,11 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 		// pdfcpu declines to render some filters by returning a nil reader;
 		// pdfdoc turns that into ErrUnsupportedCodec. That is a divert (the page
 		// is understood, its codec is not), never a read failure.
+		//
+		// pdfcpu gives up before naming a file type here (RawImage's ErrUnsupportedCodec
+		// comment), so unlike the two divert sites below, there is no codec name
+		// to carry. This stays the coarse legacy reason; divertClass maps it to
+		// the class that still nominates every decode-* rule (byb-z8j).
 		if errors.Is(err, pdfdoc.ErrUnsupportedCodec) {
 			countDivert("unsupported-codec")
 			return nil, fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err)
@@ -238,14 +244,34 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 	case "jbig2", "jpx":
 		// pdfcpu returns these as opaque bytes rather than erroring, so the
 		// check has to happen here or the bytes look like a valid image.
-		countDivert("unsupported-codec")
+		//
+		// The reason carries fileType so divertClass (extract.go) can emit a
+		// codec-specific class and capabilityRules (upgrade.go) can nominate
+		// decode-jbig2 without also nominating decode-jpx for the same page
+		// (byb-z8j).
+		countDivert("unsupported-codec-" + fileType)
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedImageCodec, fileType)
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		// TIFF is what pdfcpu emits for CMYK rasters; golang.org/x/image/tiff
-		// support arrives with B3.
-		countDivert("unsupported-codec")
+		// As above, the reason carries fileType so the divert nominates one
+		// decoder rather than all three (byb-z8j).
+		//
+		// Do NOT read this as "CMYK rasters divert". They do not. pdfcpu renders
+		// a CMYK raster to TIFF (writeImage.go:385, :705 — note it returns the
+		// type as "tif", not "tiff"; divertClass maps that), and TIFF is ALREADY
+		// decodable here: github.com/hhrutter/tiff calls image.RegisterFormat
+		// for both endiannesses (reader.go:882-883) and is linked into every
+		// binary containing this package, transitively through
+		// internal/pdfdoc -> pdfcpu. Measured 2026-07-31: image.DecodeConfig on
+		// TIFF magic returns format "tiff", against "image: unknown format" for
+		// a control.
+		//
+		// So this site is reached for a TIFF only when that registered decoder
+		// REJECTS it — an unsupported compression, not a colour space. That is a
+		// much narrower set than the stale comment here used to claim, and it is
+		// why decode-tiff is rare in practice rather than dead.
+		countDivert("unsupported-codec-" + fileType)
 		return nil, fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err)
 	}
 	out := &PageRaster{
@@ -539,21 +565,46 @@ func covers(b content.Box, page pdfdoc.Rect) bool {
 
 func area(b content.Box) float64 { return (b.URX - b.LLX) * (b.URY - b.LLY) }
 
-// divertClass maps a fine-grained classify reason to the coarse class stored in
-// PageProvenance.Diverted.
+// divertClass maps a fine-grained classify (or codec) reason to the class
+// stored in PageProvenance.Diverted.
 //
 // Two vocabularies exist on purpose. The counters want detail, because their
 // whole job is to say *why* the divert rate is what it is. The stored record
-// wants only enough to answer "would re-processing help?", which is what
-// capabilityRules in upgrade.go matches on — and a record written today has to
-// stay meaningful when a later release renames a counter key.
+// wants only enough to answer "would re-processing help, and with what
+// capability" — which is what capabilityRules in upgrade.go matches on, and a
+// record written today has to stay meaningful when a later release renames a
+// counter key.
 //
-// B5 writes the record; this is the single place that decides the mapping. An
-// unrecognised reason falls back to the class that makes a renderer a candidate,
-// because reporting a wasted re-run is cheaper than hiding a real upgrade —
-// the same bias UpgradeCandidates takes for a capability with no rule.
+// byb-z8j: for the codec case that answer now names the codec.
+// "unsupported-codec-jbig2"/"-jpx" pass straight through, and
+// "unsupported-codec-tif" — the file type pdfcpu v0.13.0 actually returns for
+// a rendered TIFF (writeImage.go renderDeviceCMYKToTIFF and
+// renderIndexedCMYKToTIFF both return "tif", never "tiff") — normalizes to
+// "unsupported-codec-tiff" so the stored class matches the readable rule name
+// decode-tiff (upgrade.go) keys on. decode-jbig2/-jpx/-tiff (upgrade.go) can
+// each nominate only the pages that want that specific decoder. Anything else
+// that starts with "unsupported-codec" — the coarse legacy string a
+// pre-byb-z8j build wrote, where nothing can say after the fact which codec
+// it carried, and any codec name this build does not yet special-case —
+// collapses to the coarse "unsupported-codec" class, which every decode-*
+// rule still matches (TestDivertClassCoversEveryReason and the compatibility
+// test in upgrade_test.go pin this). A codec problem never falls through to
+// "not-single-raster": that class nominates a renderer, and byb-97q is why a
+// renderer is never the answer to an undecodable codec.
+//
+// B5 writes the record; this is the single place that decides the mapping. A
+// reason belonging to neither vocabulary falls back to the class that makes a
+// renderer a candidate, because reporting a wasted re-run is cheaper than
+// hiding a real upgrade — the same bias UpgradeCandidates takes for a
+// capability with no rule.
 func divertClass(reason string) string {
-	if reason == "unsupported-codec" {
+	switch reason {
+	case "unsupported-codec-jbig2", "unsupported-codec-jpx":
+		return reason
+	case "unsupported-codec-tif":
+		return "unsupported-codec-tiff"
+	}
+	if strings.HasPrefix(reason, "unsupported-codec") {
 		return "unsupported-codec"
 	}
 	return "not-single-raster"
