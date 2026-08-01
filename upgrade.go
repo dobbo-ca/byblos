@@ -16,6 +16,12 @@ var capabilityRules = map[string]func(*Provenance) bool{
 	"inspect":        never,
 	"extract-raster": never,
 
+	// Construction happens before a document exists. No recorded provenance can
+	// describe a document that would be improved by gaining it — the file was
+	// already built by something, and rebuilding it from images Byblos no
+	// longer holds is not an upgrade path.
+	"build-pdf": never,
+
 	// A document that already got jbig2-generic cannot benefit from gaining it.
 	// A document that got ccitt-g4 can: same losslessness, better ratio.
 	"jbig2-generic": anyPageApplied("ccitt-g4"),
