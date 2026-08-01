@@ -359,21 +359,17 @@ func TestOptimizeFreshRecordClaimsNoCapabilities(t *testing.T) {
 
 // --- OptimizeOptions fields ---------------------------------------------
 
-// TestOptimizeLinearizeRefused checks OptimizeOptions.Linearize's documented
-// refusal: pdfcpu strips linearization rather than adding it, so Optimize
-// must error rather than silently ignore the request (see the doc comment
-// on Linearize).
-func TestOptimizeLinearizeRefused(t *testing.T) {
-	var out bytes.Buffer
-	err := Optimize(&out, bytes.NewReader(corpusDoc(t, passThroughFixture)), OptimizeOptions{Linearize: true})
-	if err == nil {
-		t.Fatal("Optimize with Linearize:true: want an error, got nil")
-	}
-	if out.Len() != 0 {
-		t.Fatalf("Optimize with Linearize:true wrote %d bytes despite erroring", out.Len())
-	}
-	assertNotImplemented(t, err, "linearize")
-}
+// TestOptimizeLinearizeRefused was REMOVED by byb-1y7's RED stage, on purpose.
+// It asserted the exact opposite of what linearize_test.go now requires --
+// that OptimizeOptions{Linearize:true} returns a *NotImplemented, because
+// pdfcpu has no linearizer to delegate to. Byblos now has its own. Leaving the
+// test would make the suite unsatisfiable rather than merely red, and a
+// contradiction is not a specification.
+//
+// What it actually guarded -- "do not accept a capability request and silently
+// do nothing" -- is still guarded, more strongly:
+// TestOptimizeLinearizeSuspendsTheNeverLargerRule fails if Optimize hands back
+// a document that is not linearized.
 
 // assertNotImplemented pins the shape a caller actually branches on. A bare
 // non-nil error is not enough: Kleio has to tell "this build cannot do it, fall
@@ -413,13 +409,18 @@ func assertNotImplemented(t *testing.T, err error, wantCapability string) {
 // build would now handle what it fell back on. A capability string that exists
 // only inside an error message cannot be used that way, and nothing else would
 // catch the typo.
+//
+// The Linearize:true row is gone as of byb-1y7: that option no longer returns
+// a *NotImplemented, because the capability now exists. "linearize" is still
+// held to the shared vocabulary, from the other side --
+// TestLinearizeIsARegisteredCapability (linearize_test.go) requires it in both
+// Capabilities() and capabilityRules.
 func TestEveryNotImplementedNamesAKnownCapability(t *testing.T) {
 	in := corpusDoc(t, passThroughFixture)
 	for _, tc := range []struct {
 		opts OptimizeOptions
 		want string
 	}{
-		{OptimizeOptions{Linearize: true}, "linearize"},
 		{OptimizeOptions{RecompressJPEG: true}, "jpeg-recompress"},
 	} {
 		var out bytes.Buffer
