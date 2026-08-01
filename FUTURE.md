@@ -137,7 +137,9 @@ than the OCR engine.
 `needs_review` is the correct permanent answer, and a renderer would be an
 enormous amount of code serving a handful of documents.
 
-**Upgrade path:** documents whose provenance records `diverted: not-single-raster`.
+**Upgrade path:** documents whose provenance records `diverted: not-single-raster`,
+or any page whose provenance records `dropped_annots > 0` (byb-b5.1): rendering
+appearance streams into the raster would change the output for those pages.
 
 ---
 

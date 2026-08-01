@@ -277,10 +277,19 @@ type PageProvenance struct {
     Diverted      string          // e.g. "not-single-raster"; "" when handled normally
     Placement     []float64       // paint matrix recorded at write time; see PageRaster
     DroppedAnnots int             // annotations that painted but are not in the extracted raster
+    Geometry      *PageGeometry   // raster/page boxes measured at write time (byb-b5.1)
 }
+
+type PageGeometry struct {
+    RasterBox [4]float64 // [llx lly urx ury], PDF default user space, points
+    PageBox   [4]float64 // same order; NOT Placement's [a b c d e f] matrix order
+}
+
+func (g PageGeometry) CoversPage() bool
 
 func ReadProvenance(r io.ReadSeeker) (*Provenance, error)
 func WriteProvenance(r io.ReadSeeker, w io.Writer, p Provenance) error
+func RecordExtraction(r io.ReadSeeker) (Provenance, error) // runs extraction over every page, ready for WriteProvenance (byb-b5)
 func UpgradeCandidates(p *Provenance, current []string) []string
 func Capabilities() []string // what this build can do
 ```
@@ -340,10 +349,11 @@ type Provenance struct {
 }
 
 type PageProvenance struct {
-    Applied       []string  // e.g. ["downsample-150", "jbig2-generic"]
-    Diverted      string    // e.g. "not-single-raster"; "" when handled normally
-    Placement     []float64 // paint matrix recorded at write time (byb-b1.3)
-    DroppedAnnots int       // annotations that painted but are not in the extracted raster
+    Applied       []string      // e.g. ["downsample-150", "jbig2-generic"]
+    Diverted      string        // e.g. "not-single-raster"; "" when handled normally
+    Placement     []float64     // paint matrix recorded at write time (byb-b1.3)
+    DroppedAnnots int           // annotations that painted but are not in the extracted raster
+    Geometry      *PageGeometry // raster/page boxes measured at write time (byb-b5.1)
 }
 ```
 
@@ -354,6 +364,7 @@ document's output:
 |---|---|---|
 | `applied: jbig2-generic` | `jbig2-symbol` | yes — smaller output |
 | `diverted: not-single-raster` | `render` | yes — now processable |
+| `dropped_annots > 0` (any page) | `render` | yes — appearance streams would render differently (byb-b5.1) |
 | `applied: jpeg-recompress` only | `jbig2-symbol` | no — no bitonal content |
 
 An empty result means re-processing is wasted work.
