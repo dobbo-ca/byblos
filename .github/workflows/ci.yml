@@ -5,8 +5,17 @@ on:
   pull_request:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  # This job is the proof of design-spec section 8: the suite must be GREEN
+  # with NO PDF oracle installed, because every oracle-backed test is gated
+  # on exec.LookPath and SKIPS -- rather than fails -- when its tool is
+  # missing. Pinned to ubuntu-24.04 (not ubuntu-latest) so that guarantee does
+  # not silently depend on whatever image a future "latest" label resolves
+  # to; recon of the 24.04 toolset confirmed none of qpdf/poppler-utils/
+  # jbig2dec/imagemagick/libtiff-tools/ghostscript are preinstalled or pulled
+  # in transitively, so the assertion step below is expected to pass, not a
+  # no-op.
+  test-no-oracles:
+    runs-on: ubuntu-24.04
     env:
       CGO_ENABLED: 0
     steps:
@@ -14,22 +23,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-      # Every oracle-backed test is gated on exec.LookPath and SKIPS when its
-      # tool is missing, so an image without these does not fail the build -- it
-      # quietly stops checking. Measured: with qpdf off PATH, a linearizer that
-      # emits no primary hint stream at all used to pass the entire suite.
-      # Installing them here is what keeps `go test ./...` the gate it claims to
-      # be, instead of leaving it to whatever the runner image happens to ship.
-      - name: install test oracles
+      - name: assert no PDF oracle on PATH
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qpdf poppler-utils
-      - name: assert the oracles are on PATH
-        run: |
-          for t in qpdf pdfinfo pdftotext pdfimages; do
-            command -v "$t" >/dev/null || { echo "MISSING oracle: $t"; exit 1; }
+          fail=0
+          # Exactly the binaries some test calls exec.LookPath on. Asserting a
+          # tool no test consults (ghostscript, say) buys nothing and would
+          # redden every build for good the day a runner image happens to ship
+          # it, so keep this list tied to the LookPath calls in the suite.
+          for b in qpdf pdfinfo pdftotext pdfimages pdftoppm pdffonts \
+                   jbig2dec magick convert tiffdump; do
+            if p=$(command -v "$b" 2>/dev/null); then
+              echo "::error::oracle on PATH: $b -> $p"; fail=1
+            fi
           done
-          qpdf --version
+          exit $fail
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
@@ -45,8 +52,19 @@ jobs:
             exit 1
           fi
 
-  roundtrip:
-    runs-on: ubuntu-latest
+  # This job installs every oracle the suite knows how to use and runs the
+  # WHOLE suite -- not a package path, not a -run filter. The job it replaces
+  # ran `go test ./internal/jbig2/ -run "TestRoundTrip|TestBeats|TestPDF"`,
+  # which covered 4 of the 24 oracle-backed tests; the other 20 depended on
+  # the sibling job happening to install qpdf and poppler-utils for its own
+  # reasons. Coverage that arrives as a side effect of another job's needs is
+  # coverage that leaves the same way. A widened regex was considered and
+  # rejected -- it silently stops covering whatever test is added next, which
+  # is how this gap appeared in the first place. -v is deliberate too: without
+  # it a t.Skip() and a passing test print identically in the log, so this job
+  # could quietly degrade to all-skips and still show a green tick.
+  test-oracles:
+    runs-on: ubuntu-24.04
     env:
       CGO_ENABLED: 0
     steps:
@@ -54,14 +72,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-      - name: install the test-only oracles
-        run: sudo apt-get update && sudo apt-get install -y jbig2dec imagemagick libtiff-tools poppler-utils
-      - name: confirm the oracles are on PATH
-        # A missing binary makes the test t.Skip, which would turn this whole
-        # job into a silent no-op. Fail here instead, loudly.
+      - name: install test oracles
         run: |
-          command -v jbig2dec
-          command -v magick || command -v convert
-          command -v tiffdump
-          command -v pdfimages
-      - run: go test ./internal/jbig2/ -run "TestRoundTrip|TestBeats|TestPDF" -v
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf poppler-utils jbig2dec imagemagick libtiff-tools
+      - name: assert the oracles are on PATH
+        # A missing binary makes the corresponding test t.Skip, which would
+        # turn this whole job into a silent no-op. Fail here instead, loudly.
+        run: |
+          for t in qpdf pdfinfo pdftotext pdfimages pdftoppm pdffonts jbig2dec tiffdump; do
+            command -v "$t" >/dev/null || { echo "MISSING oracle: $t"; exit 1; }
+          done
+          command -v magick >/dev/null || command -v convert >/dev/null || { echo "MISSING oracle: magick/convert"; exit 1; }
+          qpdf --version
+      - run: go test ./... -v
