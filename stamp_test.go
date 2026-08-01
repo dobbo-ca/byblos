@@ -69,7 +69,7 @@ func requireTool(t *testing.T, name string) {
 	}
 }
 
-func writeTemp(t *testing.T, data []byte, name string) string {
+func writeTempFile(t *testing.T, data []byte, name string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -166,7 +166,7 @@ func TestStampTextLayerFontLoadsCleanlyInPoppler(t *testing.T) {
 	base := corpusDoc(t, "scan")
 	tl := TextLayer{Pages: [][]PositionedWord{{{Text: "Scanned", Bounds: image.Rect(72, 700, 149, 712)}}}}
 	stamped := stampBytes(t, base, tl)
-	path := writeTemp(t, stamped, "stamped.pdf")
+	path := writeTempFile(t, stamped, "stamped.pdf")
 
 	if errOut := stderrOf(t, "pdftoppm", "-png", path, filepath.Join(t.TempDir(), "page")); len(errOut) != 0 {
 		t.Errorf("pdftoppm reported a problem with the embedded glyphless font: %s", errOut)
@@ -192,11 +192,11 @@ func TestStampTextLayerFontLoadsCleanlyInPoppler(t *testing.T) {
 func TestStampedTextLeavesTheRasterUnchanged(t *testing.T) {
 	requireTool(t, "pdftoppm")
 	base := corpusDoc(t, "scan")
-	basePNG := renderGrayPNG(t, writeTemp(t, base, "base.pdf"))
+	basePNG := renderGrayPNG(t, writeTempFile(t, base, "base.pdf"))
 
 	tl := TextLayer{Pages: [][]PositionedWord{{{Text: "Scanned", Bounds: image.Rect(72, 700, 149, 712)}}}}
 	stamped := stampBytes(t, base, tl)
-	stampedPNG := renderGrayPNG(t, writeTemp(t, stamped, "stamped.pdf"))
+	stampedPNG := renderGrayPNG(t, writeTempFile(t, stamped, "stamped.pdf"))
 
 	if !bytes.Equal(basePNG, stampedPNG) {
 		t.Error("stamping an invisible text layer changed the rendered raster")
@@ -274,7 +274,7 @@ func TestStampedWordsReadInGeometricOrder(t *testing.T) {
 		{Text: "alpha", Bounds: image.Rect(72, 700, 102, 712)},
 	}
 	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{words}})
-	path := writeTemp(t, stamped, "reading-order.pdf")
+	path := writeTempFile(t, stamped, "reading-order.pdf")
 
 	out, err := exec.Command("pdftotext", path, "-").Output()
 	if err != nil {
@@ -298,7 +298,7 @@ func TestStampedWordBoundsRoundTripThroughBBox(t *testing.T) {
 	base := corpusDoc(t, "scan")
 	want := image.Rect(200, 400, 260, 420)
 	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{{{Text: "Byblos", Bounds: want}}}})
-	path := writeTemp(t, stamped, "bbox.pdf")
+	path := writeTempFile(t, stamped, "bbox.pdf")
 
 	assertWordBBoxRoundTrips(t, path, want, "Byblos", float64(corpus.PageHeightPt))
 }
@@ -343,7 +343,7 @@ func TestStampTextLayerAcrossTheCorpus(t *testing.T) {
 			if !pdftotextAvailable {
 				return
 			}
-			path := writeTemp(t, out.Bytes(), "stamped.pdf")
+			path := writeTempFile(t, out.Bytes(), "stamped.pdf")
 			text, err := exec.Command("pdftotext", path, "-").Output()
 			if err != nil {
 				t.Fatalf("pdftotext: %v", err)
@@ -444,7 +444,7 @@ func TestStampTextLayerArrayContents(t *testing.T) {
 	base := minimalPDF(t, "", "")
 	want := image.Rect(200, 400, 260, 420)
 	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{{{Text: "Byblos", Bounds: want}}}})
-	path := writeTemp(t, stamped, "array-contents.pdf")
+	path := writeTempFile(t, stamped, "array-contents.pdf")
 
 	assertWordBBoxRoundTrips(t, path, want, "Byblos", float64(corpus.PageHeightPt))
 }
@@ -459,7 +459,7 @@ func TestStampTextLayerUnwindsUnbalancedGraphicsState(t *testing.T) {
 	base := minimalPDF(t, "q 1 0 0 1 100 100 cm q 2 0 0 2 0 0 cm\n")
 	want := image.Rect(200, 400, 260, 420)
 	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{{{Text: "Byblos", Bounds: want}}}})
-	path := writeTemp(t, stamped, "unbalanced-q.pdf")
+	path := writeTempFile(t, stamped, "unbalanced-q.pdf")
 
 	assertWordBBoxRoundTrips(t, path, want, "Byblos", float64(corpus.PageHeightPt))
 }
@@ -474,7 +474,7 @@ func TestStampTextLayerCountersTopLevelCTM(t *testing.T) {
 	base := minimalPDF(t, "1 0 0 1 100 100 cm\n")
 	want := image.Rect(200, 400, 260, 420)
 	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{{{Text: "Byblos", Bounds: want}}}})
-	path := writeTemp(t, stamped, "toplevel-cm.pdf")
+	path := writeTempFile(t, stamped, "toplevel-cm.pdf")
 
 	assertWordBBoxRoundTrips(t, path, want, "Byblos", float64(corpus.PageHeightPt))
 }
@@ -489,7 +489,7 @@ func TestStampTextLayerCountersTopLevelYFlip(t *testing.T) {
 	base := minimalPDF(t, "1 0 0 -1 0 792 cm\n")
 	want := image.Rect(72, 700, 132, 720)
 	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{{{Text: "Byblos", Bounds: want}}}})
-	path := writeTemp(t, stamped, "yflip.pdf")
+	path := writeTempFile(t, stamped, "yflip.pdf")
 
 	assertWordBBoxRoundTrips(t, path, want, "Byblos", float64(corpus.PageHeightPt))
 }
@@ -504,7 +504,7 @@ func TestStampedWordBoundsRoundTripThroughBBoxNonUniformWidths(t *testing.T) {
 	base := corpusDoc(t, "scan")
 	want := image.Rect(200, 400, 260, 420)
 	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{{{Text: "OCR", Bounds: want}}}})
-	path := writeTemp(t, stamped, "bbox-ocr.pdf")
+	path := writeTempFile(t, stamped, "bbox-ocr.pdf")
 
 	assertWordBBoxRoundTrips(t, path, want, "OCR", float64(corpus.PageHeightPt))
 }
@@ -568,7 +568,7 @@ func TestStampTextLayerIndirectArrayContents(t *testing.T) {
 	base := minimalPDFIndirectArrayContents(t)
 	want := image.Rect(200, 400, 260, 420)
 	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{{{Text: "Byblos", Bounds: want}}}})
-	path := writeTemp(t, stamped, "indirect-array-contents.pdf")
+	path := writeTempFile(t, stamped, "indirect-array-contents.pdf")
 
 	assertWordBBoxRoundTrips(t, path, want, "Byblos", float64(corpus.PageHeightPt))
 }
@@ -642,7 +642,7 @@ func TestStampTextLayerPreservesInheritedResourcesUsedOnlyByAForm(t *testing.T) 
 
 	// Sanity check on the hand-rolled fixture itself: the form's text must
 	// be visible before stamping, or this test would prove nothing.
-	baseText, err := exec.Command("pdftotext", writeTemp(t, base, "base.pdf"), "-").Output()
+	baseText, err := exec.Command("pdftotext", writeTempFile(t, base, "base.pdf"), "-").Output()
 	if err != nil {
 		t.Fatalf("pdftotext (base): %v", err)
 	}
@@ -652,7 +652,7 @@ func TestStampTextLayerPreservesInheritedResourcesUsedOnlyByAForm(t *testing.T) 
 
 	tl := TextLayer{Pages: [][]PositionedWord{{{Text: "OCR", Bounds: image.Rect(30, 30, 60, 42)}}}}
 	stamped := stampBytes(t, base, tl)
-	path := writeTemp(t, stamped, "stamped.pdf")
+	path := writeTempFile(t, stamped, "stamped.pdf")
 
 	stampedText, err := exec.Command("pdftotext", path, "-").Output()
 	if err != nil {
