@@ -233,6 +233,11 @@ func (w *writer) fillRawStream(n int, dict string, payload []byte) {
 // finish writes the cross-reference table and trailer. Each xref entry is
 // exactly 20 bytes, as ISO 32000-1 section 7.5.4 requires.
 func (w *writer) finish(root int) []byte {
+	return w.finishWithInfo(root, 0)
+}
+
+// finishWithInfo is finish, plus a trailer /Info entry when info is nonzero.
+func (w *writer) finishWithInfo(root, info int) []byte {
 	start := w.buf.Len()
 	fmt.Fprintf(&w.buf, "xref\n0 %d\n0000000000 65535 f \n", len(w.offsets)+1)
 	for i, off := range w.offsets {
@@ -241,9 +246,13 @@ func (w *writer) finish(root int) []byte {
 		}
 		fmt.Fprintf(&w.buf, "%010d 00000 n \n", off)
 	}
+	infoEntry := ""
+	if info != 0 {
+		infoEntry = fmt.Sprintf(" /Info %d 0 R", info)
+	}
 	fmt.Fprintf(&w.buf,
-		"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n",
-		len(w.offsets)+1, root, start)
+		"trailer\n<< /Size %d /Root %d 0 R%s >>\nstartxref\n%d\n%%%%EOF\n",
+		len(w.offsets)+1, root, infoEntry, start)
 	return w.buf.Bytes()
 }
 
@@ -543,6 +552,53 @@ func dupRaster() []byte {
 	w.fillStream(c2, "", []byte(body))
 	w.fillStream(i2, imageDict(ScanImageW, ScanImageH), px)
 	return w.finish(cat)
+}
+
+// DupRasterWithInfo is dupRaster with a single Info-dictionary entry set
+// directly in the trailer, as a PDF literal string. It exists so a test can
+// build a document that already carries an Info entry (e.g. a
+// byblos-provenance record) WITHOUT that entry ever having passed through a
+// pdfcpu optimize pass: writing it via the library's own WriteProvenance
+// always runs one (it is itself a full pdfcpu read-validate-optimize-write
+// pass), which leaves no headroom to observe a SECOND pdfcpu rewrite
+// actually shrinking the document any further. Hand-rolling the Info entry
+// here is what makes that second rewrite observable.
+func DupRasterWithInfo(key, value string) []byte {
+	w := newWriter()
+	cat, pages := w.reserve(), w.reserve()
+	p1, c1, i1 := w.reserve(), w.reserve(), w.reserve()
+	p2, c2, i2 := w.reserve(), w.reserve(), w.reserve()
+	info := w.reserve()
+	body := fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)
+	px := grayPixels(ScanImageW, ScanImageH, 1)
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R %d 0 R] /Count 2 >>", p1, p2))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, i1, c1))
+	w.fillStream(c1, "", []byte(body))
+	w.fillStream(i1, imageDict(ScanImageW, ScanImageH), px)
+	w.fill(p2, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, i2, c2))
+	w.fillStream(c2, "", []byte(body))
+	w.fillStream(i2, imageDict(ScanImageW, ScanImageH), px)
+	w.fill(info, fmt.Sprintf("<< /%s (%s) >>", key, escapePDFLiteral(value)))
+	return w.finishWithInfo(cat, info)
+}
+
+// escapePDFLiteral backslash-escapes the three bytes a PDF literal string
+// (...) treats specially (ISO 32000-1 section 7.3.4.2), so an arbitrary
+// value can be embedded without unbalancing the string.
+func escapePDFLiteral(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\\' || r == '(' || r == ')' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // jbig2Payload is 64 bytes of deterministic filler. It is NOT a valid JBIG2

@@ -2,6 +2,7 @@ package byblos
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -23,6 +24,54 @@ type Provenance struct {
 	Capabilities []string         `json:"capabilities"`
 	ProcessedAt  time.Time        `json:"processed_at"`
 	Pages        []PageProvenance `json:"pages"`
+
+	// Optimized records which branch Optimize (byb-b5) took, because that
+	// choice is a whole-document property, not a per-page one. Optimize
+	// always returns min(input, pdfcpu-rewritten-output): both are lossless
+	// structural rewrites of the same document, so there is no quality
+	// tradeoff to record, only a size-vs-linearization one. pdfcpu's rewrite
+	// pass strips linearization rather than adding it (see
+	// OptimizeOptions.Linearize's measurement), so the rewritten branch loses
+	// whatever linearization the INPUT already had, silently -- the field
+	// records that the rewrite ran, not that linearization was lost, but it is
+	// the caller's only signal that this document did not simply pass
+	// through untouched. The pass-through branch, by contrast, preserves
+	// whatever linearization the input had, verbatim, because it does not
+	// touch the bytes at all.
+	//
+	// "" is the zero value written by every build before byb-b5, AND what a
+	// pass-through emits -- a pass-through returns the input's bytes
+	// verbatim, so it cannot write anything into it without growing it past
+	// that input and breaking Optimize's "never larger" guarantee. "" must
+	// therefore be read as "not known to have been rewritten by Optimize",
+	// never as "confirmed pass-through".
+	//
+	// "rewritten" means pdfcpu's optimized bytes were kept and the input was
+	// not linearized, so nothing was lost to get them.
+	//
+	// "rewritten-delinearized" means the same, EXCEPT that the input carried a
+	// linearization parameter dictionary and the output does not. That is a
+	// real property traded for bytes, and it is the one case where the "no
+	// quality tradeoff" claim above does not hold. It is recorded separately
+	// rather than folded into "rewritten" because the two need different
+	// answers: a caller that re-linearizes downstream can ignore the first and
+	// must act on the second. Kleio's born-digital path exists precisely to
+	// produce linearized files (its compress stage runs ocrmypdf in
+	// linearize-only mode and does nothing else), so a later Optimize pass
+	// quietly undoing that is a regression byblos must not hide. Tracked as
+	// byb-k48, which will remove the case entirely by linearizing rather than
+	// by reporting.
+	//
+	// Reserve, do not yet emit, "passed-through".
+	//
+	// The converse also holds and is just as important: a pass-through run
+	// carries whatever record the input already had forward untouched, so
+	// "rewritten" on a document that has since had a pass-through Optimize
+	// run on it is stale -- it describes the most recent REWRITE, not the
+	// most recent call to Optimize. Nothing clears it, for the same reason
+	// "" cannot be written by a pass-through: doing so would require an
+	// in-band write to bytes that must stay byte-identical to the input.
+	Optimized string `json:"optimized,omitempty"`
 }
 
 // PageProvenance records what one page actually received.
@@ -97,6 +146,13 @@ func Capabilities() []string {
 // written under this key has to keep giving back its record.
 const provenanceKey = "byblos-provenance"
 
+// errCorruptProvenance marks a value under provenanceKey that failed to
+// unmarshal as JSON, distinct from a pdfdoc/pdfcpu-level read failure.
+// Optimize (byb-b5) treats this as "no provenance" rather than fatal: an
+// otherwise-valid PDF should not fail to optimize merely because whatever
+// wrote this key put garbage under it.
+var errCorruptProvenance = errors.New("byblos: corrupt provenance value")
+
 // WriteProvenance marshals p to JSON and stores it under provenanceKey in
 // r's Info dictionary, via pdfdoc.WriteProperties (pdfcpu's api.AddProperties
 // underneath). It needs only an Info dictionary to exist, not an extraction
@@ -130,7 +186,7 @@ func ReadProvenance(r io.ReadSeeker) (*Provenance, error) {
 	}
 	var p Provenance
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return nil, fmt.Errorf("byblos: unmarshal provenance: %w", err)
+		return nil, fmt.Errorf("%w: %w", errCorruptProvenance, err)
 	}
 	return &p, nil
 }

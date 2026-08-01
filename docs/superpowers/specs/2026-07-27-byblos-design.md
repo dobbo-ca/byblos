@@ -76,11 +76,34 @@ than from a user complaint.
 
 | Dependency | Why |
 |---|---|
-| [`pdfcpu`](https://github.com/pdfcpu/pdfcpu) (Apache-2.0, pure Go) | PDF parsing, writing, image extraction, optimization, linearization. Actively developed since 2018, no cgo. Reimplementing a PDF parser to avoid it would be ideology, not engineering. |
+| [`pdfcpu`](https://github.com/pdfcpu/pdfcpu) (Apache-2.0, pure Go) | PDF parsing, writing, image extraction, optimization. Actively developed since 2018, no cgo. Reimplementing a PDF parser to avoid it would be ideology, not engineering. **Not linearization** — see below. |
 | `golang.org/x/image` | Resampling filters for downsampling. |
 
 Everything else — JBIG2 encoding, color quantization, the text-layer assembly —
 is ours, because nothing suitable and permissively licensed exists in pure Go.
+
+**Linearization is ours too, and was not planned for.** This table originally
+credited `pdfcpu` with it. That is wrong, and it was wrong in the direction that
+matters: `pdfcpu` v0.13.0 has no linearizer (`model/xreftable.go`:
+"Linearization section (not yet supported)"), never emits `/Linearized`, and its
+write path *frees* linearization hint tables (`write.go`, `deleteRedundantObject`
+via `IsLinearizationObject`). Measured on `pdfcpu`'s own fixtures, a round trip
+through its optimize pass takes `bookletTest.pdf` from 50,308 bytes linearized to
+34,531 bytes **not** linearized.
+
+That matters more than a missing option, because §4's `Optimize` is what replaces
+Kleio's born-digital treatment — and that treatment is linearization and nothing
+else (`kleio/internal/pipeline/compress.go`, `linearizeArgs`: `ocrmypdf
+--skip-text --tesseract-timeout 0 --optimize 1`, then return). So G1 cannot be met
+for born-digital documents until Byblos linearizes on its own, which means
+implementing ISO 32000-1:2008 Annex F — object ordering, the linearization
+parameter dictionary, page-offset and shared-object hint tables, and a split
+cross-reference. Tracked as `byb-k48`.
+
+Until then `Optimize` refuses `Linearize: true` with a typed `*NotImplemented`
+rather than accepting it and quietly doing nothing, and records
+`rewritten-delinearized` on the provenance when its rewrite drops linearization
+the input arrived with.
 
 **Byblos wraps `pdfcpu` behind its own interfaces** so that replacing it later is
 a swap rather than a rewrite.
