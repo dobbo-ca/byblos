@@ -3,12 +3,10 @@ package byblos
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"go/build"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -371,90 +369,19 @@ func TestOptimizeFreshRecordClaimsNoCapabilities(t *testing.T) {
 // TestOptimizeLinearizeSuspendsTheNeverLargerRule fails if Optimize hands back
 // a document that is not linearized.
 
-// assertNotImplemented pins the shape a caller actually branches on. A bare
-// non-nil error is not enough: Kleio has to tell "this build cannot do it, fall
-// back for every document" apart from "this document failed", and it must do
-// that with errors.Is/As rather than by matching on message text, which is not
-// API and would break on any rewording.
-func assertNotImplemented(t *testing.T, err error, wantCapability string) {
-	t.Helper()
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("errors.Is(err, ErrNotImplemented) = false for %v; a caller cannot "+
-			"distinguish a missing capability from a failed document", err)
-	}
-	var ni *NotImplemented
-	if !errors.As(err, &ni) {
-		t.Fatalf("errors.As(err, *NotImplemented) = false for %v", err)
-	}
-	if ni.Capability != wantCapability {
-		t.Errorf("Capability = %q; want %q", ni.Capability, wantCapability)
-	}
-	if ni.Why == "" || ni.Issue == "" {
-		t.Errorf("NotImplemented{Capability:%q} has Why=%q Issue=%q; both must be set, "+
-			"or the error says no more than a bool would", ni.Capability, ni.Why, ni.Issue)
-	}
-	// The message has to carry the same facts, because most of the time it is
-	// all that reaches a log.
-	for _, want := range []string{wantCapability, ni.Issue} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error message %q does not mention %q", err.Error(), want)
-		}
-	}
-}
-
-// TestEveryNotImplementedNamesAKnownCapability stops the two vocabularies
-// drifting apart. NotImplemented.Capability is documented as being from the
-// same set provenance and UpgradeCandidates use, which is the whole reason a
-// caller can feed it back to UpgradeCandidates later to ask whether a newer
-// build would now handle what it fell back on. A capability string that exists
-// only inside an error message cannot be used that way, and nothing else would
-// catch the typo.
+// assertNotImplemented and TestEveryNotImplementedNamesAKnownCapability were
+// REMOVED by byb-b3's GREEN stage. assertNotImplemented's real content --
+// pinning the Error()/Unwrap()/errors.Is/errors.As shape of *NotImplemented --
+// moved to notimplemented_test.go, against a literal value, so the still-
+// exported type does not go untested now that nothing in this package
+// constructs one. TestEveryNotImplementedNamesAKnownCapability's table lost
+// its only row (RecompressJPEG no longer returns *NotImplemented) and would
+// have passed vacuously forever after; see design spec byb-b3 section 7.
 //
-// The Linearize:true row is gone as of byb-1y7: that option no longer returns
-// a *NotImplemented, because the capability now exists. "linearize" is still
-// held to the shared vocabulary, from the other side --
-// TestLinearizeIsARegisteredCapability (linearize_test.go) requires it in both
-// Capabilities() and capabilityRules.
-func TestEveryNotImplementedNamesAKnownCapability(t *testing.T) {
-	in := corpusDoc(t, passThroughFixture)
-	for _, tc := range []struct {
-		opts OptimizeOptions
-		want string
-	}{
-		{OptimizeOptions{RecompressJPEG: true}, "jpeg-recompress"},
-	} {
-		var out bytes.Buffer
-		err := Optimize(&out, bytes.NewReader(in), tc.opts)
-		var ni *NotImplemented
-		if !errors.As(err, &ni) {
-			t.Fatalf("%+v: want a *NotImplemented, got %v", tc.opts, err)
-		}
-		if _, ok := capabilityRules[ni.Capability]; !ok {
-			t.Errorf("%+v reports capability %q, which has no entry in capabilityRules "+
-				"(upgrade.go): it cannot be handed to UpgradeCandidates, so the error "+
-				"names something no other part of byblos knows about", tc.opts, ni.Capability)
-		}
-		if ni.Capability != tc.want {
-			t.Errorf("%+v: Capability = %q; want %q", tc.opts, ni.Capability, tc.want)
-		}
-	}
-}
-
-// TestOptimizeRecompressJPEGRefused checks OptimizeOptions.RecompressJPEG's
-// documented refusal: this package has no recompression path yet, so
-// Optimize must error rather than silently ignore the request, regardless
-// of JPEGQuality's value.
-func TestOptimizeRecompressJPEGRefused(t *testing.T) {
-	var out bytes.Buffer
-	err := Optimize(&out, bytes.NewReader(corpusDoc(t, passThroughFixture)), OptimizeOptions{RecompressJPEG: true, JPEGQuality: 50})
-	if err == nil {
-		t.Fatal("Optimize with RecompressJPEG:true: want an error, got nil")
-	}
-	if out.Len() != 0 {
-		t.Fatalf("Optimize with RecompressJPEG:true wrote %d bytes despite erroring", out.Len())
-	}
-	assertNotImplemented(t, err, "jpeg-recompress")
-}
+// TestOptimizeRecompressJPEGRefused (below this comment, formerly) is gone for
+// the same reason as TestOptimizeLinearizeRefused above: it asserted the exact
+// opposite of what optimize_jpeg_test.go now requires --
+// TestOptimizeRecompressJPEGNoLongerRefused pins the negation directly.
 
 // TestOptimizeCorruptProvenanceFallsBack checks that a byblos-provenance
 // Info value that is not valid JSON does not abort Optimize: the document

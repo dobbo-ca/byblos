@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
@@ -51,18 +54,28 @@ type OptimizeOptions struct {
 	//     document after this point.
 	Linearize bool
 
-	// RecompressJPEG and JPEGQuality name an image-recompression pass this
-	// package does not yet implement: pdfcpu has no recompression API, and the
-	// only substitution path (pdfdoc.ReplaceImage) needs an encoder this bead
-	// did not build. Optimize refuses RecompressJPEG:true with a
-	// *NotImplemented naming "jpeg-recompress", for the same reason it refuses
-	// Linearize:true -- accepting the field and silently doing nothing would be
-	// a promise it cannot keep.
+	// RecompressJPEG re-encodes every DCTDecode image XObject at JPEGQuality
+	// and substitutes it through pdfdoc.ReplaceImage. It is lossy and it is
+	// the only lossy thing Optimize does.
 	//
-	// JPEGQuality is not validated, because it cannot be reached: every
-	// RecompressJPEG:true call is refused before the value is read, and the
-	// value is meaningless when RecompressJPEG is false. Whatever implements
-	// the pass owns its range check.
+	// It touches only images pdfcpu renders as file type "jpg" -- DCTDecode
+	// with at most three components -- whose /ColorSpace is the name
+	// /DeviceGray or /DeviceRGB and which carry no /SMask, /Mask or
+	// /ImageMask. Everything else is left byte-for-byte alone, with no error:
+	// a page with no JPEG on it is not an ineligible document, it is a page
+	// with no JPEG on it. Which pages were actually re-encoded is recorded as
+	// "jpeg-recompress-<quality>" in each page's PageProvenance.Applied.
+	//
+	// A re-encoded stream is substituted only when it is strictly smaller than
+	// the one it replaces, so this pass cannot grow a document and Optimize's
+	// "never larger than input" rule needs no suspension for it (unlike
+	// Linearize above).
+	//
+	// JPEGQuality must be 1..100 and Optimize validates it. image/jpeg would
+	// silently clamp instead, and a caller who passed 150 would get 100 and no
+	// way to know. Zero is an error rather than a default, for the same reason
+	// BuildPage.DPI's zero is: guessing how much of someone's image to throw
+	// away is not a default anyone can audit.
 	RecompressJPEG bool
 	JPEGQuality    int
 }
@@ -92,20 +105,29 @@ type OptimizeOptions struct {
 // inspect anything, so it must not claim those capabilities are done (see
 // the note further down, and upgrade.go's UpgradeCandidates).
 func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
-	if opts.RecompressJPEG {
-		return &NotImplemented{
-			Capability: "jpeg-recompress",
-			Why:        "pdfcpu has no image recompression API; this needs image/jpeg plus the pdfdoc write seam",
-			Issue:      "byb-b3",
-		}
+	if opts.RecompressJPEG && (opts.JPEGQuality < 1 || opts.JPEGQuality > 100) {
+		return fmt.Errorf("byblos: optimize: JPEGQuality %d is outside 1..100 (75 is a reasonable default)", opts.JPEGQuality)
 	}
 
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("byblos: optimize: seek: %w", err)
 	}
-	in, err := io.ReadAll(r)
+	origIn, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("byblos: optimize: read: %w", err)
+	}
+	in := origIn
+
+	// applied maps a 0-based page index to the "jpeg-recompress-<quality>"
+	// entries it earned. It is built from the ORIGINAL bytes, but discarded
+	// along with the recompressed candidate if the final "never larger than
+	// input" comparison below falls back to origIn -- see that branch.
+	var applied map[int][]string
+	if opts.RecompressJPEG {
+		in, applied, err = recompressJPEG(in, opts.JPEGQuality)
+		if err != nil {
+			return fmt.Errorf("byblos: optimize: %w", err)
+		}
 	}
 
 	var rewritten bytes.Buffer
@@ -148,10 +170,22 @@ func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 			ProcessedAt: time.Now(),
 		}
 	}
+	if len(applied) > 0 {
+		for idx, entries := range applied {
+			for len(prov.Pages) <= idx {
+				prov.Pages = append(prov.Pages, PageProvenance{})
+			}
+			prov.Pages[idx].Applied = append(prov.Pages[idx].Applied, entries...)
+		}
+		if !slices.Contains(prov.Capabilities, "jpeg-recompress") {
+			prov.Capabilities = append(prov.Capabilities, "jpeg-recompress")
+			slices.Sort(prov.Capabilities)
+		}
+	}
 	switch {
 	case opts.Linearize:
 		prov.Optimized = "rewritten-linearized"
-	case isLinearized(in):
+	case isLinearized(origIn):
 		// The rewrite has just thrown away the input's linearization. Say so:
 		// this is the one case where taking the smaller candidate is not free.
 		prov.Optimized = "rewritten-delinearized"
@@ -189,17 +223,162 @@ func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 
 	// Optimize's acceptance criterion (design spec section 8) holds
 	// literally, by construction: whichever candidate is not larger than the
-	// input is the one returned, and the input itself is always a valid
-	// fallback because it was already read successfully above.
-	if candidate.Len() <= len(in) {
+	// ORIGINAL input is the one returned, and the input itself is always a
+	// valid fallback because it was already read successfully above. This
+	// compares against origIn, not the (possibly recompressed) in: on the
+	// rare document where recompression's own structural noise pushes the
+	// candidate over the original file size, the fallback below returns that
+	// original file verbatim, and the jpeg-recompress Applied entries --
+	// which live only in the discarded candidate's provenance -- are
+	// correctly lost along with it.
+	if candidate.Len() <= len(origIn) {
 		_, err = w.Write(candidate.Bytes())
 	} else {
-		_, err = w.Write(in)
+		_, err = w.Write(origIn)
 	}
 	if err != nil {
 		return fmt.Errorf("byblos: optimize: write: %w", err)
 	}
 	return nil
+}
+
+// recompressJPEG re-encodes every eligible DCTDecode image XObject in in at
+// quality, once per distinct object even when several pages share it, and
+// returns the resulting document alongside which 0-based page indices earned
+// a "jpeg-recompress-<quality>" Applied entry.
+//
+// When nothing in the document was actually substituted -- no JPEG at all, or
+// every candidate found was not eligible or not smaller -- in is returned
+// unchanged and applied is nil, without running it through a pdfcpu
+// Open/Write round trip it does not need.
+func recompressJPEG(in []byte, quality int) ([]byte, map[int][]string, error) {
+	d, err := pdfdoc.Open(bytes.NewReader(in))
+	if err != nil {
+		return nil, nil, fmt.Errorf("byblos: optimize: recompress: open: %w", err)
+	}
+
+	n := d.PageCount()
+	pageImageIDs := make([][]int, n)
+	for i := 1; i <= n; i++ {
+		_, scan, err := inspectPage(d, i)
+		if err != nil {
+			return nil, nil, fmt.Errorf("byblos: optimize: recompress: page %d: %w", i, err)
+		}
+		seen := map[int]bool{}
+		for _, pl := range scan.Images {
+			if seen[pl.ID] {
+				continue
+			}
+			seen[pl.ID] = true
+			pageImageIDs[i-1] = append(pageImageIDs[i-1], pl.ID)
+		}
+	}
+
+	entry := fmt.Sprintf("jpeg-recompress-%d", quality)
+	substituted := map[int]bool{} // object id -> was it actually replaced
+	applied := map[int][]string{}
+	any := false
+	for i := 0; i < n; i++ {
+		pageApplied := false
+		for _, id := range pageImageIDs[i] {
+			did, seen := substituted[id]
+			if !seen {
+				did, err = recompressOneImage(d, id, quality)
+				if err != nil {
+					return nil, nil, err
+				}
+				substituted[id] = did
+			}
+			if did && !pageApplied {
+				applied[i] = append(applied[i], entry)
+				pageApplied = true
+				any = true
+			}
+		}
+	}
+	if !any {
+		return in, nil, nil
+	}
+
+	var out bytes.Buffer
+	if err := d.Write(&out); err != nil {
+		return nil, nil, fmt.Errorf("byblos: optimize: recompress: write: %w", err)
+	}
+	return out.Bytes(), applied, nil
+}
+
+// recompressOneImage re-encodes the image XObject id at quality and
+// substitutes it via pdfdoc.ReplaceImage, reporting whether it did.
+//
+// Eligibility (design spec byb-b3 section 3): pdfcpu must render it as file
+// type "jpg" (DCTDecode, at most three components), its /ColorSpace must be
+// the device name /DeviceGray or /DeviceRGB, and it must carry no /SMask,
+// /Mask, /ImageMask or /Decode -- ReplaceImage refuses the first three
+// outright, and jpeg.Decode ignores /Decode entirely while ReplaceImage drops
+// it from the substituted stream, which would invert a legal
+// /Decode [1 0 ...] image. Everything ineligible is reported as "not
+// substituted", not an error: a page that does not want recompression is not
+// a broken page.
+func recompressOneImage(d pdfdoc.Doc, id int, quality int) (bool, error) {
+	info, ok := d.ImageInfo(id)
+	if !ok {
+		return false, nil
+	}
+	if info.SMask || info.Mask || info.ImageMask || info.Decode {
+		return false, nil
+	}
+	switch info.ColorSpace {
+	case "DeviceGray", "DeviceRGB":
+	default:
+		return false, nil
+	}
+
+	data, fileType, err := d.RawImage(id)
+	if err != nil {
+		if errors.Is(err, pdfdoc.ErrUnsupportedCodec) {
+			return false, nil
+		}
+		return false, fmt.Errorf("byblos: optimize: recompress: image %d: %w", id, err)
+	}
+	if fileType != "jpg" {
+		return false, nil
+	}
+
+	// A JPEG image/jpeg cannot decode -- arithmetic coding, 12-bit precision,
+	// lossless JPEG, a truncated scan -- is ineligible, not broken. gs and
+	// poppler tolerate encodings Go's decoder does not, and one such image
+	// must not fail the whole document (see RecompressJPEG's doc comment:
+	// "Everything else is left byte-for-byte alone, with no error").
+	src, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		return false, nil
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: quality}); err != nil {
+		return false, fmt.Errorf("byblos: optimize: recompress: encode image %d: %w", id, err)
+	}
+	// The whole reason this rule is not suspended for the document-level
+	// "never larger than input" guarantee (see Optimize): a candidate that
+	// did not shrink is simply not applied.
+	if buf.Len() >= len(data) {
+		return false, nil
+	}
+
+	cs := "DeviceRGB"
+	if _, ok := src.(*image.Gray); ok {
+		cs = "DeviceGray"
+	}
+	if err := d.ReplaceImage(id, pdfdoc.EncodedImage{
+		Width:      info.Width,
+		Height:     info.Height,
+		BPC:        8,
+		ColorSpace: pdfdoc.ColorSpace{Name: cs},
+		Filter:     "DCTDecode",
+		Data:       buf.Bytes(),
+	}); err != nil {
+		return false, fmt.Errorf("byblos: optimize: recompress: replace image %d: %w", id, err)
+	}
+	return true, nil
 }
 
 // linearizationWindow is how much of a file can hold the linearization

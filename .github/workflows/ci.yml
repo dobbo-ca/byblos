@@ -27,11 +27,13 @@ jobs:
         run: |
           fail=0
           # Exactly the binaries some test calls exec.LookPath on. Asserting a
-          # tool no test consults (ghostscript, say) buys nothing and would
-          # redden every build for good the day a runner image happens to ship
-          # it, so keep this list tied to the LookPath calls in the suite.
+          # tool no test consults buys nothing and would redden every build
+          # for good the day a runner image happens to ship it, so keep this
+          # list tied to the LookPath calls in the suite -- which, as of
+          # byb-b3, includes pngquant and gs: both are now consulted oracles,
+          # not tools deliberately left out.
           for b in qpdf pdfinfo pdftotext pdfimages pdftoppm pdffonts \
-                   jbig2dec magick convert tiffdump; do
+                   jbig2dec magick convert tiffdump pngquant gs; do
             if p=$(command -v "$b" 2>/dev/null); then
               echo "::error::oracle on PATH: $b -> $p"; fail=1
             fi
@@ -47,8 +49,12 @@ jobs:
           go list -f '{{range .Imports}}{{.}}{{"\n"}}{{end}}{{range .TestImports}}{{.}}{{"\n"}}{{end}}{{range .XTestImports}}{{.}}{{"\n"}}{{end}}' ./... \
             | sort -u | grep '\.' | grep -v '^github.com/dobbo-ca/byblos' > ext.txt || true
           echo "external imports:"; cat ext.txt
-          if grep -vE '^(github\.com/pdfcpu/pdfcpu|golang\.org/x/image)(/|$)' ext.txt; then
-            echo "FORBIDDEN dependency listed above. Permitted: pdfcpu, golang.org/x/image."
+          if grep -vE '^(github\.com/pdfcpu/pdfcpu(/|$)|golang\.org/x/image/(ccitt|draw)(/|$))' ext.txt; then
+            echo "FORBIDDEN dependency listed above. Permitted: pdfcpu, and"
+            echo "golang.org/x/image/{ccitt,draw} ONLY -- x/image is allowlisted"
+            echo "by subpackage because /bmp, /tiff and /webp each call"
+            echo "image.RegisterFormat in init(), which would widen what"
+            echo "image.Decode accepts on the classification path (byb-1tj)."
             exit 1
           fi
 
@@ -75,12 +81,14 @@ jobs:
       - name: install test oracles
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qpdf poppler-utils jbig2dec imagemagick libtiff-tools
+          sudo apt-get install -y --no-install-recommends qpdf poppler-utils \
+            jbig2dec imagemagick libtiff-tools pngquant ghostscript
       - name: assert the oracles are on PATH
         # A missing binary makes the corresponding test t.Skip, which would
         # turn this whole job into a silent no-op. Fail here instead, loudly.
         run: |
-          for t in qpdf pdfinfo pdftotext pdfimages pdftoppm pdffonts jbig2dec tiffdump; do
+          for t in qpdf pdfinfo pdftotext pdfimages pdftoppm pdffonts \
+                   jbig2dec tiffdump pngquant gs; do
             command -v "$t" >/dev/null || { echo "MISSING oracle: $t"; exit 1; }
           done
           command -v magick >/dev/null || command -v convert >/dev/null || { echo "MISSING oracle: magick/convert"; exit 1; }

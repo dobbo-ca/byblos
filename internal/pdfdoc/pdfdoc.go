@@ -98,6 +98,16 @@ type ImageInfo struct {
 	ImageMask     bool // /ImageMask: a stencil painted in the fill colour
 	SMask         bool // /SMask: a soft mask supplies per-pixel alpha
 	Mask          bool // /Mask: a stencil mask or a colour-key range
+	Decode        bool // /Decode is present: samples need a remap this struct does not carry
+
+	// ColorSpace is /ColorSpace when it is a plain name ("DeviceGray",
+	// "DeviceRGB", "DeviceCMYK"), and "" when it is an array or an indirect
+	// reference -- Indexed, ICCBased, Separation, DeviceN. Recompression uses
+	// it as an eligibility test, not as colour management: replacing a
+	// /Separation with /DeviceGray inverts the ink convention (in Separation,
+	// 0 is no ink and therefore white; in DeviceGray, 0 is black), so
+	// anything that is not a device name is left alone.
+	ColorSpace string
 }
 
 // Page is one page's geometry, content, and resource scope.
@@ -302,15 +312,23 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 
 	switch *sub {
 	case "Image":
+		csName := ""
+		if raw, ok := sd.Dict.Find("ColorSpace"); ok {
+			if n, ok := raw.(types.Name); ok {
+				csName = string(n)
+			}
+		}
 		d.images[id] = ImageInfo{
-			Name:      name,
-			ObjNr:     id,
-			Width:     d.intEntry(sd.Dict, "Width"),
-			Height:    d.intEntry(sd.Dict, "Height"),
-			BPC:       d.intEntry(sd.Dict, "BitsPerComponent"),
-			ImageMask: d.boolEntry(sd.Dict, "ImageMask"),
-			SMask:     hasEntry(sd.Dict, "SMask"),
-			Mask:      hasEntry(sd.Dict, "Mask"),
+			Name:       name,
+			ObjNr:      id,
+			Width:      d.intEntry(sd.Dict, "Width"),
+			Height:     d.intEntry(sd.Dict, "Height"),
+			BPC:        d.intEntry(sd.Dict, "BitsPerComponent"),
+			ImageMask:  d.boolEntry(sd.Dict, "ImageMask"),
+			SMask:      hasEntry(sd.Dict, "SMask"),
+			Mask:       hasEntry(sd.Dict, "Mask"),
+			Decode:     hasEntry(sd.Dict, "Decode"),
+			ColorSpace: csName,
 		}
 		// Keep the stream dictionary. RawImage renders from this rather than
 		// asking pdfcpu which objects a page uses, because that answer comes

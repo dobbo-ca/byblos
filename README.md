@@ -12,9 +12,9 @@ that compiles into your binary.
 
 **Status:** under active implementation. Inspection, raster extraction, JBIG2
 generic-region encoding, the invisible text layer, PDF assembly from images,
-and structural optimization (including our own Annex F linearizer) all exist
-and are exported; image recompression (quantization, downsampling, JPEG
-recompression) has not landed yet. See
+structural optimization (including our own Annex F linearizer), and image
+recompression (quantization, downsampling, JPEG recompression) all exist and
+are exported. See
 [the design spec](docs/superpowers/specs/2026-07-27-byblos-design.md) and
 [FUTURE.md](FUTURE.md) for what remains.
 

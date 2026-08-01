@@ -199,10 +199,8 @@ func (b *Bitmap) Equal(o *Bitmap) bool
 
 func EncodeJBIG2Generic(b *Bitmap) ([]byte, error)   // lossless; see §5
 
-// NOT YET IMPLEMENTED (B3, image codecs). Kept here as the intended shape,
-// not as shipped API.
 func QuantizePNG(img image.Image, colors int) ([]byte, error)
-func Downsample(img image.Image, srcDPI, dstDPI int) image.Image
+func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error)
 
 // --- assembly ---
 
@@ -241,9 +239,9 @@ func BuildPDF(w io.Writer, pages []BuildPage) error
 var ErrNotImplemented = errors.New("byblos: not implemented")
 
 type NotImplemented struct {
-    Capability string // e.g. "jpeg-recompress"
-    Why        string
-    Issue      string // e.g. "byb-b3"
+    Capability string // e.g. "linearize"
+    Why        string // one sentence, in terms of what is missing, not what to do
+    Issue      string // e.g. "byb-k48"
 }
 
 func (e *NotImplemented) Error() string
@@ -251,7 +249,7 @@ func (e *NotImplemented) Unwrap() error
 
 type OptimizeOptions struct {
     Linearize      bool // implemented: our own Annex F writer, see §3
-    RecompressJPEG bool // still refused with *NotImplemented{Capability: "jpeg-recompress"} -- B3
+    RecompressJPEG bool // implemented: re-encodes eligible DCTDecode images at JPEGQuality (1..100), byb-b3
     JPEGQuality    int
 }
 

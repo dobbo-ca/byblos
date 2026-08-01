@@ -241,10 +241,13 @@ func (g PageGeometry) CoversPage() bool {
 // string is a permanent identifier that older documents' provenance refers to.
 var buildCapabilities = []string{
 	"build-pdf",
+	"downsample",
 	"extract-raster",
 	"inspect",
 	"jbig2-generic",
+	"jpeg-recompress",
 	"linearize",
+	"quantize-png",
 	"text-layer",
 }
 
