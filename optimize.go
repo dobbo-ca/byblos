@@ -14,28 +14,41 @@ import (
 type OptimizeOptions struct {
 	// Linearize requests a linearized ("fast web view") output.
 	//
-	// pdfcpu v0.13.0 cannot produce this: OptimizeContext frees linearization
-	// hint-table objects on write whenever IsLinearizationObject is true
-	// (pdfcpu write.go, deleteRedundantObject), and nothing in its write path
-	// ever emits a /Linearized dictionary. Measured directly against pdfcpu's
-	// own linearized fixtures: a round trip through pdfcpu's optimize pass
-	// STRIPS linearization rather than adding it (bookletTest.pdf 50308 B
-	// Linearized=true -> 34531 B Linearized=false; WaldenFull.pdf 3482146 B
-	// Linearized=true -> 1942597 B Linearized=false).
+	// pdfcpu v0.13.0 cannot produce this and never will be asked to:
+	// OptimizeContext frees linearization hint-table objects on write whenever
+	// IsLinearizationObject is true (pdfcpu write.go, deleteRedundantObject),
+	// and nothing in its write path ever emits a /Linearized dictionary.
+	// Measured directly against pdfcpu's own linearized fixtures: a round trip
+	// through pdfcpu's optimize pass STRIPS linearization rather than adding it
+	// (bookletTest.pdf 50308 B Linearized=true -> 34531 B Linearized=false;
+	// WaldenFull.pdf 3482146 B Linearized=true -> 1942597 B Linearized=false).
+	// Byblos therefore owns the Annex F write path itself; see
+	// internal/linearize and internal/pdfdoc/linearize.go (byb-1y7).
 	//
-	// Optimize therefore refuses Linearize:true rather than silently ignoring
-	// it. Silently ignoring it would be exactly the failure the
-	// branch-recording on Provenance.Optimized exists to avoid elsewhere in
-	// this function: a caller asking for something and not getting it, with
-	// nothing to show for the gap.
+	// Two consequences a caller has to know about:
 	//
-	// The refusal is a *NotImplemented naming the "linearize" capability, so a
-	// caller can tell "this build cannot linearize, fall back for every
-	// document" from "this document failed" without matching on message text --
-	// see ErrNotImplemented. That distinction is load-bearing downstream:
-	// Kleio's born-digital treatment is linearize-and-nothing-else, so a caller
-	// that mistook this for a per-document failure would quarantine an entire
-	// class of healthy documents.
+	//   - The output is larger than it would have been WITHOUT linearizing:
+	//     measured over the 27 readable corpus documents, +649 to +1007 bytes
+	//     against the same document rewritten and not linearized, with no
+	//     exceptions. Linearization adds a second cross-reference section, a
+	//     parameter dictionary and a hint stream, and it forbids the object
+	//     streams pdfcpu's rewrite would otherwise use.
+	//
+	//     Against the INPUT it is usually but not always larger, because
+	//     pdfcpu's rewrite can save more than linearization costs: the corpus
+	//     spans +7 (dup-raster) to +1007, and 4 of the 49 PDFs in pdfcpu's own
+	//     testdata come out smaller than they went in -- WaldenFull.pdf
+	//     3482146 -> 2152320, VectorApple.pdf 1062861 -> 812959,
+	//     testWithText.pdf 30008 -> 20859, read.go.pdf 254303 -> 254110.
+	//     So "never larger than input" would not discard every linearized
+	//     output; it would discard MOST of them, unpredictably, which is worse.
+	//     The rule is therefore suspended for this branch and for this branch
+	//     only -- a pass-through here would be a caller asking to linearize and
+	//     silently not getting it, which is the exact failure
+	//     Provenance.Optimized exists to make visible.
+	//   - Linearization runs LAST. Writing provenance goes through pdfcpu's
+	//     writer, which strips linearization, so nothing may re-serialize the
+	//     document after this point.
 	Linearize bool
 
 	// RecompressJPEG and JPEGQuality name an image-recompression pass this
@@ -79,14 +92,6 @@ type OptimizeOptions struct {
 // inspect anything, so it must not claim those capabilities are done (see
 // the note further down, and upgrade.go's UpgradeCandidates).
 func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
-	if opts.Linearize {
-		return &NotImplemented{
-			Capability: "linearize",
-			Why: "pdfcpu v0.13.0 has no linearizer and its rewrite strips linearization " +
-				"rather than adding it, so byblos has nothing to delegate to",
-			Issue: "byb-k48",
-		}
-	}
 	if opts.RecompressJPEG {
 		return &NotImplemented{
 			Capability: "jpeg-recompress",
@@ -143,16 +148,43 @@ func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 			ProcessedAt: time.Now(),
 		}
 	}
-	prov.Optimized = "rewritten"
-	if isLinearized(in) {
+	switch {
+	case opts.Linearize:
+		prov.Optimized = "rewritten-linearized"
+	case isLinearized(in):
 		// The rewrite has just thrown away the input's linearization. Say so:
 		// this is the one case where taking the smaller candidate is not free.
 		prov.Optimized = "rewritten-delinearized"
+	default:
+		prov.Optimized = "rewritten"
 	}
 
 	var candidate bytes.Buffer
 	if err := WriteProvenance(bytes.NewReader(rewritten.Bytes()), &candidate, *prov); err != nil {
 		return fmt.Errorf("byblos: optimize: %w", err)
+	}
+
+	if opts.Linearize {
+		// Last, and nothing may run after it: WriteProvenance above goes
+		// through pdfcpu's writer, and so would any further rewrite, which
+		// strips linearization rather than preserving it.
+		//
+		// The never-larger-than-input rule is suspended here, and only here.
+		// Measured on this implementation's own output, linearizing a corpus
+		// document costs +649 to +1007 bytes over the same document rewritten
+		// and not linearized, and +7 to +1007 over the input itself -- so all 27
+		// exceed their input and under the rule every one of them would be
+		// handed back to the caller un-linearized. Linearization is a
+		// correctness requirement for the born-digital path, not a size
+		// optimization, so there is nothing to trade.
+		var out bytes.Buffer
+		if err := pdfdoc.Linearize(bytes.NewReader(candidate.Bytes()), &out); err != nil {
+			return fmt.Errorf("byblos: optimize: %w", err)
+		}
+		if _, err := w.Write(out.Bytes()); err != nil {
+			return fmt.Errorf("byblos: optimize: write: %w", err)
+		}
+		return nil
 	}
 
 	// Optimize's acceptance criterion (design spec section 8) holds

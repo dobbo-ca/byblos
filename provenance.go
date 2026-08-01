@@ -26,10 +26,13 @@ type Provenance struct {
 	Pages        []PageProvenance `json:"pages"`
 
 	// Optimized records which branch Optimize (byb-b5) took, because that
-	// choice is a whole-document property, not a per-page one. Optimize
-	// always returns min(input, pdfcpu-rewritten-output): both are lossless
-	// structural rewrites of the same document, so there is no quality
-	// tradeoff to record, only a size-vs-linearization one. pdfcpu's rewrite
+	// choice is a whole-document property, not a per-page one. Absent a
+	// linearization request, Optimize returns min(input,
+	// pdfcpu-rewritten-output): both are lossless structural rewrites of the
+	// same document, so there is no quality tradeoff to record, only a
+	// size-vs-linearization one. OptimizeOptions.Linearize:true suspends that
+	// rule outright and always returns the linearized bytes, which are always
+	// larger; see "rewritten-linearized" below. pdfcpu's rewrite
 	// pass strips linearization rather than adding it (see
 	// OptimizeOptions.Linearize's measurement), so the rewritten branch loses
 	// whatever linearization the INPUT already had, silently -- the field
@@ -58,9 +61,22 @@ type Provenance struct {
 	// must act on the second. Kleio's born-digital path exists precisely to
 	// produce linearized files (its compress stage runs ocrmypdf in
 	// linearize-only mode and does nothing else), so a later Optimize pass
-	// quietly undoing that is a regression byblos must not hide. Tracked as
-	// byb-k48, which will remove the case entirely by linearizing rather than
-	// by reporting.
+	// quietly undoing that is a regression byblos must not hide.
+	//
+	// "rewritten-linearized" means Optimize was asked to linearize and did:
+	// the output carries Annex F structure byblos itself wrote (byb-1y7,
+	// internal/linearize). It is the only value that asserts a POSITIVE
+	// property of the output rather than merely naming a branch, which is why
+	// capabilityRules keys its upgrade rule on it (upgrade.go).
+	//
+	// "rewritten-delinearized" SURVIVES byb-1y7 and stays reachable; it is not
+	// superseded by "rewritten-linearized". The two are mutually exclusive by
+	// construction and describe different calls, not different eras: they are
+	// the Linearize:false and Linearize:true branches over the same linearized
+	// input. Optimize cannot infer that a caller who did not ask to linearize
+	// wanted it, so the delinearizing branch still exists and must still say so.
+	// Deleting the value would silence the exact regression it was added to
+	// make visible, on the exact documents Kleio cares about.
 	//
 	// Reserve, do not yet emit, "passed-through".
 	//
@@ -130,6 +146,7 @@ type PageProvenance struct {
 var buildCapabilities = []string{
 	"extract-raster",
 	"inspect",
+	"linearize",
 }
 
 // Capabilities returns, sorted, what this build can do.

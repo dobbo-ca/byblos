@@ -70,7 +70,19 @@ var capabilityRules = map[string]func(*Provenance) bool{
 	"downsample":      never,
 	"jpeg-recompress": never,
 	"text-layer":      never,
-	"linearize":       never,
+
+	// Linearization is a whole-file property, so its rule reads
+	// Provenance.Optimized rather than any page's record. "never" was right
+	// while byblos could not linearize at all; now that it can, a document
+	// whose record does not show linearization WOULD come out different if it
+	// were reprocessed, and saying otherwise would hide a real upgrade.
+	//
+	// The judgement call, stated rather than buried: provenance records no
+	// "the caller asked for linearization" flag, so this also nominates
+	// documents whose caller deliberately chose not to linearize. That is the
+	// conservative direction and the one the rest of this table takes -- a
+	// wasted re-run beats a hidden upgrade.
+	"linearize": func(p *Provenance) bool { return p.Optimized != "rewritten-linearized" },
 
 	// Despeckling and border removal apply to any page whose raster Byblos
 	// actually handled. Every prefix ends in "-" so that a future capability

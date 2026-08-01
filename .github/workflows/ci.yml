@@ -14,6 +14,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+      # Every oracle-backed test is gated on exec.LookPath and SKIPS when its
+      # tool is missing, so an image without these does not fail the build -- it
+      # quietly stops checking. Measured: with qpdf off PATH, a linearizer that
+      # emits no primary hint stream at all used to pass the entire suite.
+      # Installing them here is what keeps `go test ./...` the gate it claims to
+      # be, instead of leaving it to whatever the runner image happens to ship.
+      - name: install test oracles
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf poppler-utils
+      - name: assert the oracles are on PATH
+        run: |
+          for t in qpdf pdfinfo pdftotext pdfimages; do
+            command -v "$t" >/dev/null || { echo "MISSING oracle: $t"; exit 1; }
+          done
+          qpdf --version
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
