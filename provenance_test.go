@@ -37,6 +37,20 @@ func TestCapabilitiesContainsB1Set(t *testing.T) {
 	}
 }
 
+// byb-b3 adds these three. TestEveryCapabilityHasARule only checks the
+// buildCapabilities-to-capabilityRules direction (an added capability with no
+// rule); it cannot catch one of these being silently dropped from
+// buildCapabilities, since removing an entry there trivially leaves it a
+// subset of capabilityRules. This is the tripwire for that direction.
+func TestCapabilitiesContainsB3Set(t *testing.T) {
+	got := Capabilities()
+	for _, want := range []string{"quantize-png", "downsample", "jpeg-recompress"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("Capabilities() = %v; missing %q", got, want)
+		}
+	}
+}
+
 // The PDF carries provenance as JSON under a custom Info-dictionary key
 // (design spec section 6), so the round trip must be exact.
 func TestProvenanceJSONRoundTrip(t *testing.T) {
