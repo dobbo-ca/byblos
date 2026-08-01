@@ -146,6 +146,7 @@ type PageProvenance struct {
 var buildCapabilities = []string{
 	"extract-raster",
 	"inspect",
+	"jbig2-generic",
 	"linearize",
 }
 

@@ -44,3 +44,24 @@ jobs:
             echo "FORBIDDEN dependency listed above. Permitted: pdfcpu, golang.org/x/image."
             exit 1
           fi
+
+  roundtrip:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: install the test-only oracles
+        run: sudo apt-get update && sudo apt-get install -y jbig2dec imagemagick libtiff-tools poppler-utils
+      - name: confirm the oracles are on PATH
+        # A missing binary makes the test t.Skip, which would turn this whole
+        # job into a silent no-op. Fail here instead, loudly.
+        run: |
+          command -v jbig2dec
+          command -v magick || command -v convert
+          command -v tiffdump
+          command -v pdfimages
+      - run: go test ./internal/jbig2/ -run "TestRoundTrip|TestBeats|TestPDF" -v

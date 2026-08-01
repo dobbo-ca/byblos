@@ -78,8 +78,26 @@ func EncodeGenericRegion(b *Bitmap, tpgdon bool) []byte {
 				continue
 			}
 		}
+
+		// Seed the three template runs at x = 0. Under nominal AT each run is
+		// contiguous, so from here on each advances by one pixel per step.
+		var runAbove2, runAbove1, runLeft int
+		for dx := -2; dx <= 2; dx++ {
+			runAbove2 = runAbove2<<1 | b.Get(dx, y-2)
+		}
+		for dx := -3; dx <= 3; dx++ {
+			runAbove1 = runAbove1<<1 | b.Get(dx, y-1)
+		}
+		for dx := -4; dx <= -1; dx++ {
+			runLeft = runLeft<<1 | b.Get(dx, y)
+		}
+
 		for x := 0; x < b.W; x++ {
-			e.encode(cx, contextTemplate0(b, x, y), b.Get(x, y))
+			pix := b.Get(x, y)
+			e.encode(cx, runAbove2<<11|runAbove1<<4|runLeft, pix)
+			runAbove2 = (runAbove2<<1 | b.Get(x+3, y-2)) & 0x1F
+			runAbove1 = (runAbove1<<1 | b.Get(x+4, y-1)) & 0x7F
+			runLeft = (runLeft<<1 | pix) & 0x0F
 		}
 	}
 	return e.flush()
