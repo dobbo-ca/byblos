@@ -2,8 +2,8 @@ package byblos
 
 import "sync"
 
-// ExtractCounters is a snapshot of ExtractPageRaster outcomes since process
-// start, or since the last ResetExtractStats.
+// ExtractCounters is a snapshot of ExtractPageRaster/RecordExtraction outcomes
+// since process start, or since the last ResetExtractStats.
 //
 // The design of Byblos rests on the premise that a page which is not a single
 // raster is rare (design spec section 2). These counters are how

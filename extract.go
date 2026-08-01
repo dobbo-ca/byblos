@@ -198,28 +198,40 @@ func (p PageRaster) CoversPage() bool {
 // reads provenance, and a sideways or mirrored raster is wrong there in a way a
 // fraction of a degree is not.
 func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
-	countAttempt()
-
 	d, err := pdfdoc.Open(r)
 	if err != nil {
+		countAttempt()
 		countFailure()
 		return nil, err
 	}
+	pr, _, err := extractPage(d, page)
+	return pr, err
+}
+
+// extractPage is ExtractPageRaster's body once the document is open, plus the
+// record of what it did. Splitting it out lets RecordExtraction (provenance.go)
+// walk a whole document with one pdfdoc.Open and still get exactly the outcome
+// ExtractPageRaster reports -- and it is the only scope where the UNROUNDED
+// floats exist: PageRaster.Bounds/.Page have already been through round()
+// (inspect.go:92-100), and 568.3708 is not 568.
+func extractPage(d pdfdoc.Doc, page int) (*PageRaster, PageProvenance, error) {
+	countAttempt()
+
 	p, err := d.Page(page)
 	if err != nil {
 		countFailure()
-		return nil, err
+		return nil, PageProvenance{}, err
 	}
 	_, scan, err := inspectPage(d, page)
 	if err != nil {
 		countFailure()
-		return nil, err
+		return nil, PageProvenance{}, err
 	}
 
 	idx, reason := classify(p.CropBox, scan, d.ImageInfo)
 	if reason != "" {
 		countDivert(reason)
-		return nil, fmt.Errorf("%w: %s", ErrNotSingleRaster, reason)
+		return nil, PageProvenance{Diverted: divertClass(reason)}, fmt.Errorf("%w: %s", ErrNotSingleRaster, reason)
 	}
 
 	placement := scan.Images[idx]
@@ -235,10 +247,10 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 		// the class that still nominates every decode-* rule (byb-z8j).
 		if errors.Is(err, pdfdoc.ErrUnsupportedCodec) {
 			countDivert("unsupported-codec")
-			return nil, fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err)
+			return nil, PageProvenance{Diverted: divertClass("unsupported-codec")}, fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err)
 		}
 		countFailure()
-		return nil, err
+		return nil, PageProvenance{}, err
 	}
 	switch fileType {
 	case "jbig2", "jpx":
@@ -250,7 +262,7 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 		// decode-jbig2 without also nominating decode-jpx for the same page
 		// (byb-z8j).
 		countDivert("unsupported-codec-" + fileType)
-		return nil, fmt.Errorf("%w: %s", ErrUnsupportedImageCodec, fileType)
+		return nil, PageProvenance{Diverted: divertClass("unsupported-codec-" + fileType)}, fmt.Errorf("%w: %s", ErrUnsupportedImageCodec, fileType)
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
@@ -272,7 +284,7 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 		// much narrower set than the stale comment here used to claim, and it is
 		// why decode-tiff is rare in practice rather than dead.
 		countDivert("unsupported-codec-" + fileType)
-		return nil, fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err)
+		return nil, PageProvenance{Diverted: divertClass("unsupported-codec-" + fileType)}, fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err)
 	}
 	out := &PageRaster{
 		Image:  img,
@@ -295,8 +307,44 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 			}
 		}
 	}
+	rec := PageProvenance{
+		Applied:       []string{"extract-raster"},
+		DroppedAnnots: out.DroppedAnnots,
+		Geometry: &PageGeometry{
+			RasterBox: normalizedBox(placement.Box.LLX, placement.Box.LLY, placement.Box.URX, placement.Box.URY),
+			PageBox:   normalizedBox(p.CropBox.LLX, p.CropBox.LLY, p.CropBox.URX, p.CropBox.URY),
+		},
+	}
+	// Empty for an axis-aligned placement, which is almost every page
+	// (PageProvenance's doc comment). The off-diagonal terms are exactly what
+	// skewDegrees reads, and classify has already rejected anything past
+	// maxSkewDeg, so what survives here is a scanner deskew.
+	if m := placement.CTM; m[1] != 0 || m[2] != 0 {
+		rec.Placement = m[:]
+	}
 	countExtracted(out.CoversPage())
-	return out, nil
+	return out, rec, nil
+}
+
+// normalizedBox returns [llx lly urx ury] with each pair of corners put in
+// canonical (min, max) order.
+//
+// ISO 32000-1 7.9.5 permits a rectangle array's corners in EITHER diagonal
+// order and requires a consumer to normalize; pdfcpu's RectForArray does not
+// (it stores whatever four numbers it read), so a page whose /CropBox names
+// its corners UR-then-LL round-trips into PageGeometry inverted -- e.g. page_box
+// [612 792 0 0] -- unless normalized here. PageRaster.Page, by contrast, is
+// already canonical because image.Rect swaps a reversed pair; without this a
+// full-page scan could be recorded as PageGeometry.CoversPage()==false while
+// PageRaster.CoversPage()==true for the very same page.
+func normalizedBox(llx, lly, urx, ury float64) [4]float64 {
+	if llx > urx {
+		llx, urx = urx, llx
+	}
+	if lly > ury {
+		lly, ury = ury, lly
+	}
+	return [4]float64{llx, lly, urx, ury}
 }
 
 // classify returns the index of the placement that is the page's raster, or the

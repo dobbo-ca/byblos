@@ -130,11 +130,107 @@ type Provenance struct {
 // later pass can find those pages without re-measuring the archive. It is zero
 // for almost every page — byb-b1.11 measured 6 in 18,610 extracted — and
 // omitted when zero, so the ordinary record does not grow.
+//
+// Geometry, when present, is the raster and page boxes measured at write time
+// (byb-b5.1). Placement deliberately stays a separate top-level field rather
+// than moving inside PageGeometry: lifting an old record's top-level placement
+// into the container would have to invent boxes for it, and a Geometry
+// carrying a [0 0 0 0] page box is a wrong geometry stated confidently. The two
+// fields have two separate presence bits because they have two separate
+// histories. It is nil for every record this build did not measure and for
+// every record written before byb-b5.1 -- see PageGeometry's doc comment for
+// why that nilness must survive.
 type PageProvenance struct {
-	Applied       []string  `json:"applied,omitempty"`
-	Diverted      string    `json:"diverted,omitempty"`
-	Placement     []float64 `json:"placement,omitempty"`
-	DroppedAnnots int       `json:"dropped_annots,omitempty"`
+	Applied       []string      `json:"applied,omitempty"`
+	Diverted      string        `json:"diverted,omitempty"`
+	Placement     []float64     `json:"placement,omitempty"`
+	DroppedAnnots int           `json:"dropped_annots,omitempty"`
+	Geometry      *PageGeometry `json:"geometry,omitempty"`
+}
+
+// PageGeometry is a page's raster and page boxes as measured at write time,
+// each [llx lly urx ury] in PDF default user space: points, origin at the
+// lower-left corner, y increasing upward (ISO 32000-1 8.3). This is NOT the
+// [a b c d e f] affine matrix order PageProvenance.Placement uses -- a box is
+// two corners, a placement is a transform, and conflating their orderings
+// would silently misread one as the other.
+//
+// Geometry is a pointer, not a value, and must stay one. nil means "this
+// build recorded no geometry" -- what every pre-byb-b5.1 record deserializes
+// to -- and must never be read as "the raster covers the page". A non-nil
+// Geometry with a zero box is a real, if degenerate, measurement, and JSON can
+// tell the two apart because a pointer either marshals as the object or is
+// omitted entirely.
+//
+// Go 1.24's `omitzero` is deliberately refused here even though go.mod (go
+// 1.26.4) has it available: omitzero on a value-typed PageGeometry would make
+// a measured all-zero box and a never-measured field serialize identically,
+// destroying exactly the distinction the paragraph above depends on. The
+// pointer is the backward-compatibility story; do not "tidy" it away.
+// TestPageProvenanceGeometryZeroValueIsNotOmitted is the tripwire.
+//
+// This exists for the case byb-b1.3 measured: a raster placed at its own
+// resolution on a nominal page box, axis-aligned (so Placement is empty for
+// it), that does not fill the box. 132 such pages were measured; one of them
+// is 2384x3321 px at 302 DPI, which is 568.37 x 791.76 pt on a 612x792
+// MediaBox -- 92.84% of the box (92.87% by width), a 43.6 pt blank strip the
+// raster does not cover. Without Geometry, a later re-processing run has no
+// way to tell that page apart from a full-page scan.
+//
+// Sourcing note for whoever writes this record: PageRaster.Bounds and
+// PageRaster.Page are image.Rectangle, built through round() (inspect.go:92-
+// 100) -- i.e. points ROUNDED TO INTEGERS. A writer populating PageGeometry
+// must source the unrounded floats -- content.Placement.Box and pdfdoc
+// Page.CropBox -- not PageRaster. 568.3708 is not 568.
+//
+// CoversPage below applies coverTolerancePt (extract.go:49, == 1.0) over these
+// exact floats. The live PageRaster.CoversPage applies NO tolerance of its own
+// -- it is a plain image.Rectangle.In test on rounded integer rectangles; the
+// 1.0pt allowance belongs to contains() (extract.go), a different
+// function. That means the two CAN disagree, for a shortfall in the (0.5,
+// 1.0] pt band: PageRaster.CoversPage sees no cover (rounding already ate the
+// sub-pixel slack, containment fails outright), while this one's tolerance
+// still calls it covered. That fork is deliberate -- documented here, not
+// left to be discovered later.
+//
+// RasterBox and PageBox are both mandatory whenever Geometry is non-nil: a
+// writer that measures one must measure the other, and a decoder that gets a
+// short JSON array for either silently zero-fills the missing elements rather
+// than erroring (a wrongly-typed value, e.g. a string, does still error),
+// which would misrepresent a partial record as a real (if
+// degenerate) measurement. Byblos's own writer always sets both together.
+//
+// ADDING A THIRD BOX LATER: it must carry its OWN presence bit -- *[4]float64,
+// or a sibling bool -- and must not be a bare [4]float64 like these two.
+// Geometry's nil-ness is the presence bit for the pair above and for nothing
+// else, so a value-typed box added now would zero-fill on every record written
+// before it existed, and by the rule two paragraphs up a zero box inside a
+// non-nil Geometry reads as a real degenerate measurement rather than as an
+// absent one. The pair above escape this only because they are the reason
+// Geometry becomes non-nil in the first place. byb-b1.12 is the live case:
+// once content.Walk honours form /BBox and clip paths it will want to record
+// the clip box here, and every byb-b5.1-era record would otherwise claim it
+// measured a [0 0 0 0] clip.
+type PageGeometry struct {
+	RasterBox [4]float64 `json:"raster_box"`
+	PageBox   [4]float64 `json:"page_box"`
+}
+
+// CoversPage reports whether RasterBox fills PageBox, within coverTolerancePt.
+// It mirrors PageRaster.CoversPage's guard against a degenerate box: a PageBox
+// with zero or negative width or height -- including one with its corners
+// swapped -- is covered by nothing, because a plain containment check would
+// otherwise answer true for an empty or inverted box (image.Rectangle.In does,
+// for an empty receiver), which would make an unmeasured or degenerate record
+// report itself as a full-page scan.
+func (g PageGeometry) CoversPage() bool {
+	if g.PageBox[2] <= g.PageBox[0] || g.PageBox[3] <= g.PageBox[1] {
+		return false
+	}
+	return g.RasterBox[0] <= g.PageBox[0]+coverTolerancePt &&
+		g.RasterBox[1] <= g.PageBox[1]+coverTolerancePt &&
+		g.RasterBox[2] >= g.PageBox[2]-coverTolerancePt &&
+		g.RasterBox[3] >= g.PageBox[3]-coverTolerancePt
 }
 
 // buildCapabilities is what this build of Byblos can do. Every entry MUST also
@@ -187,6 +283,84 @@ func WriteProvenance(r io.ReadSeeker, w io.Writer, p Provenance) error {
 		return fmt.Errorf("byblos: write provenance: %w", err)
 	}
 	return nil
+}
+
+// RecordExtraction runs extraction over every page of r and returns the record
+// of what happened, ready for WriteProvenance. Pages is exactly one entry per
+// page, in page order, so index i describes page i+1 -- PageProvenance carries
+// no page number of its own.
+//
+// It is the only producer of PageGeometry: the unrounded placement and CropBox
+// floats live inside the extraction path and nothing else can see them.
+//
+// A page Byblos could not READ at all aborts the whole call. There is no
+// "failed" value in PageProvenance's vocabulary, and the two ways to carry on
+// are both worse: skipping the page shifts every later page's index, and
+// appending a zero PageProvenance is indistinguishable to any reader from a
+// page that was handled and had nothing applied. A caller that needs per-page
+// resilience has ExtractPageRaster.
+//
+// Capabilities claims only "extract-raster", for the reason Optimize's fresh
+// record claims nothing (optimize.go): this call did not build, encode, stamp
+// or linearize anything, and a record saying otherwise would suppress those
+// capabilities in UpgradeCandidates. A caller that goes on to do more appends
+// to both Capabilities and the pages' Applied.
+//
+// It reads back whatever record r already carries, the same way Optimize does
+// (optimize.go), and merges into it rather than overwriting it: Optimized is
+// preserved verbatim (extraction is not a rewrite and has no opinion on it),
+// Capabilities is the union of the old record's and this call's, and each
+// page's Applied is the union of the old page's and this call's. Without this,
+// running RecordExtraction over a document Optimize (or an earlier
+// RecordExtraction) already processed would silently erase real capabilities
+// -- including "rewritten-linearized", which a later re-run without
+// Linearize:true would then falsely nominate for reprocessing. A record under
+// provenanceKey that fails to parse as JSON is treated as no record at all,
+// matching ReadProvenance/Optimize's errCorruptProvenance handling.
+func RecordExtraction(r io.ReadSeeker) (Provenance, error) {
+	old, err := ReadProvenance(r)
+	if err != nil {
+		if !errors.Is(err, errCorruptProvenance) {
+			return Provenance{}, err
+		}
+		old = nil
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return Provenance{}, fmt.Errorf("byblos: provenance: seek: %w", err)
+	}
+	d, err := pdfdoc.Open(r)
+	if err != nil {
+		return Provenance{}, err
+	}
+	p := Provenance{
+		Version:      Version,
+		Capabilities: []string{"extract-raster"},
+		ProcessedAt:  time.Now(),
+		Pages:        make([]PageProvenance, 0, d.PageCount()),
+	}
+	if old != nil {
+		p.Optimized = old.Optimized
+		p.Capabilities = unionSorted(old.Capabilities, p.Capabilities)
+	}
+	for n := 1; n <= d.PageCount(); n++ {
+		_, rec, err := extractPage(d, n)
+		if err != nil && rec.Diverted == "" {
+			return Provenance{}, fmt.Errorf("byblos: provenance: page %d: %w", n, err)
+		}
+		if old != nil && rec.Diverted == "" && n-1 < len(old.Pages) {
+			rec.Applied = unionSorted(old.Pages[n-1].Applied, rec.Applied)
+		}
+		p.Pages = append(p.Pages, rec)
+	}
+	return p, nil
+}
+
+// unionSorted returns the sorted, deduplicated union of a and b.
+func unionSorted(a, b []string) []string {
+	out := slices.Clone(a)
+	out = append(out, b...)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // ReadProvenance reads back the record WriteProvenance stored under

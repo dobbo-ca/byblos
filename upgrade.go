@@ -43,7 +43,65 @@ var capabilityRules = map[string]func(*Provenance) bool{
 	// cannot read those bytes either; a decoder can. Including it recommended
 	// the largest piece of work in the Cadmus/Byblos family for up to 91% of
 	// pages on an archive-shaped corpus.
-	"render": anyPageDiverted("not-single-raster"),
+	//
+	// byb-b5.1: a partial placement (PageGeometry.CoversPage false, or a
+	// non-empty Placement) is deliberately NOT a term in this rule either,
+	// decided explicitly rather than by omission:
+	//
+	//   - Old records keep nominating render, because divertClass still maps
+	//     "not-page-covering" to "not-single-raster" (divertClass, extract.go, pinned
+	//     by extract_test.go:284-287) -- new records already stopped doing
+	//     that at byb-b1.3, which retired the "not-page-covering" divert
+	//     reason entirely (extract_test.go:283-286), before Geometry existed.
+	//     A future record carrying Geometry still gets no coverage term here.
+	//   - The volume argument: 63.7% of extracted pages carry
+	//     covers_page=false -- 14,046 of the 22,050 extracted across the same
+	//     166,423-page sample run tools/sample/README.md documents (that file
+	//     records page and extracted counts, not a covers_page breakdown; the
+	//     14,046/13,439 figures below are this rule's own measurement over
+	//     that run, not a quote from README), and concentrated in the ia leg,
+	//     which is 13,439 of 14,943 (89.9%) because those are the natural-DPI
+	//     scans byb-b1.3 was built for; govdocs1 is 14.3% and dc 2.4%. Against
+	//     the ~91% of pages that got byb-97q filed for exactly this reason, a
+	//     coverage-keyed rule repeats byb-97q at the same magnitude.
+	//     (byb-b1.11's close text quotes 13,963 of 18,610 = 75% for this
+	//     ratio; that is the earlier, smaller run. The figures here are
+	//     recomputed from the same 166,423-page results the 7 below comes
+	//     from, so both sides of this comparison share a denominator.)
+	//   - The gain is zero: extract.go's ExtractPageRaster doc comment records
+	//     that every other arm of classify has already established no
+	//     text/path/shading/inline-image/unresolved-XObject marks the page, and
+	//     that on all 132 measured pages the region outside the placement held
+	//     ZERO content operators. A renderer emits the same pixels plus
+	//     synthesized white -- and extract.go explicitly refuses to synthesize.
+	//   - byb-b1.12 cuts AGAINST a coverage rule: content.Walk ignores form
+	//     /BBox and clip paths, so the error runs toward CoversPage reporting
+	//     TRUE. Pages with genuinely hidden ink are the ones a coverage rule
+	//     would SKIP nominating. Coverage is unsound as a proxy for loss in
+	//     exactly the direction that matters.
+	//   - DroppedAnnots, by contrast, IS included below: extract.go says
+	//     outright that rendering appearance streams into the raster would be
+	//     a renderer, so gaining render demonstrably changes the output for
+	//     those pages -- the literal condition capabilityRules tests. Its cost
+	//     profile is the inverse of coverage's, on one denominator: 7 of
+	//     22,050 extracted pages (~0.03%) versus 14,046 of the same 22,050
+	//     (63.7%). The conservative bias is affordable here, unaffordable
+	//     there.
+	//   - DroppedAnnots is only counted on ExtractPageRaster's success path
+	//     (the d.Annots(page) loop in extractPage, extract.go): a diverted
+	//     page's raster was never read, so
+	//     its annotations were never counted either, and DroppedAnnots stays
+	//     0. A page carrying both a non-empty Diverted and DroppedAnnots > 0
+	//     is not a shape this build's writer produces; the arm below does not
+	//     guard against it separately.
+	"render": func(p *Provenance) bool {
+		for _, pg := range p.Pages {
+			if pg.DroppedAnnots > 0 {
+				return true
+			}
+		}
+		return anyPageDiverted("not-single-raster")(p)
+	},
 
 	// Raster decoders. One capability per codec, because "which documents want
 	// a JPX decoder" and "which want a JBIG2 decoder" are different questions

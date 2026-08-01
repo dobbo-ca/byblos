@@ -31,6 +31,38 @@ func TestUpgradeCandidates(t *testing.T) {
 			current: []string{"extract-raster", "inspect", "render"},
 			want:    []string{"render"},
 		},
+		// byb-b5.1: a page whose stored raster does not cover its page box is
+		// NOT, on its own, a render candidate. Coverage is not a divert (see
+		// extract.go's ExtractPageRaster doc comment) and must not become one
+		// through the back door of a coverage-keyed upgrade rule -- the
+		// tripwire this subtest exists to be.
+		{
+			name: "partial placement alone is not a render candidate",
+			prov: &Provenance{
+				Capabilities: []string{"extract-raster", "inspect"},
+				Pages: []PageProvenance{{
+					Applied: []string{"extract-raster"},
+					Geometry: &PageGeometry{
+						RasterBox: [4]float64{0, 0, 568.3708, 791.7616},
+						PageBox:   [4]float64{0, 0, 612, 792},
+					},
+				}},
+			},
+			current: []string{"extract-raster", "inspect", "render"},
+			want:    nil,
+		},
+		// byb-b5.1: DroppedAnnots > 0 DOES make render a candidate, because
+		// rendering the appearance streams into the raster would change the
+		// output -- the literal condition capabilityRules tests.
+		{
+			name: "dropped annotations make render a candidate",
+			prov: &Provenance{
+				Capabilities: []string{"extract-raster", "inspect"},
+				Pages:        []PageProvenance{{Applied: []string{"extract-raster"}, DroppedAnnots: 1}},
+			},
+			current: []string{"extract-raster", "inspect", "render"},
+			want:    []string{"render"},
+		},
 		{
 			name: "applied jpeg-recompress only, new jbig2-symbol: no bitonal content",
 			prov: &Provenance{

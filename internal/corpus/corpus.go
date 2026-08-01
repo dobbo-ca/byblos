@@ -139,6 +139,8 @@ func All() []Doc {
 			scanPlaced(cmOperands(NaturalDPIPlacement), 0)},
 		{"scan-stamped", "natural-DPI raster plus a /Stamp with an appearance stream in the uncovered strip: must extract, and report the stamp it cannot include",
 			stampedScan()},
+		{"scan-reversed-cropbox", "page-covering image on a /CropBox whose corners are named UR-then-LL: must NOT record an inverted page_box",
+			scanReversedCropBox()},
 		{"scan-mirrored", "page-covering image placed with a vertical mirror: must divert",
 			scanPlaced(cmOperands(MirrorPlacement), 0)},
 		{"scan-quarter-turn", "page-covering image placed with a true 90 degree rotation: must divert",
@@ -307,6 +309,26 @@ func scanPlaced(cm string, rotate int) []byte {
 		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
 		pages, PageWidthPt, PageHeightPt, rot, img, cont))
 	w.fillStream(cont, "", []byte(fmt.Sprintf("q %s cm /Im0 Do Q\n", cm)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	return w.finish(cat)
+}
+
+// scanReversedCropBox is scan(0) with an explicit /CropBox whose corners are
+// named in the diagonally opposite order from the usual [llx lly urx ury] --
+// legal under ISO 32000-1 7.9.5, which requires a consumer to normalize. It
+// exists to catch a writer that stores a page's box verbatim instead of
+// normalizing it: [612 792 0 0] is the same rectangle as [0 0 612 792], but a
+// naive reader of the raw numbers sees an inverted, degenerate one.
+func scanReversedCropBox() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /CropBox [%d %d 0 0]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, PageWidthPt, PageHeightPt, img, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
 	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
 	return w.finish(cat)
 }
@@ -524,6 +546,42 @@ func mixed() []byte {
 	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
 	return w.finish(cat)
 }
+
+// mixedPageTwoUnreadable is mixed() with page 2's /MediaBox removed and no
+// /MediaBox on /Pages to inherit it from. The document opens cleanly --
+// pdfdoc.Open runs no validator -- but pdfdoc.Doc.Page(2) then fails with "no
+// dictionary or no MediaBox", while Page(1) still succeeds because page 1
+// carries its own explicit /MediaBox. It exists so a caller walking every page
+// can hit a genuine per-page read failure on a page after the first, as
+// opposed to malformed()'s failure inside pdfdoc.Open itself before any page
+// is ever reached.
+func mixedPageTwoUnreadable() []byte {
+	w := newWriter()
+	cat, pages := w.reserve(), w.reserve()
+	p1, c1, font := w.reserve(), w.reserve(), w.reserve()
+	p2, c2, img := w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R %d 0 R] /Count 2 >>", p1, p2))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, font, c1))
+	w.fillStream(c1, "", []byte(bornDigitalContent))
+	w.fill(font, helveticaFont)
+	w.fill(p2, fmt.Sprintf("<< /Type /Page /Parent %d 0 R"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, img, c2))
+	w.fillStream(c2, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	return w.finish(cat)
+}
+
+// MixedPageTwoUnreadable exposes mixedPageTwoUnreadable directly rather than
+// through ByName/All: poppler defaults a missing /MediaBox rather than
+// erroring, so this document would fail TestInspectAgreesWithPoppler and
+// TestExtractedRasterMatchesPdfimages for disagreeing with poppler on exactly
+// the page it exists to make pdfdoc.Doc.Page reject -- that divergence is the
+// point of the fixture, not a bug to reconcile against the oracle.
+func MixedPageTwoUnreadable() []byte { return mixedPageTwoUnreadable() }
 
 // dupRaster gives two pages the same raster bytes as two distinct objects.
 // pdfcpu deduplicates byte-identical image XObjects in its optimize pass, so
