@@ -132,15 +132,21 @@ type Doc interface {
 	// there is no way to reach them from a document Byblos did not read.
 	ReplaceImage(id int, img EncodedImage) error
 	Write(w io.Writer) error
+	// AddFontResource and AppendContent are the invisible-text write half; see
+	// text.go. Same reason as ReplaceImage/Write: they need Open's normalized
+	// context.
+	AddFontResource(n int, f TrueTypeFont) (name string, err error)
+	AppendContent(n int, ops []byte) error
 }
 
 type doc struct {
-	ctx     *model.Context
-	scopes  []scope
-	images  map[int]ImageInfo
-	streams map[int]*types.StreamDict // image stream dicts, keyed like images
-	refs    map[int]types.IndirectRef // xref identity of those streams, for writing
-	nextID  int                       // synthetic ids for direct (non-indirect) image objects
+	ctx      *model.Context
+	scopes   []scope
+	images   map[int]ImageInfo
+	streams  map[int]*types.StreamDict    // image stream dicts, keyed like images
+	refs     map[int]types.IndirectRef    // xref identity of those streams, for writing
+	nextID   int                          // synthetic ids for direct (non-indirect) image objects
+	fontRefs map[string]types.IndirectRef // embedded fonts, keyed by TrueTypeFont.BaseFont
 }
 
 type scope struct {

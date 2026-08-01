@@ -148,6 +148,7 @@ var buildCapabilities = []string{
 	"inspect",
 	"jbig2-generic",
 	"linearize",
+	"text-layer",
 }
 
 // Capabilities returns, sorted, what this build can do.
