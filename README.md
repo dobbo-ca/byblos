@@ -10,9 +10,13 @@ that compiles into your binary.
 > Byblos was the port that traded papyrus to Greece; "biblion", and eventually
 > "book", comes from its name. This library handles the paper.
 
-**Status:** design approved, implementation not started. See
+**Status:** under active implementation. Inspection, raster extraction, JBIG2
+generic-region encoding, the invisible text layer, PDF assembly from images,
+and structural optimization (including our own Annex F linearizer) all exist
+and are exported; image recompression (quantization, downsampling, JPEG
+recompression) has not landed yet. See
 [the design spec](docs/superpowers/specs/2026-07-27-byblos-design.md) and
-[FUTURE.md](FUTURE.md).
+[FUTURE.md](FUTURE.md) for what remains.
 
 ## What makes it tractable
 

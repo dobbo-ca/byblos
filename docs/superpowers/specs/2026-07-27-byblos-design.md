@@ -92,19 +92,21 @@ via `IsLinearizationObject`). Measured on `pdfcpu`'s own fixtures, a round trip
 through its optimize pass takes `bookletTest.pdf` from 50,308 bytes linearized to
 34,531 bytes **not** linearized.
 
-That matters more than a missing option, because §4's `Optimize` is what replaces
-Kleio's born-digital treatment — and that treatment is linearization and nothing
-else (`kleio/internal/pipeline/compress.go`, `linearizeArgs`: `ocrmypdf
---skip-text --tesseract-timeout 0 --optimize 1`, then return). So G1 cannot be met
-for born-digital documents until Byblos linearizes on its own, which means
-implementing ISO 32000-1:2008 Annex F — object ordering, the linearization
-parameter dictionary, page-offset and shared-object hint tables, and a split
-cross-reference. Tracked as `byb-k48`.
+That mattered more than a missing option, because §4's `Optimize` is what
+replaces Kleio's born-digital treatment — and that treatment is linearization
+and nothing else (`kleio/internal/pipeline/compress.go`, `linearizeArgs`:
+`ocrmypdf --skip-text --tesseract-timeout 0 --optimize 1`, then return). So G1
+could not be met for born-digital documents until Byblos linearized on its
+own, which meant implementing ISO 32000-1:2008 Annex F — object ordering, the
+linearization parameter dictionary, page-offset and shared-object hint tables,
+and a split cross-reference. Byblos now does this itself (`internal/linearize`,
+`byb-1y7`): `Optimize` accepts `Linearize: true` and returns Annex F output,
+at a measured +649 to +1007 bytes against the same document rewritten without
+linearizing.
 
-Until then `Optimize` refuses `Linearize: true` with a typed `*NotImplemented`
-rather than accepting it and quietly doing nothing, and records
-`rewritten-delinearized` on the provenance when its rewrite drops linearization
-the input arrived with.
+`Optimize` still records `rewritten-delinearized` on the provenance when its
+non-linearizing rewrite drops linearization the input arrived with, so that
+loss stays visible rather than silent.
 
 **Byblos wraps `pdfcpu` behind its own interfaces** so that replacing it later is
 a swap rather than a rewrite.
@@ -121,10 +123,14 @@ library stays independently useful and independently testable.
 ```go
 package byblos
 
+const Version = "0.1.0"                          // recorded on every Provenance
+const CapabilityJBIG2Generic = "jbig2-generic"    // provenance capability string
+
 // --- inspection ---
 
 type ImageRef struct {
     Bounds        image.Rectangle // placement on the page, in points
+    Placement     [6]float64      // paint matrix, [a b c d e f] (ISO 32000-1 8.3.3)
     Width, Height int             // pixel dimensions
     Bitonal       bool
 }
@@ -140,26 +146,61 @@ func Inspect(r io.ReadSeeker) ([]PageInfo, error)
 
 // --- extraction (no renderer) ---
 
-// ErrNotSingleRaster reports a page that is not one page-covering image:
-// tiled rasters, vector content, or image-plus-overlay.
-var ErrNotSingleRaster = errors.New("byblos: page is not a single page-covering raster")
+// ErrNotSingleRaster reports a page that is not one visible image: tiled
+// rasters, visible vector content, or image-plus-overlay.
+var ErrNotSingleRaster = errors.New("byblos: page is not a single raster")
+
+// ErrUnsupportedImageCodec reports a page raster stored in a codec Byblos
+// cannot decode: JBIG2, JPEG 2000, or CMYK re-rendered as TIFF by pdfcpu.
+var ErrUnsupportedImageCodec = errors.New("byblos: page raster uses an image codec byblos cannot decode")
 
 // PageRaster is the raster and where it sits. byb-b1.3 measured 132 pages
 // whose raster is placed at its own resolution on a nominal page box and does
 // not fill it; those pages extract, so the caller has to be able to tell.
 type PageRaster struct {
-    Image  image.Image
-    Bounds image.Rectangle // where the raster lands, in points
-    Page   image.Rectangle // the page box, in points
+    Image         image.Image
+    Bounds        image.Rectangle // where the raster lands, in points
+    Page          image.Rectangle // the page box, in points
+    DroppedAnnots int             // annotations that paint and are not in Image
 }
 
 func (p PageRaster) CoversPage() bool
 
 func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error)
 
+// --- extraction telemetry ---
+// Instruments the premise §2 rests on: that a page which is not a single
+// raster is rare. See ExtractCounters.UnhandledRate.
+
+type ExtractCounters struct {
+    Attempted, Extracted, Partial, Diverted, Failed uint64
+    Reasons map[string]uint64 // divert reason -> count
+}
+
+func ExtractStats() ExtractCounters
+func ResetExtractStats()
+func (c ExtractCounters) DivertRate() float64
+func (c ExtractCounters) UnhandledRate() float64
+
 // --- codecs ---
 
+type Bitmap struct { // 1-bpp bilevel image; see §5
+    Width, Height int
+    Stride        int
+    Pix           []byte
+}
+
+func NewBitmap(w, h int) *Bitmap
+func (b *Bitmap) At(x, y int) uint8
+func (b *Bitmap) Set(x, y int, v uint8)
+func (b *Bitmap) Bounds() image.Rectangle
+func (b *Bitmap) Clone() *Bitmap
+func (b *Bitmap) Equal(o *Bitmap) bool
+
 func EncodeJBIG2Generic(b *Bitmap) ([]byte, error)   // lossless; see §5
+
+// NOT YET IMPLEMENTED (B3, image codecs). Kept here as the intended shape,
+// not as shipped API.
 func QuantizePNG(img image.Image, colors int) ([]byte, error)
 func Downsample(img image.Image, srcDPI, dstDPI int) image.Image
 
@@ -174,20 +215,72 @@ type TextLayer struct {
     Pages [][]PositionedWord
 }
 
+// ErrUnstampableRune reports a rune outside the glyphless font's coverage
+// (printable ASCII). StampTextLayer errors rather than substituting a glyph.
+var ErrUnstampableRune = errors.New("byblos: rune is outside the glyphless font's coverage")
+
 func StampTextLayer(w io.Writer, r io.ReadSeeker, tl TextLayer) error
 
+type ColorSpace = pdfdoc.ColorSpace   // §4 write-seam vocabulary, shared with
+type DecodeParms = pdfdoc.DecodeParms // ReplaceImage so BuildPDF isn't a second
+type EncodedImage = pdfdoc.EncodedImage // thing to keep in step
+
+type BuildPage struct {
+    Image             EncodedImage
+    WidthPt, HeightPt float64 // MediaBox in points; both zero derives from DPI
+    DPI               float64
+}
+
+func BuildPDF(w io.Writer, pages []BuildPage) error
+
+// --- capability errors ---
+
+// ErrNotImplemented reports that a caller asked for something Byblos does
+// not do YET, as distinct from a broken or ineligible document. Test with
+// errors.Is; use errors.As with *NotImplemented to find which capability.
+var ErrNotImplemented = errors.New("byblos: not implemented")
+
+type NotImplemented struct {
+    Capability string // e.g. "jpeg-recompress"
+    Why        string
+    Issue      string // e.g. "byb-b3"
+}
+
+func (e *NotImplemented) Error() string
+func (e *NotImplemented) Unwrap() error
+
 type OptimizeOptions struct {
-    Linearize     bool
-    RecompressJPEG bool
-    JPEGQuality   int
+    Linearize      bool // implemented: our own Annex F writer, see §3
+    RecompressJPEG bool // still refused with *NotImplemented{Capability: "jpeg-recompress"} -- B3
+    JPEGQuality    int
 }
 
 func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error
 
 // --- provenance (§6) ---
 
+type Provenance struct {
+    Version      string
+    Capabilities []string
+    ProcessedAt  time.Time
+    Pages        []PageProvenance
+
+    // Optimized records which branch Optimize took: "" (not known to have
+    // been rewritten), "rewritten", "rewritten-delinearized" (rewrite
+    // dropped linearization the input had), or "rewritten-linearized" (Annex
+    // F output, byb-1y7). See §6.
+    Optimized string
+}
+
+type PageProvenance struct {
+    Applied       []string        // e.g. ["downsample-150", "jbig2-generic"]
+    Diverted      string          // e.g. "not-single-raster"; "" when handled normally
+    Placement     []float64       // paint matrix recorded at write time; see PageRaster
+    DroppedAnnots int             // annotations that painted but are not in the extracted raster
+}
+
 func ReadProvenance(r io.ReadSeeker) (*Provenance, error)
-func WriteProvenance(w io.Writer, r io.ReadSeeker, p *Provenance) error
+func WriteProvenance(r io.ReadSeeker, w io.Writer, p Provenance) error
 func UpgradeCandidates(p *Provenance, current []string) []string
 func Capabilities() []string // what this build can do
 ```
@@ -239,11 +332,18 @@ type Provenance struct {
     Capabilities []string  // what this build could do at processing time
     ProcessedAt  time.Time
     Pages        []PageProvenance
+
+    // Optimized records which branch Optimize (byb-b5) took: "" (not known
+    // to have been rewritten), "rewritten", "rewritten-delinearized", or
+    // "rewritten-linearized" (byb-1y7). See §4 and §8.
+    Optimized string
 }
 
 type PageProvenance struct {
-    Applied  []string // e.g. ["downsample-150", "jbig2-generic"]
-    Diverted string   // e.g. "not-single-raster"; "" when handled normally
+    Applied       []string  // e.g. ["downsample-150", "jbig2-generic"]
+    Diverted      string    // e.g. "not-single-raster"; "" when handled normally
+    Placement     []float64 // paint matrix recorded at write time (byb-b1.3)
+    DroppedAnnots int       // annotations that painted but are not in the extracted raster
 }
 ```
 
@@ -302,7 +402,7 @@ oracles**. They never ship and Kleio never depends on them.
 | `EncodeJBIG2Generic` | round-trip through a JBIG2 *decoder*, asserting bit-identical output — this is the definitive lossless check, and it does not need `jbig2enc` |
 | `QuantizePNG`, `Downsample` | size and PSNR bounds against `pngquant`/`ghostscript` output |
 | `StampTextLayer` | `pdftotext` on the result must return the text that was stamped, in reading order |
-| `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input |
+| `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input — suspended for `Linearize: true`: over the 27 readable corpus documents it runs +7 to +1007 B against the input (usually but not always larger; the rewrite alone can shrink a document more than linearizing costs), and +649 to +1007 B with no exceptions against the same document rewritten and not linearized (see §4/§6 `Provenance`) |
 
 The JBIG2 oracle deserves emphasis: because we encode losslessly, correctness is
 verifiable by decoding our own output and comparing bitmaps. No reference encoder
