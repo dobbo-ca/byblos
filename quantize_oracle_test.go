@@ -133,7 +133,7 @@ func interpAtSize(pts []curvePoint, size int) float64 {
 // and 2.17.0 are byte-identical to each other, and the two independently built
 // 3.0.3s are byte-identical to each other, so packaging is not a variable, only
 // version is. Per-image sum-ratio (byblos total / pngquant total over the whole
-// ladder), worst build first:
+// ladder), worst image first, builds oldest to newest:
 //
 //	scanpage  1.4534  1.4534  1.4534  1.4534  1.4534   spread 0.0000
 //	gradient  0.9702  0.9702  1.2958  1.3323  1.3323   spread 0.3621
@@ -156,19 +156,30 @@ func interpAtSize(pts []curvePoint, size int) float64 {
 // 297 bytes of the 952-vs-655 gap are IDAT, and all of it is PALETTE ORDER:
 // pngquant puts the dominant colour (paper) at index 0, so the paper run and
 // the per-scanline filter bytes are both 0x00 and LZ77 matches them as one run
-// across row boundaries; byblos puts paper at index 1, so every row is 0x00
-// followed by 150 bytes of 0x55 and the run breaks 800 times. Recompressing
-// byblos's own scanline stream with zlib-9 gives 862 against Go's 871, so
-// compress/flate is not the cause; re-indexing byblos's output by descending
-// pixel population and recompressing gives 664 against pngquant's 655. Filed as
-// byb-20b. IF THAT LANDS, RE-DERIVE THIS THRESHOLD: scanpage would fall to
-// ~1.014 and scanjpeg to ~1.031, at which point 1.50 is ~48% dead slack and the
-// size half stops biting anywhere.
+// across row boundaries; byblos puts paper at index 1, so its 625 all-paper
+// rows are 0x00 followed by 150 bytes of 0x55 and the run breaks at every row
+// boundary instead of spanning it. The longest single-byte run in byblos's
+// stream is 150 bytes; in pngquant's it is 10,448. Recompressing byblos's own
+// scanline stream with zlib-9 gives 862 against Go's 871, so compress/flate is
+// not the cause; re-indexing byblos's output by descending pixel population
+// makes its scanline stream BYTE-IDENTICAL to pngquant's, at which point zlib-9
+// reproduces 655 exactly and Go's png.BestCompression gives 659. Filed as
+// byb-20b.
 //
-// Because it does bite today, and only there. A png.DefaultCompression
-// regression (a plausible one-token slip, not a strawman) takes scanpage to
-// 1.968x and fails; the same mutation leaves gradient, photo and scanjpeg green,
-// since those sit 12-34% under the threshold. scanpage is the whole size gate.
+// It does bite today, and only there. A png.DefaultCompression regression (a
+// plausible one-token slip, not a strawman) takes scanpage to 1.968x and fails;
+// the same mutation leaves gradient, photo and scanjpeg green, since those sit
+// 12-34% under the threshold. scanpage is the whole size gate.
+//
+// WHICH IS WHY byb-20b MUST NOT LAND WITHOUT RE-DERIVING THIS THRESHOLD.
+// Measured by re-indexing every corpus output with byblos's own encoder:
+// scanpage falls to 1.0061 and scanjpeg to 1.0313 (1.0513 against the CI
+// 2.18.0), but gradient moves by ONE byte over the whole ladder -- it has no
+// dominant colour -- so gradient becomes the binding row at 1.3323 and 1.50
+// would leave it 12.6% of headroom where scanpage leaves 3.2% today. That is
+// not merely slacker. The DefaultCompression mutation above then reaches only
+// 1.4655 on gradient and PASSES: the one regression this gate is known to catch
+// stops being caught. The threshold has to come down with the ratios.
 //
 // The oracle can still move, but only two ways, and they are not symmetric. CI
 // pins runs-on: ubuntu-24.04 rather than ubuntu-latest, so its 2.18.0 cannot
