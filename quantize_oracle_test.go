@@ -123,10 +123,69 @@ func interpAtSize(pts []curvePoint, size int) float64 {
 // also SHRINKS the output, since that slides down pngquant's own curve; the
 // bit-depth and palette-size tests cover that direction instead.
 //
-// The size margin is thinnest on scanpage (1.4534x of the 1.50x threshold,
-// ~3.1% headroom) -- not gradient, which sits at 1.3323x. That one has no
-// version-spread evidence behind it yet and is the likeliest next thing to go
-// red on an oracle bump.
+// THE SIZE HALF IS NOT SIZED THAT WAY, BECAUSE IT MEASURABLY DOES NOT NEED TO
+// BE (byb-0b8). The size threshold was long suspected of being the next thing
+// to go red on an oracle bump, by analogy with the PSNR slack above. It was
+// then measured against five pngquant builds spanning 2019-2024 -- 2.12.2
+// (Ubuntu jammy), 2.17.0 (Debian bookworm), 2.18.0 (Ubuntu noble = the CI
+// runner), 3.0.3 (Homebrew = local dev) and 3.0.3 from Alpine -- and the
+// analogy does not hold. Only three of those five behave distinctly: 2.12.2
+// and 2.17.0 are byte-identical to each other, and the two independently built
+// 3.0.3s are byte-identical to each other, so packaging is not a variable, only
+// version is. Per-image sum-ratio (byblos total / pngquant total over the whole
+// ladder), worst image first, builds oldest to newest:
+//
+//	scanpage  1.4534  1.4534  1.4534  1.4534  1.4534   spread 0.0000
+//	gradient  0.9702  0.9702  1.2958  1.3323  1.3323   spread 0.3621
+//	scanjpeg  1.1279  1.1279  1.1533  1.1314  1.1314   spread 0.0254
+//	photo     0.9801  0.9801  1.1252  1.1205  1.1205   spread 0.1452
+//	          2.12.2  2.17.0  2.18.0  3.0.3   3.0.3a
+//
+// The binding image is invariant. scanpage is 655 bytes on every build at every
+// N -- the version spread on the only row that constrains the threshold is
+// exactly zero, across a five-year span and a major version bump. The rows that
+// DO move (gradient 0.9702 -> 1.3323, because pngquant got 25% better at
+// gradient between 2.17.0 and 2.18.0, not because byblos changed) are the rows
+// with 12%+ headroom. So the threshold stays at 1.50: widening it would be
+// widening against a spread that the measurement says is not there, on the one
+// row where a spread would matter.
+//
+// WHY scanpage BINDS IS NOT QUANTIZATION QUALITY, and this is the part worth
+// carrying forward. Both sides emit a structurally identical file for it --
+// bitdepth 2, colortype 3, a 12-byte PLTE, filter 0 on all 800 scanlines. All
+// 297 bytes of the 952-vs-655 gap are IDAT, and all of it is PALETTE ORDER:
+// pngquant puts the dominant colour (paper) at index 0, so the paper run and
+// the per-scanline filter bytes are both 0x00 and LZ77 matches them as one run
+// across row boundaries; byblos puts paper at index 1, so its 625 all-paper
+// rows are 0x00 followed by 150 bytes of 0x55 and the run breaks at every row
+// boundary instead of spanning it. The longest single-byte run in byblos's
+// stream is 150 bytes; in pngquant's it is 10,448. Recompressing byblos's own
+// scanline stream with zlib-9 gives 862 against Go's 871, so compress/flate is
+// not the cause; re-indexing byblos's output by descending pixel population
+// makes its scanline stream BYTE-IDENTICAL to pngquant's, at which point zlib-9
+// reproduces 655 exactly and Go's png.BestCompression gives 659. Filed as
+// byb-20b.
+//
+// It does bite today, and only there. A png.DefaultCompression regression (a
+// plausible one-token slip, not a strawman) takes scanpage to 1.968x and fails;
+// the same mutation leaves gradient, photo and scanjpeg green, since those sit
+// 12-34% under the threshold. scanpage is the whole size gate.
+//
+// WHICH IS WHY byb-20b MUST NOT LAND WITHOUT RE-DERIVING THIS THRESHOLD.
+// Measured by re-indexing every corpus output with byblos's own encoder:
+// scanpage falls to 1.0061 and scanjpeg to 1.0313 (1.0513 against the CI
+// 2.18.0), but gradient moves by ONE byte over the whole ladder -- it has no
+// dominant colour -- so gradient becomes the binding row at 1.3323 and 1.50
+// would leave it 12.6% of headroom where scanpage leaves 3.2% today. That is
+// not merely slacker. The DefaultCompression mutation above then reaches only
+// 1.4655 on gradient and PASSES: the one regression this gate is known to catch
+// stops being caught. The threshold has to come down with the ratios.
+//
+// The oracle can still move, but only two ways, and they are not symmetric. CI
+// pins runs-on: ubuntu-24.04 rather than ubuntu-latest, so its 2.18.0 cannot
+// drift without someone editing ci.yml -- re-measure when that pin moves. The
+// Homebrew build under local dev floats on brew upgrade with no such gate, so
+// a local-only failure here is an oracle bump until proven otherwise.
 //
 // scanpage is lossless on both sides, so its PSNR rows are +Inf and the
 // comparison passes on +Inf < +Inf being false. That is correct, not vacuous:
