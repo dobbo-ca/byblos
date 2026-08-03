@@ -20,15 +20,33 @@ import (
 // enforces -- clamping would silently substitute a different request than
 // the one asked for.
 func QuantizePNG(img image.Image, colors int) ([]byte, error) {
+	out, err := quantizeCore(img, colors)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	enc := png.Encoder{CompressionLevel: png.BestCompression}
+	if err := enc.Encode(&buf, out); err != nil {
+		return nil, fmt.Errorf("byblos: quantizepng: encode: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// quantizeCore is the median-cut/Lloyd/population-order core shared by
+// QuantizePNG and QuantizeIndexed (byb-96p): the two entry points differ only
+// in how they package this function's *image.Paletted, and must never
+// diverge on how they produce it -- see the population-order comment below
+// for why (byb-20b).
+func quantizeCore(img image.Image, colors int) (*image.Paletted, error) {
 	if img == nil {
-		return nil, fmt.Errorf("byblos: quantizepng: image is nil")
+		return nil, fmt.Errorf("byblos: quantize: image is nil")
 	}
 	b := img.Bounds()
 	if b.Empty() {
-		return nil, fmt.Errorf("byblos: quantizepng: image bounds %v are empty", b)
+		return nil, fmt.Errorf("byblos: quantize: image bounds %v are empty", b)
 	}
 	if colors < 2 || colors > 256 {
-		return nil, fmt.Errorf("byblos: quantizepng: colors %d is outside 2..256", colors)
+		return nil, fmt.Errorf("byblos: quantize: colors %d is outside 2..256", colors)
 	}
 
 	// Histogram at full 24-bit precision: packed 0xRRGGBB -> pixel count.
@@ -37,7 +55,7 @@ func QuantizePNG(img image.Image, colors int) ([]byte, error) {
 		for x := b.Min.X; x < b.Max.X; x++ {
 			r, g, bl, a := img.At(x, y).RGBA()
 			if a != 0xffff {
-				return nil, fmt.Errorf("byblos: quantizepng: image is not opaque at (%d,%d)", x, y)
+				return nil, fmt.Errorf("byblos: quantize: image is not opaque at (%d,%d)", x, y)
 			}
 			packed := uint32(r>>8)<<16 | uint32(g>>8)<<8 | uint32(bl>>8)
 			hist[packed]++
@@ -152,12 +170,7 @@ func QuantizePNG(img image.Image, colors int) ([]byte, error) {
 		}
 	}
 
-	var buf bytes.Buffer
-	enc := png.Encoder{CompressionLevel: png.BestCompression}
-	if err := enc.Encode(&buf, out); err != nil {
-		return nil, fmt.Errorf("byblos: quantizepng: encode: %w", err)
-	}
-	return buf.Bytes(), nil
+	return out, nil
 }
 
 // rgb24 is one palette entry, always a true 8-bit colour: the weighted mean

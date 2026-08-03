@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"image/png"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/corpus"
@@ -65,6 +66,30 @@ func TestQuantizePNGNonOpaqueInputErrors(t *testing.T) {
 	}
 	if _, err := QuantizePNG(img, 16); err == nil {
 		t.Fatal("QuantizePNG on a non-opaque image: want error, got nil")
+	}
+}
+
+// TestQuantizeCoreErrorsCarryTheSharedPrefix pins the "byblos: quantize:"
+// error prefix quantizeCore uses for input validation (quantize.go), which
+// both QuantizePNG and QuantizeIndexed surface verbatim -- neither wraps
+// these particular errors further. Found during byb-96p mutation review:
+// nothing previously asserted on the string, so it silently drifted from
+// QuantizePNG's pre-byb-96p "byblos: quantizepng:" prefix when the checks
+// moved into the shared core, and would drift again undetected.
+func TestQuantizeCoreErrorsCarryTheSharedPrefix(t *testing.T) {
+	const wantPrefix = "byblos: quantize:"
+
+	if _, err := QuantizePNG(nil, 16); err == nil || !strings.HasPrefix(err.Error(), wantPrefix) {
+		t.Errorf("QuantizePNG(nil, 16) error = %v, want prefix %q", err, wantPrefix)
+	}
+	if _, err := QuantizePNG(corpus.Photo(), 300); err == nil || !strings.HasPrefix(err.Error(), wantPrefix) {
+		t.Errorf("QuantizePNG(_, 300) error = %v, want prefix %q", err, wantPrefix)
+	}
+	if _, err := QuantizeIndexed(nil, 16); err == nil || !strings.HasPrefix(err.Error(), wantPrefix) {
+		t.Errorf("QuantizeIndexed(nil, 16) error = %v, want prefix %q", err, wantPrefix)
+	}
+	if _, err := QuantizeIndexed(corpus.Photo(), 300); err == nil || !strings.HasPrefix(err.Error(), wantPrefix) {
+		t.Errorf("QuantizeIndexed(_, 300) error = %v, want prefix %q", err, wantPrefix)
 	}
 }
 
