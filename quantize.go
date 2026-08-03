@@ -74,8 +74,64 @@ func QuantizePNG(img image.Image, colors int) ([]byte, error) {
 	}
 	palette = lloydRefine(buckets, palette, iters)
 
+	// Reorder the palette by descending pixel population (ties broken by
+	// ascending RGB, for determinism), matching pngquant. This is purely a
+	// relabelling -- nearest-entry assignment, and therefore every pixel's
+	// colour, is unchanged -- but the resulting index stream is not: PNG
+	// filters and the deflate/LZ77 stage that follows both operate on the
+	// index bytes, not the colours behind them. On a scanned page the
+	// dominant colour is the paper, and putting it at index 0 makes the
+	// paper's index equal the filter type ("None") for predicted rows, both
+	// 0x00, so a long paper run becomes one uninterrupted run of zero bytes
+	// that deflate can match across scanline boundaries. At any other index
+	// the same run is broken by the intervening non-zero filter byte at
+	// every row, capping match length at one scanline. Measured on this
+	// corpus (Scanpage): byblos's longest single-byte run jumps from 150
+	// bytes to pngquant's 10,448 once the dominant colour is at index 0.
+	//
+	// The tally is computed explicitly (rather than reusing lloydRefine's
+	// internal accums) because lloydRefine can return early once nothing
+	// moves, in which case its last accums were computed against the
+	// palette from the PREVIOUS iteration, not the one it returns.
+	pixelCount := make([]int, len(palette))
+	for _, bkt := range buckets {
+		pixelCount[nearestPaletteIndex(palette, bkt.r, bkt.g, bkt.bl)] += bkt.n
+	}
+	order := make([]int, len(palette))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool {
+		oi, oj := order[i], order[j]
+		if pixelCount[oi] != pixelCount[oj] {
+			return pixelCount[oi] > pixelCount[oj]
+		}
+		ci, cj := palette[oi], palette[oj]
+		if ci.r != cj.r {
+			return ci.r < cj.r
+		}
+		if ci.g != cj.g {
+			return ci.g < cj.g
+		}
+		return ci.bl < cj.bl
+	})
+	unordered := palette
+	reordered := make([]rgb24, len(palette))
+	rank := make([]uint8, len(palette)) // old (unordered) index -> new index
+	for newIdx, oldIdx := range order {
+		reordered[newIdx] = unordered[oldIdx]
+		rank[oldIdx] = uint8(newIdx)
+	}
+	palette = reordered
+
 	// Build the output image, mapping each pixel to its nearest palette
-	// entry, memoized on the exact 24-bit colour.
+	// entry, memoized on the exact 24-bit colour. Nearest-entry lookup runs
+	// against unordered (the palette in its pre-reorder array order) and is
+	// then remapped through rank, rather than searching reordered directly:
+	// nearestPaletteIndex breaks exact-distance ties by earliest array
+	// position, so searching reordered would let the reorder itself silently
+	// change which entry a tied pixel lands on -- contradicting the pixel
+	// counts the reorder was computed from just above.
 	pal := make(color.Palette, len(palette))
 	for i, c := range palette {
 		pal[i] = color.RGBA{c.r, c.g, c.bl, 255}
@@ -89,7 +145,7 @@ func QuantizePNG(img image.Image, colors int) ([]byte, error) {
 			packed := uint32(r>>8)<<16 | uint32(g>>8)<<8 | uint32(bl>>8)
 			idx, ok := nearest[packed]
 			if !ok {
-				idx = uint8(nearestPaletteIndex(palette, uint8(r>>8), uint8(g>>8), uint8(bl>>8)))
+				idx = rank[nearestPaletteIndex(unordered, uint8(r>>8), uint8(g>>8), uint8(bl>>8))]
 				nearest[packed] = idx
 			}
 			out.SetColorIndex(x-b.Min.X, y-b.Min.Y, idx)
