@@ -37,6 +37,129 @@ func TestExtractPageRasterSucceeds(t *testing.T) {
 	}
 }
 
+// byb-b1.12's acceptance criterion, verbatim: "A placement clipped by a form
+// /BBox or a clip path reports the visible box, and a clipped page-covering
+// image no longer reports CoversPage true." scan-clipped-corner is exactly
+// that: a page-covering image narrowed by a `re W n` clip to a 100x100pt
+// corner. The page still extracts -- a lone raster is never asked to cover
+// the page, byb-b1.3 -- but Bounds must be the visible corner, not the
+// raster's own oversized placement, and CoversPage must therefore be false.
+func TestExtractPageRasterReportsTheClippedBoxNotTheRasterPlacement(t *testing.T) {
+	pr, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan-clipped-corner")), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster() error = %v; want the page to extract", err)
+	}
+	want := image.Rect(0, 0, 100, 100)
+	if pr.Bounds != want {
+		t.Errorf("Bounds = %v; want %v (the clip corner, not the full-page raster placement)", pr.Bounds, want)
+	}
+	if pr.CoversPage() {
+		t.Error("CoversPage() = true; the visible mark is a 100x100pt corner of a 612x792 page, want false")
+	}
+}
+
+// A clip disjoint from the placement's own extent narrows Box to zero area
+// (intersectBox's clamp, internal/content/walk.go), off the page entirely
+// here. Extracting would return the full uncropped raster against a
+// raster_box outside page_box -- a record whose bytes and geometry disagree
+// (B-review.json's second major finding). classify diverts instead, so no
+// such record is ever written.
+func TestExtractPageRasterDivertsWhenTheClipLeavesNothingVisible(t *testing.T) {
+	_, err := ExtractPageRaster(bytes.NewReader(corpusDoc(t, "scan-clipped-away")), 1)
+	if !errors.Is(err, ErrNotSingleRaster) {
+		t.Fatalf("ExtractPageRaster() error = %v; want %v (the clip left nothing visible)", err, ErrNotSingleRaster)
+	}
+
+	rec, err := RecordExtraction(bytes.NewReader(corpusDoc(t, "scan-clipped-away")))
+	if err != nil {
+		t.Fatalf("RecordExtraction() error = %v", err)
+	}
+	if len(rec.Pages) != 1 {
+		t.Fatalf("RecordExtraction() pages = %d; want 1", len(rec.Pages))
+	}
+	if rec.Pages[0].Diverted == "" {
+		t.Error("Diverted = \"\"; want the page reported as diverted, not extracted")
+	}
+	if rec.Pages[0].Geometry != nil {
+		t.Error("Geometry != nil; a diverted page should carry no geometry record")
+	}
+}
+
+// The end-to-end counterpart of TestExtractPageRasterReportsTheClippedBoxNotTheRasterPlacement:
+// the crop comes from a Form XObject's own /BBox, read off the real PDF by
+// internal/pdfdoc, not from a page-level `re W n` clip. Every other form
+// fixture in this corpus declares a page-sized /BBox that narrows nothing, so
+// without this test internal/pdfdoc's /BBox read -- the only wire between a
+// real PDF and content.XObject.BBox -- could be deleted and nothing would
+// notice (B-mutate.json PROBE 12). This also exercises extract.go's ClipBox
+// wiring (RecordExtraction) against a real extraction rather than a
+// hand-built PageGeometry struct (PROBE 2/3/18).
+func TestExtractPageRasterReportsTheFormBBoxCropNotTheRasterPlacement(t *testing.T) {
+	data := corpusDoc(t, "scan-cropped-by-form-bbox")
+	pr, err := ExtractPageRaster(bytes.NewReader(data), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster() error = %v; want the page to extract", err)
+	}
+	want := image.Rect(0, 0, 100, 100)
+	if pr.Bounds != want {
+		t.Errorf("Bounds = %v; want %v (the form's /BBox corner, not the full-page raster placement)", pr.Bounds, want)
+	}
+	if pr.CoversPage() {
+		t.Error("CoversPage() = true; the visible mark is a 100x100pt corner of a 612x792 page, want false")
+	}
+
+	rec, err := RecordExtraction(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("RecordExtraction() error = %v", err)
+	}
+	if len(rec.Pages) != 1 {
+		t.Fatalf("RecordExtraction() pages = %d; want 1", len(rec.Pages))
+	}
+	geom := rec.Pages[0].Geometry
+	if geom == nil {
+		t.Fatal("Geometry = nil; want a measured record")
+	}
+	if geom.ClipBox == nil {
+		t.Fatal("ClipBox = nil; want the form /BBox recorded as the clip that narrowed this placement")
+	}
+	wantClip := [4]float64{0, 0, 100, 100}
+	if *geom.ClipBox != wantClip {
+		t.Errorf("ClipBox = %v; want %v", *geom.ClipBox, wantClip)
+	}
+}
+
+// extract.go's ClipBox must be sourced from placement.Clip, the actual clip
+// rectangle, not from placement.Box, the already-narrowed RasterBox: on every
+// OTHER clipped fixture in this corpus the two happen to come out identical,
+// so a wrong-source bug would pass unnoticed (B-mutate.json PROBE 3). This
+// fixture's clip narrows the placement on one axis only, so ClipBox and
+// RasterBox are provably different rectangles.
+func TestExtractPageRasterClipBoxIsTheClipNotTheNarrowedRasterBox(t *testing.T) {
+	data := corpusDoc(t, "scan-clip-narrower-than-raster-box")
+	rec, err := RecordExtraction(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("RecordExtraction() error = %v", err)
+	}
+	if len(rec.Pages) != 1 {
+		t.Fatalf("RecordExtraction() pages = %d; want 1", len(rec.Pages))
+	}
+	geom := rec.Pages[0].Geometry
+	if geom == nil {
+		t.Fatal("Geometry = nil; want a measured record")
+	}
+	wantRaster := [4]float64{0, 0, 100, 200}
+	if geom.RasterBox != wantRaster {
+		t.Fatalf("RasterBox = %v; want %v", geom.RasterBox, wantRaster)
+	}
+	if geom.ClipBox == nil {
+		t.Fatal("ClipBox = nil; want the actual clip rectangle recorded")
+	}
+	wantClip := [4]float64{-50, -50, 200, 200}
+	if *geom.ClipBox != wantClip {
+		t.Errorf("ClipBox = %v; want %v (the clip itself, not RasterBox %v)", *geom.ClipBox, wantClip, wantRaster)
+	}
+}
+
 // The zero value must not claim to be the full page. It is what every error
 // return hands back, and image.Rectangle.In answers true for an empty receiver,
 // so the natural implementation reports a page nobody extracted as covered. A
@@ -283,7 +406,12 @@ func TestDivertClassCoversEveryReason(t *testing.T) {
 		// byb-b1.3 stopped classify emitting this one: a lone raster is the page
 		// at any coverage. It stays here because a provenance record written by
 		// an earlier release carries it, and divertClass is what reads those.
-		"not-page-covering":   "not-single-raster",
+		"not-page-covering": "not-single-raster",
+		// byb-b1.12: a clip (or form /BBox) disjoint from the placement's own
+		// extent narrows Box to zero area. Extracting there would return the
+		// full raster against a raster_box nobody can trust, so classify
+		// diverts instead.
+		"clipped-away":        "not-single-raster",
 		"transparent-overlay": "not-single-raster",
 		"mrc-layers":          "not-single-raster",
 		// The coarse legacy class. A record written before byb-z8j, or one
@@ -415,6 +543,57 @@ func TestClassify(t *testing.T) {
 		{name: "vertically flipped", scan: &contentScan{Images: placementOf(content.Matrix{612, 0, 0, -792, 0, 792})}, want: "flipped-placement"},
 		{name: "horizontally flipped", scan: &contentScan{Images: placementOf(content.Matrix{-612, 0, 0, 792, 612, 0})}, want: "flipped-placement"},
 		{name: "flipped on both axes", scan: &contentScan{Images: placementOf(content.Matrix{-612, 0, 0, -792, 612, 792})}, want: "flipped-placement"},
+		// A degenerate zero-scale CTM (`0 0 0 0 0 0 cm`) collapses Box to a
+		// single point with no clip in effect. The zero-area guard used to fire
+		// unconditionally and report "clipped-away" for this, blaming a clip
+		// that was never there; with no Clip set, classify must fall through
+		// to placementReason and report the CTM's own cause.
+		{name: "degenerate placement with no clip reports its own cause, not a clip",
+			scan: &contentScan{Images: []content.Placement{{
+				Name: "Im0", ID: 1,
+				CTM: content.Matrix{0, 0, 0, 0, 0, 0},
+				Box: contentBox(0, 0, 0, 0),
+			}}},
+			want: "flipped-placement"},
+		// The same zero-area Box, but with Clip set: now a clip really did
+		// narrow it away, and the placement's own CTM is unremarkable, so
+		// "clipped-away" is the right cause.
+		{name: "degenerate placement with a clip reports clipped-away",
+			scan: &contentScan{Images: []content.Placement{{
+				Name: "Im0", ID: 1,
+				CTM:  content.Matrix{612, 0, 0, 792, 0, 0},
+				Box:  contentBox(0, 0, 0, 0),
+				Clip: &content.Box{LLX: 700, LLY: 800, URX: 700, URY: 800},
+			}}},
+			want: "clipped-away"},
+		// A sub-point-tall clip: 0.4pt of height has positive float area
+		// (612*0.4 = 244.8) but rounds to a zero-height Bounds (boxRect rounds
+		// 100 and 100.4 to the same 100), which is the same incoherent state --
+		// a non-empty raster against an empty raster_box -- the guard exists to
+		// prevent. Testing float area alone let this slip through; testing the
+		// rounded rectangle catches it.
+		{name: "a sub-point clip sliver rounds to an empty Bounds and diverts",
+			scan: &contentScan{Images: []content.Placement{{
+				Name: "Im0", ID: 1,
+				CTM:  content.Matrix{612, 0, 0, 792, 0, 0},
+				Box:  contentBox(0, 100, 612, 100.4),
+				Clip: &content.Box{LLX: 0, LLY: 100, URX: 612, URY: 100.4},
+			}}},
+			want: "clipped-away"},
+		// A clip WAS in effect and still narrowed nothing: `0 0 612 792 re W n`
+		// is a page-sized clip, the commonest clip in real documents, and the
+		// zero-area Box here comes from the CTM alone. A bare Clip != nil test
+		// passes both cases above and then blames this one on the clip too;
+		// clipNarrowed separates them by asking whether Box actually fell below
+		// CTM.UnitSquareBox(). Without this case that mutant escapes the suite.
+		{name: "a clip that narrowed nothing does not steal the CTM's cause",
+			scan: &contentScan{Images: []content.Placement{{
+				Name: "Im0", ID: 1,
+				CTM:  content.Matrix{0, 0, 0, 0, 0, 0},
+				Box:  contentBox(0, 0, 0, 0),
+				Clip: &content.Box{LLX: 0, LLY: 0, URX: 612, URY: 792},
+			}}},
+			want: "flipped-placement"},
 		// byb-b1.3. A lone raster is the page whatever fraction of the box it
 		// occupies: every other arm has already established that nothing in the
 		// stream can mark the part it leaves bare. The measured shape is a
@@ -649,6 +828,50 @@ func TestClassifyPaintUnderATransparentRasterStillDiverts(t *testing.T) {
 	s := walkPage(t, "1 1 1 scn 0 0 612 792 re f\nq /GS0 gs 612 0 0 792 0 0 cm /Im0 Do Q\n", "")
 	if _, got := classify(pdfdocRect(0, 0, 612, 792), s, plainFacts); got != "vector-paint" {
 		t.Errorf("classify() with a non-opaque ExtGState = %q; want %q", got, "vector-paint")
+	}
+}
+
+// A page-clip that narrows an under-layer's Box makes classify's contains()
+// check on that under-layer EASIER, not harder, to satisfy -- narrowing a box
+// can only shrink what it might stick out past, never grow it. B-review.json
+// flagged this direction as the one this project is supposed to be careful
+// about, and reproduced a divert -> extract flip from it. This pins that the
+// flip is the CORRECT answer, not a regression the "narrower is always safer"
+// framing would suggest byb-b1.12 should have avoided.
+//
+// The reasoning: before byb-b1.12, an under-layer's Box was its raw,
+// unclipped placement -- which can overstate what is actually visible on the
+// page. Painting a 700x900 image and then clipping to the 612x792 page means
+// nothing outside the page is ever shown, but the pre-b1.12 Box (700x900)
+// made contains(top.Box, under.Box) fail anyway, over content nobody can see.
+// Post-b1.12, under.Box is the placement's REAL visible extent -- clipped to
+// what the page clip actually lets through -- so contains() is testing the
+// right question: is everything the under-layer actually shows hidden by the
+// opaque top layer? Here it is (both layers reduce to the same clipped
+// (0,0)-(612,792) box), so extracting is the accurate answer and the old
+// divert was the artifact of an untracked clip, not a safety margin.
+func TestExtractPageRasterNarrowerUnderLayerBoxFlipsDivertToExtractCorrectly(t *testing.T) {
+	const src = "q 0 0 612 792 re W n\n" +
+		"q 700 0 0 900 0 0 cm /Im0 Do Q\n" +
+		"q 612 0 0 792 0 0 cm /Im0 Do Q\n" +
+		"Q\n"
+	s := walkPage(t, src, "")
+	if len(s.Images) != 2 {
+		t.Fatalf("Images = %d; want 2", len(s.Images))
+	}
+	wantClipped := contentBox(0, 0, 612, 792)
+	if s.Images[0].Box != wantClipped {
+		t.Fatalf("under-layer Box = %v; want %v (clipped to the page, not its raw 700x900 placement)", s.Images[0].Box, wantClipped)
+	}
+	if s.Images[1].Box != wantClipped {
+		t.Fatalf("top-layer Box = %v; want %v", s.Images[1].Box, wantClipped)
+	}
+	idx, got := classify(pdfdocRect(0, 0, 612, 792), s, plainFacts)
+	if got != "" {
+		t.Fatalf("classify() = %q; want the page to extract now that both layers' real visible extent is the same clipped box", got)
+	}
+	if idx != 1 {
+		t.Errorf("classify() index = %d; want 1 (the top layer)", idx)
 	}
 }
 

@@ -106,6 +106,15 @@ const mrcBaseAreaFrac = 0.90
 // The residual affine of a deskewed placement (byb-b1.2) is not here; it is on
 // ImageRef.Placement, reached through Inspect. byb-b5.1 designs the stored form
 // of both.
+//
+// Since byb-b1.12, Bounds is where the raster is VISIBLE — the placement's own
+// extent intersected with any W/W* clip path or form /BBox in effect — and can
+// be smaller than the placement's own unclipped extent. Image is always the
+// full, uncropped raster as stored (Byblos never crops pixel data): a clip
+// narrows where Bounds says the raster's visible mark falls, not what Image
+// contains. A caller that assumed Bounds was simply Image's own placement box
+// must not, now that a clipped page reports the narrower, honest rectangle
+// instead. ImageRef.Bounds carries the identical relationship to Placement.
 type PageRaster struct {
 	Image  image.Image
 	Bounds image.Rectangle // where the raster lands
@@ -307,13 +316,22 @@ func extractPage(d pdfdoc.Doc, page int) (*PageRaster, PageProvenance, error) {
 			}
 		}
 	}
+	geom := &PageGeometry{
+		RasterBox: normalizedBox(placement.Box.LLX, placement.Box.LLY, placement.Box.URX, placement.Box.URY),
+		PageBox:   normalizedBox(p.CropBox.LLX, p.CropBox.LLY, p.CropBox.URX, p.CropBox.URY),
+	}
+	// ClipBox is recorded only when a clip actually narrowed this placement
+	// below its own unclipped extent (PageGeometry's doc comment) -- not
+	// whenever a clip happened to be in effect, and not using placement.Box
+	// itself, which after byb-b1.12 IS the narrowed box already.
+	if clipNarrowed(placement) {
+		cb := normalizedBox(placement.Clip.LLX, placement.Clip.LLY, placement.Clip.URX, placement.Clip.URY)
+		geom.ClipBox = &cb
+	}
 	rec := PageProvenance{
 		Applied:       []string{"extract-raster"},
 		DroppedAnnots: out.DroppedAnnots,
-		Geometry: &PageGeometry{
-			RasterBox: normalizedBox(placement.Box.LLX, placement.Box.LLY, placement.Box.URX, placement.Box.URY),
-			PageBox:   normalizedBox(p.CropBox.LLX, p.CropBox.LLY, p.CropBox.URX, p.CropBox.URY),
-		},
+		Geometry:      geom,
 	}
 	// Empty for an axis-aligned placement, which is almost every page
 	// (PageProvenance's doc comment). The off-diagonal terms are exactly what
@@ -403,6 +421,44 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 	// shows, and a raster painted after the candidate would be lost by
 	// returning it.
 	top := len(s.Images) - 1
+	// A clip (W/W* n, or a form /BBox) can narrow the top placement's Box to
+	// zero area -- e.g. a clip rectangle disjoint from the image's own extent
+	// clamps to a degenerate box at the near corner (intersectBox,
+	// internal/content/walk.go). Nothing is visible there: extracting would
+	// hand back the full raster bytes against a raster_box that claims an
+	// empty rectangle, often outside the page box entirely, which is not a
+	// record any reader of PageGeometry can trust. Diverting instead keeps
+	// the record coherent: no bytes are returned that disagree with a
+	// geometry nobody measured a visible mark in.
+	//
+	// The test is on the ROUNDED rectangle (boxRect), not the float area: a
+	// sub-point-tall clip -- e.g. a 0.4pt-high sliver -- has positive float
+	// area but rounds to a zero-height Bounds, i.e. a non-empty raster against
+	// an empty raster_box. Bounds is what the caller sees (ImageRef.Bounds is
+	// boxRect(placement.Box)), so testing what the caller sees is what catches
+	// it.
+	//
+	// This guard covers the CLIP-INDUCED half of that incoherence and only
+	// that half. A sub-point CTM with no clip anywhere -- `q .4 0 0 .4 10 10
+	// cm /Im0 Do Q` -- reaches the identical state (Bounds empty, full raster
+	// returned) and is not caught here. That is pre-existing, byte-identical
+	// on main@5fbf37d, and tracked separately; do not read this comment as
+	// claiming the state is unreachable.
+	//
+	// The condition is "a clip actually NARROWED this placement", not "a clip
+	// was in effect", and it is deliberately the same test the ClipBox
+	// recording site above uses -- the two must agree about what counts as
+	// clip-caused or the divert reason and the stored geometry tell different
+	// stories. A page-sized `re W n`, the commonest clip in real PDFs, narrows
+	// nothing: under a bare Clip != nil test it would steal "flipped-placement"
+	// and "clipped-away" would name a cause that did not apply. placementReason
+	// below owns the zero-area causes a clip did not create.
+	if clipNarrowed(s.Images[top]) && boxRect(s.Images[top].Box).Empty() {
+		if top > 0 {
+			return 0, "multiple-images"
+		}
+		return 0, "clipped-away"
+	}
 	if reason := placementReason(s.Images[top]); reason != "" {
 		// On a layered page the informative fact is that the layers did not
 		// reduce to one raster, not which geometry test the top layer failed.
@@ -433,10 +489,13 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 	// "Content stream" is the exact width of the claim, and two things sit
 	// outside it. Annotations are not in it, so an appearance stream in the
 	// uncovered strip is not something any arm above can see (byb-b1.11). And
-	// Walk ignores a form /BBox and every clip path, so Bounds can overstate
-	// what is visible (byb-b1.12). Neither is new here; both were masked for
-	// these pages by the gate this replaced, which is why they are named rather
-	// than assumed away.
+	// Walk still ignores text clipping modes (Tr 4-7, ISO 32000-1 9.3.6): a
+	// glyph outline that clips without painting is not folded into gs.clip, so
+	// Bounds can overstate what is visible in that residual case (Walk's doc
+	// comment). Form /BBox and every W/W* clip path, by contrast, ARE tracked
+	// as of byb-b1.12 and narrow Bounds accordingly. Neither gap is new here;
+	// both were masked for these pages by the gate this replaced, which is why
+	// they are named rather than assumed away.
 	//
 	// byb-b1.11 has since been measured rather than left as a caveat. Over
 	// 151,077 pages, 18,610 of them extracted: 6 carry an annotation that
@@ -468,6 +527,27 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 		}
 	}
 	return top, ""
+}
+
+// clipNarrowed reports whether a clip (W/W* n, or a form /BBox) actually cut
+// this placement below its own unclipped extent, as opposed to merely being in
+// effect when it was painted.
+//
+// The distinction is load-bearing and has exactly one definition, shared by the
+// two callers that need it: classify's clipped-away guard and the ClipBox
+// recording site in extractPage. A page-sized `re W n` is the commonest clip in
+// real documents and narrows nothing, so a bare Clip != nil test would both
+// record a ClipBox for a clip that did not bite and blame that clip for a
+// zero-area box some other cause produced. If these two ever disagree, the
+// divert reason and the stored geometry start telling different stories about
+// the same page.
+//
+// Comparing against CTM.UnitSquareBox() rather than to a saved copy is
+// deliberate: an image XObject always occupies the unit square in its own space
+// (ISO 32000-1 8.9.5.2), so the unclipped extent is always recoverable from the
+// CTM and needs no extra field on Placement.
+func clipNarrowed(p content.Placement) bool {
+	return p.Clip != nil && p.Box != p.CTM.UnitSquareBox()
 }
 
 // placementReason reports why a placement cannot stand as the page's raster, or

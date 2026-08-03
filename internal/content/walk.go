@@ -64,6 +64,12 @@ type XObject struct {
 	Content []byte // form only: the decoded content stream
 	Matrix  Matrix // form only: its /Matrix, Identity when absent
 	Scope   int    // form only: the scope handle for its own resources
+	// BBox is a form's /BBox, in the form's own coordinate system, or nil when
+	// the form has none (malformed, or unread by the caller). A nil BBox
+	// applies no BBox-derived clipping at all -- it does not mean "clip to
+	// nothing" -- so a form missing it behaves exactly as it did before
+	// byb-b1.12.
+	BBox *Box
 }
 
 // Env resolves resource names encountered during a walk. Scopes are opaque
@@ -84,6 +90,13 @@ type Placement struct {
 	ID   int
 	CTM  Matrix
 	Box  Box
+	// Clip is the clip in effect at the moment of painting -- the running
+	// intersection of every W/W* n path and Form /BBox on gstate, in device
+	// space -- or nil when nothing clipped this placement. It is the clip
+	// itself, not Box: Box is already Clip intersected with CTM.UnitSquareBox,
+	// so a caller wanting to know whether Clip actually narrowed anything
+	// compares Box against CTM.UnitSquareBox() directly.
+	Clip *Box
 	// Opaque reports the graphics state at the moment of painting, and nothing
 	// else: no /ca, /CA or soft mask was in effect. The image's own /SMask,
 	// /Mask and /ImageMask are dictionary facts a walk never sees, so a caller
@@ -164,21 +177,29 @@ const (
 // Walk interprets a decoded content stream, resolving resource names in scope
 // through env.
 //
-// Known simplification: a Form XObject's /BBox clips its content, as does any
-// clip path, and Walk ignores both. A form whose BBox crops an oversized image
-// will therefore report an oversized placement.
+// byb-b1.12 fixed the Placement half of a known simplification: a Form
+// XObject's /BBox, mapped through its /Matrix and the enclosing CTM, and any
+// clip path set with W/W* n, now narrow every Placement.Box painted inside
+// them to the intersection with gstate.clip. A form whose BBox crops an
+// oversized image, or a page that clips a placement to a corner, now reports
+// the visible box rather than the raster's own oversized placement.
 //
-// That used to err in the safe direction, toward calling a page page-covering,
-// because the box was only ever read by a gate — and the instrumentation this
-// comment used to point at, the "not-page-covering" divert reason, no longer
-// exists. byb-b1.3 removed the gate and returns the box to the caller as
-// PageRaster.Bounds, so an overstated box is now an overstated answer rather
-// than a lenient test. byb-b1.12 tracks it.
+// The Paint half is deliberately UNCHANGED: a clip never narrows Paint.Box.
+// An oversized Paint.Box is one a raster is less likely to contain, so a
+// clipped-away path errs toward diverting a page rather than extracting one —
+// the conservative direction for what reads it (paintsHidden, extract.go).
+// Narrowing it too would move that decision the unsafe way. See
+// TestWalkClipDoesNotNarrowPaintBoxes.
 //
-// The same simplification runs the other way for paint. An oversized Paint.Box
-// is one a raster is less likely to contain, so a clipped-away path errs toward
-// diverting a page rather than extracting one. Both directions are the
-// conservative one for what reads them.
+// Known simplification, still open after byb-b1.12: a text clipping mode (4
+// Tr through 7 Tr, ISO 32000-1 9.3.6/table 106) adds glyph outlines to the
+// clipping path instead of, or in addition to, painting them, but Walk only
+// tracks gs.tr for inksGlyphs' painted/not-painted question — it never folds
+// a text clip into gs.clip. A page whose only mark is glyphs shown in a
+// clipping-only mode (7 Tr) clips everything away and shows nothing, but
+// Walk reports the placement underneath as unclipped by it. This overstates
+// what is visible, the same safe-but-inaccurate direction as every other gap
+// named here.
 func Walk(src []byte, scope int, env Env) (*Scan, error) {
 	s := &Scan{}
 	// ISO 32000-1 section 8.4.1's initial graphics state, for the parts tracked
@@ -207,6 +228,12 @@ func Walk(src []byte, scope int, env Env) (*Scan, error) {
 // lineWidth, fill and stroke are what a path-painting operator needs: how far
 // its ink spreads, and in what colour. Dash patterns, line joins, blend modes
 // and soft masks are a renderer's business (design spec section 2).
+//
+// clip is the running intersection of every clip path (W/W* n) and Form
+// /BBox in effect, in device space, or nil when nothing has clipped yet. It
+// lives on gstate for the same reason opacity does: q/Q save and restore
+// gstate as a unit (case "q"/"Q" below), so nesting and restoring the clip
+// falls out of that for free rather than needing its own stack.
 type gstate struct {
 	ctm       Matrix
 	opaque    bool
@@ -214,6 +241,7 @@ type gstate struct {
 	lineWidth float64
 	fill      Color
 	stroke    Color
+	clip      *Box
 }
 
 // pathBox accumulates the device-space bounds of the path under construction.
@@ -255,6 +283,12 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 	var stack []gstate
 	var path pathBox
 	var ops []Token
+	// pendingClip marks that W or W* was seen since the current path was
+	// started: ISO 32000-1 8.5.4, "It merely sets a flag... that shall be
+	// examined by the path-painting operator that follows immediately
+	// after". It is local like path, not part of gstate, because it too is
+	// current-path state rather than something q/Q ever needs to save.
+	var pendingClip bool
 	for {
 		tok, err := l.Next()
 		if err != nil {
@@ -335,9 +369,20 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 			addPoints(&path, numberOperands(ops), gs.ctm)
 		case "re":
 			addRect(&path, numberOperands(ops), gs.ctm)
+		case "W", "W*":
+			// Neither variant paints or modifies the path; the fill rule they
+			// name only matters for a self-intersecting path's interior, which a
+			// bounding box can never see (ISO 32000-1 8.5.4). Both just arm the
+			// flag examined below.
+			pendingClip = true
 		case "n":
-			// n ends the path without painting it. W before it sets the clip from
-			// that path, which marks nothing either.
+			// n ends the path without painting it. W/W* before it still sets the
+			// clip from that path, captured in device space now, before reset
+			// discards it.
+			if pendingClip {
+				gs.clip = intersectClipPath(gs.clip, path)
+				pendingClip = false
+			}
 			path.reset()
 
 		case "Do":
@@ -366,6 +411,15 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 				}
 			}
 		case "S", "s", "f", "F", "f*", "B", "B*", "b", "b*":
+			// The clip takes effect after WHICHEVER path-painting operator
+			// follows W/W*, not just n (ISO 32000-1 8.5.4), so this captures it
+			// from the path before recordPaint resets it -- and, deliberately,
+			// never narrows the Paint this same operator records (see Walk's
+			// doc comment).
+			if pendingClip {
+				gs.clip = intersectClipPath(gs.clip, path)
+				pendingClip = false
+			}
 			recordPaint(s, &path, gs, op)
 		case "sh":
 			s.ShadingOps++
@@ -444,15 +498,79 @@ func doXObject(ops []Token, scope int, env Env, gs gstate, depth int, s *Scan) e
 		return nil
 	}
 	if xo.Image {
+		box := gs.ctm.UnitSquareBox()
+		if gs.clip != nil {
+			box = intersectBox(*gs.clip, box)
+		}
 		s.order++
 		s.Images = append(s.Images, Placement{
-			Name: name, ID: xo.ID, CTM: gs.ctm, Box: gs.ctm.UnitSquareBox(),
+			Name: name, ID: xo.ID, CTM: gs.ctm, Box: box, Clip: gs.clip,
 			Opaque: gs.opaque, Index: s.order,
 		})
 		return nil
 	}
 	gs.ctm = xo.Matrix.Mul(gs.ctm)
+	if xo.BBox != nil {
+		// ISO 32000-1 8.10.2: /BBox trims the form to its boundaries. It lives
+		// in the form's own coordinate system, which /Matrix composed with the
+		// enclosing CTM maps to device space -- the same composition just built
+		// above for the recursive walk() call.
+		dev := xo.BBox.mapThrough(gs.ctm)
+		if gs.clip != nil {
+			dev = intersectBox(*gs.clip, dev)
+		}
+		gs.clip = &dev
+	}
 	return walk(xo.Content, xo.Scope, env, gs, depth+1, s)
+}
+
+// intersectClipPath folds a just-closed clip path into clip, in device space
+// (the path's points were already mapped through the CTM as they were added,
+// so no further mapping happens here). A path with no points sets no clip:
+// W with no current path marks nothing (ISO 32000-1 8.5.4).
+func intersectClipPath(clip *Box, path pathBox) *Box {
+	if !path.set {
+		return clip
+	}
+	box := path.box
+	if clip != nil {
+		box = intersectBox(*clip, box)
+	}
+	return &box
+}
+
+// intersectBox returns the intersection of a and b. The two rectangles may
+// not overlap on an axis, which would ordinarily invert that axis (max >
+// min); this clamps the far edge to the near one instead, so the result
+// always keeps every Box in this package's LLX<=URX, LLY<=URY invariant. A
+// disjoint clip therefore reports a zero-area box at the near corner, not an
+// inverted one -- see TestWalkDisjointClipReportsAZeroAreaBoxNotAnInvertedOne.
+func intersectBox(a, b Box) Box {
+	llx, lly := max(a.LLX, b.LLX), max(a.LLY, b.LLY)
+	urx, ury := min(a.URX, b.URX), min(a.URY, b.URY)
+	if urx < llx {
+		urx = llx
+	}
+	if ury < lly {
+		ury = lly
+	}
+	return Box{LLX: llx, LLY: lly, URX: urx, URY: ury}
+}
+
+// mapThrough returns the axis-aligned device-space bounding box of b's four
+// corners mapped through m. Unlike UnitSquareBox, b need not be the unit
+// square -- a form's /BBox is an arbitrary rectangle in its own space.
+func (b Box) mapThrough(m Matrix) Box {
+	x0, y0 := m.Apply(b.LLX, b.LLY)
+	x1, y1 := m.Apply(b.URX, b.LLY)
+	x2, y2 := m.Apply(b.LLX, b.URY)
+	x3, y3 := m.Apply(b.URX, b.URY)
+	return Box{
+		LLX: min(min(x0, x1), min(x2, x3)),
+		LLY: min(min(y0, y1), min(y2, y3)),
+		URX: max(max(x0, x1), max(x2, x3)),
+		URY: max(max(y0, y1), max(y2, y3)),
+	}
 }
 
 // matrixOperands reads the six numbers a cm operator takes.

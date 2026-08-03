@@ -74,11 +74,17 @@ var capabilityRules = map[string]func(*Provenance) bool{
 	//     that on all 132 measured pages the region outside the placement held
 	//     ZERO content operators. A renderer emits the same pixels plus
 	//     synthesized white -- and extract.go explicitly refuses to synthesize.
-	//   - byb-b1.12 cuts AGAINST a coverage rule: content.Walk ignores form
-	//     /BBox and clip paths, so the error runs toward CoversPage reporting
-	//     TRUE. Pages with genuinely hidden ink are the ones a coverage rule
-	//     would SKIP nominating. Coverage is unsound as a proxy for loss in
-	//     exactly the direction that matters.
+	//   - byb-b1.12 narrowed, but did not remove, the argument against a
+	//     coverage rule: content.Walk now honours W/W* clip paths and form
+	//     /BBox, so a placement narrowed by either already reports
+	//     CoversPage false, not true. What Walk still does not fold into
+	//     gs.clip is a text clipping mode (Tr 4-7, ISO 32000-1 9.3.6, Walk's
+	//     doc comment) -- a residual case where the error still runs toward
+	//     CoversPage reporting TRUE over ink a reader could not actually see.
+	//     Pages hidden that way are still ones a coverage rule would SKIP
+	//     nominating. Coverage remains unsound as a proxy for loss in exactly
+	//     the direction that matters; byb-b1.12 shrank the gap, it did not
+	//     close it.
 	//   - DroppedAnnots, by contrast, IS included below: extract.go says
 	//     outright that rendering appearance streams into the raster would be
 	//     a renderer, so gaining render demonstrably changes the output for

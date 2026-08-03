@@ -356,11 +356,27 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 				m[i] = v
 			}
 		}
+		var bbox *content.Box
+		if arr := d.arrayEntry(sd.Dict, "BBox"); len(arr) == 4 {
+			var vals [4]float64
+			ok := true
+			for i := 0; i < 4; i++ {
+				v, vok := d.number(arr[i])
+				if !vok {
+					ok = false
+					break
+				}
+				vals[i] = v
+			}
+			if ok {
+				bbox = &content.Box{LLX: vals[0], LLY: vals[1], URX: vals[2], URY: vals[3]}
+			}
+		}
 		// A form without its own /Resources inherits the enclosing resource
 		// dictionary (ISO 32000-1 section 8.10.2), which the scope's parent
 		// chain provides.
 		formScope := d.addScope(d.dictEntry(sd.Dict, "Resources"), sc)
-		return content.XObject{Content: sd.Content, Matrix: m, Scope: formScope}, true
+		return content.XObject{Content: sd.Content, Matrix: m, Scope: formScope, BBox: bbox}, true
 	}
 	return content.XObject{}, false
 }

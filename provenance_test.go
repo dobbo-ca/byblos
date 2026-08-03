@@ -252,6 +252,142 @@ func TestPageProvenanceGeometryZeroValueIsNotOmitted(t *testing.T) {
 	}
 }
 
+// --- byb-b1.12: PageGeometry gains a clip box -------------------------------
+//
+// PageGeometry has no ClipBox field today. Every test below references one
+// that does not exist yet. THIS IS A DELIBERATE RED-BY-COMPILE-ERROR STATE:
+// there is no way to write "a clip box round-trips" without somewhere on the
+// struct to put it. `go vet .` at this state must fail with a compile error
+// naming the missing ClipBox field.
+//
+// The chosen shape is `ClipBox *[4]float64`, following RasterBox/PageBox's own
+// doc comment at provenance.go ~203 to the letter: "it must carry its OWN
+// presence bit -- *[4]float64, or a sibling bool -- and must not be a bare
+// [4]float64". A bare [4]float64 would zero-fill on every record written
+// before this field existed, and a zero box inside a non-nil Geometry already
+// means "measured, and the measurement was degenerate" (the doc comment two
+// paragraphs above pins that for RasterBox/PageBox) -- so a value-typed
+// ClipBox would make every pre-byb-b1.12 record lie that it measured a
+// [0 0 0 0] clip.
+//
+// SCOPE DECISION, made here because the bead asks for it explicitly: ClipBox
+// is populated ONLY when a clip actually narrowed the placement below its
+// unclipped raster box -- not on every measured page. The alternative --
+// record it whenever Geometry is written, using "no narrowing happened" as one
+// of its own values -- has no honest value to use for "unbounded, nothing
+// clipped this". Using RasterBox itself as that sentinel collides with the
+// real, ordinary case of a clip that happens to land exactly on the raster's
+// own edge (a form BBox sized to match its image, say), which is not
+// distinguishable from "no clip" if both write the same numbers. Recording
+// ClipBox only when it differs from RasterBox keeps non-nil meaning what
+// every other presence bit in this struct already means here: "this was
+// actually measured, distinctly from its neighbour," not "this field exists."
+// A page with no clip in effect leaves ClipBox nil, the same way Geometry
+// itself is nil for a page/build that measured nothing.
+
+// A byb-b5.1-era record -- Geometry present, written before ClipBox existed
+// -- must decode with ClipBox nil, not a zero-filled [4]float64 that would
+// read as a measured empty clip.
+func TestPageProvenanceDecodesGeometryWithoutClipBox(t *testing.T) {
+	const legacy = `{"applied":["extract-raster"],"geometry":{"raster_box":[0,0,612,792],"page_box":[0,0,612,792]}}`
+	var out PageProvenance
+	if err := json.Unmarshal([]byte(legacy), &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if out.Geometry == nil {
+		t.Fatal("Geometry = nil; want the byb-b5.1-era geometry present")
+	}
+	if out.Geometry.ClipBox != nil {
+		t.Errorf("ClipBox = %v; want nil for a record written before byb-b1.12", out.Geometry.ClipBox)
+	}
+	if out.Geometry.RasterBox != [4]float64{0, 0, 612, 792} {
+		t.Errorf("RasterBox = %v; want the pre-existing field to still round-trip", out.Geometry.RasterBox)
+	}
+}
+
+// A measured clip round-trips through JSON like RasterBox/PageBox do.
+func TestPageProvenanceGeometryClipBoxRoundTrips(t *testing.T) {
+	in := PageProvenance{Geometry: &PageGeometry{
+		RasterBox: [4]float64{0, 0, 612, 792},
+		PageBox:   [4]float64{0, 0, 612, 792},
+		ClipBox:   &[4]float64{0, 0, 100, 100},
+	}}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var out PageProvenance
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if out.Geometry == nil || out.Geometry.ClipBox == nil {
+		t.Fatalf("Geometry = %+v; want a non-nil ClipBox", out.Geometry)
+	}
+	if *out.Geometry.ClipBox != *in.Geometry.ClipBox {
+		t.Errorf("ClipBox = %v; want %v", *out.Geometry.ClipBox, *in.Geometry.ClipBox)
+	}
+}
+
+// The wire key is "clip_box", pinned the same way the existing block above
+// pins "raster_box"/"page_box": a struct-only round trip cannot see a
+// transposed or renamed key, because it would still round-trip symmetrically.
+func TestPageProvenanceGeometryClipBoxWireKeyIsClipBox(t *testing.T) {
+	in := &PageGeometry{ClipBox: &[4]float64{1, 2, 3, 4}}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var wire struct {
+		ClipBox *[4]float64 `json:"clip_box"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("Unmarshal(wire) error = %v", err)
+	}
+	if wire.ClipBox == nil || *wire.ClipBox != *in.ClipBox {
+		t.Errorf("wire \"clip_box\" = %v; want %v", wire.ClipBox, in.ClipBox)
+	}
+}
+
+// When a page's clip did not narrow anything -- the ordinary case, almost
+// every page -- ClipBox stays nil and the "clip_box" key must be absent from
+// the JSON entirely, exactly like Geometry's own omitempty at the
+// PageProvenance level. This is what makes the SCOPE DECISION above legible
+// on disk: a record with no "clip_box" key means "nothing clipped this page",
+// not "we forgot to check".
+func TestPageProvenanceGeometryOmitsClipBoxWhenUnmeasured(t *testing.T) {
+	raw, err := json.Marshal(&PageGeometry{RasterBox: [4]float64{0, 0, 612, 792}, PageBox: [4]float64{0, 0, 612, 792}})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if bytes.Contains(raw, []byte(`"clip_box"`)) {
+		t.Errorf("Marshal(PageGeometry{ClipBox: nil}) = %s; want no \"clip_box\" key", raw)
+	}
+}
+
+// The tripwire for ClipBox's own presence bit, mirroring
+// TestPageProvenanceGeometryZeroValueIsNotOmitted: a genuinely disjoint clip
+// is a real, if degenerate, all-zero-width measurement (see
+// TestWalkDisjointClipReportsAZeroAreaBoxNotAnInvertedOne in
+// internal/content), and it must marshal present, not vanish as though it
+// were never measured. If ClipBox is ever "tidied" from *[4]float64 to a bare
+// [4]float64 with omitzero, this starts failing.
+func TestPageProvenanceGeometryClipBoxZeroValueIsNotOmitted(t *testing.T) {
+	raw, err := json.Marshal(&PageGeometry{ClipBox: &[4]float64{}})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"clip_box"`)) {
+		t.Errorf("Marshal(PageGeometry{ClipBox: &[4]float64{}}) = %s; want a \"clip_box\" key present", raw)
+	}
+	var out PageGeometry
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if out.ClipBox == nil {
+		t.Errorf("round-tripped ClipBox = nil; want a non-nil zero-box ClipBox, distinguishable from absent")
+	}
+}
+
 // PageGeometry.CoversPage applies its own 1.0pt tolerance over the exact
 // floats a writer measured, and mirrors PageRaster.CoversPage's guard against
 // a degenerate box -- but PageRaster.CoversPage itself uses no tolerance; see

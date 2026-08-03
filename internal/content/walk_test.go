@@ -649,3 +649,479 @@ func TestWalkPropagatesLexerErrors(t *testing.T) {
 		t.Fatal("Walk() on an unterminated string: want an error, got nil")
 	}
 }
+
+// --- byb-b1.12: clip paths (W, W*) narrow a placement's Box ----------------
+//
+// Walk currently ignores W/W* entirely (walk.go's "n" case comment: "W before
+// it sets the clip from that path, which marks nothing either"), so every
+// test below is RED against today's Walk: it reports the full, unclipped
+// placement box. These tests do not touch content.Paint boxes -- see the
+// no-clip-on-paint test at the end of this section for why.
+
+// The canonical case from byb-b1.12's acceptance criterion: a clip path set
+// with `re W n` narrows a placement that follows it to the intersection of
+// the clip and the placement's own (unclipped) box.
+func TestWalkClipPathNarrowsThePlacementBox(t *testing.T) {
+	src := "q 0 0 100 100 re W n 612 0 0 792 0 0 cm /Im0 Do Q"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 100, 100)
+}
+
+// W* (even-odd clip) sets the clip from the same current path as W (ISO
+// 32000-1 8.5.4); the fill rule only matters for a self-intersecting path's
+// interior, which a bounding box can never see. For bounding-box purposes it
+// must narrow a placement exactly like W does.
+func TestWalkEvenOddClipNarrowsThePlacementBox(t *testing.T) {
+	src := "q 0 0 100 100 re W* n 612 0 0 792 0 0 cm /Im0 Do Q"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 100, 100)
+}
+
+// Q restores the whole graphics state (ISO 32000-1 8.4.2), the clip included.
+// A clip set inside a q...Q pair must not narrow a placement painted after
+// the matching Q.
+func TestWalkQRestoresTheClip(t *testing.T) {
+	src := "q 0 0 50 50 re W n Q q 200 0 0 200 0 0 cm /Im0 Do Q"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 200, 200)
+}
+
+// The mirror of TestWalkQRestoresTheClip: an OUTER clip must survive a nested
+// q/Q that never touches it, not just the inner-clip-must-not-leak direction.
+// q has to actually SAVE the clip on the stack, not push a copy with it
+// nilled out (B-mutate.json PROBE 5) -- that slip is invisible to
+// TestWalkQRestoresTheClip because that test's clip is set INSIDE the nested
+// q/Q, not outside it.
+func TestWalkQSavesTheOuterClipAcrossANestedPair(t *testing.T) {
+	src := "0 0 100 100 re W n q Q 200 0 0 200 0 0 cm /Im0 Do"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 100, 100)
+}
+
+// intersectClipPath and the form /BBox fold must allocate a new Box rather
+// than mutating *clip in place through the shared pointer. Folding in place
+// (B-mutate.json PROBE 8) is invisible to TestWalkClipInsideAFormDoesNotLeak
+// because that test enters its form with gs.clip == nil, so the aliasing path
+// is never taken; this test enters the form with an outer clip already set.
+func TestWalkClipInsideAFormDoesNotCorruptTheOuterClip(t *testing.T) {
+	env := mapEnv{
+		{
+			"Im0": {Image: true, ID: 1},
+			"Fm0": {Content: []byte("0 0 50 50 re W n"), Matrix: Identity, Scope: 1},
+		},
+		{},
+	}
+	// Outer clip 0,0,200,200; the form's own inner clip (0,0,50,50) must not
+	// retroactively narrow that outer clip once control returns to the page.
+	src := "0 0 200 200 re W n q /Fm0 Do Q 300 0 0 300 0 0 cm /Im0 Do"
+	s, err := Walk([]byte(src), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 200, 200)
+}
+
+// The clip a placement RECORDS (Placement.Clip, or the intersected
+// Placement.Box) must not retroactively mutate once a later clip op folds
+// through the same shared pointer (the other half of B-mutate.json PROBE 8,
+// this time proven on an already-appended Placement rather than a live
+// gs.clip).
+func TestWalkClipDoesNotRetroactivelyCorruptAnAlreadyRecordedPlacement(t *testing.T) {
+	src := "0 0 200 200 re W n q 300 0 0 300 0 0 cm /Im0 Do Q 0 0 50 50 re W n 300 0 0 300 0 0 cm /Im0 Do"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 2 {
+		t.Fatalf("Images = %+v; want two", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 200, 200)
+	boxEq(t, s.Images[1].Box, 0, 0, 50, 50)
+	// Box is a plain value, copied out at append time, so it cannot show an
+	// in-place mutation of the pointer the two placements might share. Clip
+	// is the pointer itself: if intersectClipPath ever mutates *clip rather
+	// than allocating, the second clip op corrupts the first placement's
+	// already-recorded Clip through it.
+	if s.Images[0].Clip == nil {
+		t.Fatal("Images[0].Clip = nil; want the first placement's clip recorded")
+	}
+	if got := *s.Images[0].Clip; got != (Box{LLX: 0, LLY: 0, URX: 200, URY: 200}) {
+		t.Errorf("Images[0].Clip = %+v; want {0 0 200 200} -- the second clip op must not retroactively narrow it", got)
+	}
+}
+
+// ISO 32000-1 7.9.5 permits a rectangle array's corners in either diagonal
+// order. mapThrough must normalize over all four mapped corners, not just the
+// two named ones (B-mutate.json PROBE 11) -- a swapped-corner /BBox is legal
+// input, not malformed.
+func TestWalkFormBBoxWithSwappedCornersIsNotCollapsed(t *testing.T) {
+	env := mapEnv{
+		{
+			// [100 100 0 0] names the same rectangle as [0 0 100 100], corners
+			// reversed.
+			"Fm0": {Content: []byte("q 612 0 0 792 0 0 cm /Im0 Do Q"), Matrix: Identity, Scope: 1, BBox: &Box{LLX: 100, LLY: 100, URX: 0, URY: 0}},
+		},
+		{"Im0": {Image: true, ID: 1}},
+	}
+	s, err := Walk([]byte("/Fm0 Do"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 100, 100)
+}
+
+// A form /Matrix with a rotation must go through the same four-corner
+// normalisation as a swapped-corner /BBox (B-mutate.json PROBE 11): mapping
+// only the two named corners loses the box on a 90-degree turn.
+func TestWalkFormBBoxWithARotatedMatrixIsNotCollapsed(t *testing.T) {
+	env := mapEnv{
+		{
+			// A 90-degree rotation: [0 1 -1 0 0 0].
+			"Fm0": {Content: []byte("q 612 0 0 792 0 0 cm /Im0 Do Q"), Matrix: Matrix{0, 1, -1, 0, 0, 0}, Scope: 1, BBox: &Box{LLX: 0, LLY: 0, URX: 100, URY: 100}},
+		},
+		{"Im0": {Image: true, ID: 1}},
+	}
+	s, err := Walk([]byte("/Fm0 Do"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	// The BBox's four corners (0,0), (100,0), (0,100), (100,100) rotated 90
+	// degrees land at (0,0), (0,100), (-100,0), (-100,100); the bounding box
+	// of all four, not just two, is (-100,0)-(0,100).
+	boxEq(t, s.Images[0].Box, -100, 0, 0, 100)
+}
+
+// W with no current path marks nothing (ISO 32000-1 8.5.4): it must leave the
+// running clip unchanged, not collapse it to an empty box (B-mutate.json
+// PROBE 15).
+func TestWalkClipOperatorWithNoCurrentPathDoesNotClipToNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name, src string
+	}{
+		{"W with nothing painted first", "W n 300 0 0 300 0 0 cm /Im0 Do"},
+		{"W immediately after n already cleared the path", "0 0 50 50 re n W n 300 0 0 300 0 0 cm /Im0 Do"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := Walk([]byte(tc.src), 0, imageEnv(1))
+			if err != nil {
+				t.Fatalf("Walk() error = %v", err)
+			}
+			if len(s.Images) != 1 {
+				t.Fatalf("Images = %+v; want one", s.Images)
+			}
+			boxEq(t, s.Images[0].Box, 0, 0, 300, 300)
+		})
+	}
+}
+
+// A form /BBox must INTERSECT the accumulated clip, not replace it
+// (B-mutate.json PROBE 16): both a page clip narrower than the form's own
+// /BBox, and a nested form whose /BBox is wider than its parent's, must still
+// come out narrowed by the tighter of the two.
+func TestWalkFormBBoxIntersectsRatherThanReplacesTheRunningClip(t *testing.T) {
+	t.Run("page clip narrower than the form BBox", func(t *testing.T) {
+		env := mapEnv{
+			{
+				"Fm0": {Content: []byte("q 1000 0 0 1000 0 0 cm /Im0 Do Q"), Matrix: Identity, Scope: 1, BBox: &Box{LLX: 0, LLY: 0, URX: 500, URY: 500}},
+			},
+			{"Im0": {Image: true, ID: 1}},
+		}
+		s, err := Walk([]byte("0 0 60 60 re W n /Fm0 Do"), 0, env)
+		if err != nil {
+			t.Fatalf("Walk() error = %v", err)
+		}
+		if len(s.Images) != 1 {
+			t.Fatalf("Images = %+v; want one", s.Images)
+		}
+		boxEq(t, s.Images[0].Box, 0, 0, 60, 60)
+	})
+
+	t.Run("nested form BBox wider than the enclosing one", func(t *testing.T) {
+		env := mapEnv{
+			{
+				"Fm0": {Content: []byte("/Fm1 Do"), Matrix: Identity, Scope: 1, BBox: &Box{LLX: 0, LLY: 0, URX: 200, URY: 200}},
+			},
+			{
+				"Fm1": {Content: []byte("q 1000 0 0 1000 0 0 cm /Im0 Do Q"), Matrix: Identity, Scope: 2, BBox: &Box{LLX: 0, LLY: 0, URX: 500, URY: 500}},
+			},
+			{"Im0": {Image: true, ID: 1}},
+		}
+		s, err := Walk([]byte("/Fm0 Do"), 0, env)
+		if err != nil {
+			t.Fatalf("Walk() error = %v", err)
+		}
+		if len(s.Images) != 1 {
+			t.Fatalf("Images = %+v; want one", s.Images)
+		}
+		boxEq(t, s.Images[0].Box, 0, 0, 200, 200)
+	})
+}
+
+// Two successive `re W n` clips intersect cumulatively: the second clip
+// narrows further, it does not replace the first (ISO 32000-1 8.5.4: "the new
+// clipping path shall be the intersection of the current clipping path and
+// the newly constructed path").
+func TestWalkNestedClipsIntersect(t *testing.T) {
+	src := "0 0 100 100 re W n 20 20 60 60 re W n q 200 0 0 200 0 0 cm /Im0 Do Q"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	// intersect(0,0,100,100) with 20,20,60,60-re (corners 20,20 to 80,80) is
+	// 20,20,80,80; intersecting that with the 0,0-200,200 image box leaves it
+	// unchanged.
+	boxEq(t, s.Images[0].Box, 20, 20, 80, 80)
+}
+
+// A clip set inside a Form XObject must not leak back out to the page that
+// invoked it. doXObject already passes gstate by value into the form's own
+// walk() call and that call keeps its own local q/Q stack, which is what
+// makes this hold once a clip lives on gstate -- this test is the guard that
+// keeps it holding.
+func TestWalkClipInsideAFormDoesNotLeak(t *testing.T) {
+	env := mapEnv{
+		{
+			"Im0": {Image: true, ID: 1},
+			"Fm0": {Content: []byte("0 0 30 30 re W n"), Matrix: Identity, Scope: 1},
+		},
+		{},
+	}
+	src := "/Fm0 Do q 500 0 0 500 0 0 cm /Im0 Do Q"
+	s, err := Walk([]byte(src), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 500, 500)
+}
+
+// A clip is fixed in DEVICE space at the moment W takes effect, not
+// re-derived from its user-space path later. This is the discriminating case:
+// the clip rect is set under one CTM and the image is painted under a second,
+// larger one composed on top of it. A clip re-mapped through the CTM in force
+// at Do time (wrong) would map the user-space rect 0,0,50,50 through the
+// combined scale-300 CTM to 0,0,15000,15000 -- no effective clip at all. A
+// clip fixed in device space at W time (correct, ISO 32000-1 8.5.4: "The new
+// clipping path... shall be intersected with the running intersection of all
+// pre-existing clipping paths") stays at 0,0,100,100 regardless.
+func TestWalkClipIsFixedInDeviceSpaceNotUserSpace(t *testing.T) {
+	src := "q 2 0 0 2 0 0 cm 0 0 50 50 re W n 150 0 0 150 0 0 cm /Im0 Do Q"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 100, 100)
+}
+
+// ISO 32000-1 8.5.4: "W... shall not, in itself, have any effect on the
+// clipping path. It merely sets a flag ... that shall be examined by the
+// path-painting operator that follows immediately after". The clip takes
+// effect after WHICHEVER path-painting operator follows -- n is only the
+// no-op case -- so `re W f` both paints the path (unaffected by the byb-b1.5
+// simplification this section deliberately does not touch, see below) AND
+// sets the clip from it, exactly as `re W n` would.
+func TestWalkClipTakesEffectAfterAnyPaintingOperatorNotJustN(t *testing.T) {
+	src := "0 0 50 50 re W f q 200 0 0 200 0 0 cm /Im0 Do Q"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 50, 50)
+}
+
+// A clip disjoint from a placement empties it out. This test PINS the chosen
+// representation for "empty": the ordinary per-axis intersection
+//
+//	llx = max(a.LLX, b.LLX); urx = min(a.URX, b.URX)   (and the y axis likewise)
+//
+// inverts (urx < llx) exactly when the two rectangles do not overlap on that
+// axis. Rather than introduce a second, inverted-box convention alongside
+// every other Box this package produces -- pathBox, UnitSquareBox, and every
+// clip test above all guarantee LLX<=URX and LLY<=URY -- an empty
+// intersection clamps the collapsing edge to the near bound instead of
+// letting it invert: `if urx < llx { urx = llx }`. That keeps Box's ordering
+// invariant universal and turns "empty" into an ordinary zero-area box
+// instead of a value every consumer of Box would need a special case for.
+//
+// Worked here: clip is 0,0,10,10; the image (unit square under a
+// 500,0,0,500,500,500 CTM) lands at 500,500,1000,1000, disjoint on both axes.
+// Per-axis: llx=max(0,500)=500, urx=min(10,1000)=10 -> clamped to 500;
+// lly=max(0,500)=500, ury=min(10,1000)=10 -> clamped to 500. The pinned
+// result is the single point 500,500,500,500.
+func TestWalkDisjointClipReportsAZeroAreaBoxNotAnInvertedOne(t *testing.T) {
+	src := "0 0 10 10 re W n q 500 0 0 500 500 500 cm /Im0 Do Q"
+	s, err := Walk([]byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 500, 500, 500, 500)
+}
+
+// A clip must NOT narrow Paint.Box. Walk's doc comment is explicit that an
+// oversized Paint.Box is the conservative direction -- it makes a raster less
+// likely to be judged as containing (and hence hiding) the paint, so a
+// clipped-away path errs toward diverting the page rather than silently
+// dropping ink from consideration. Applying the new clip tracking to paints
+// too would narrow Paint.Box and move divert decisions the unsafe way, so
+// this pins the opposite: a path painted inside a tight clip still reports
+// its own full, unclipped device-space box.
+func TestWalkClipDoesNotNarrowPaintBoxes(t *testing.T) {
+	src := "0 0 10 10 re W n 0 0 500 500 re f"
+	s, err := Walk([]byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Paints) != 1 {
+		t.Fatalf("Paints = %+v; want one", s.Paints)
+	}
+	boxEq(t, s.Paints[0].Box, 0, 0, 500, 500)
+}
+
+// --- byb-b1.12: Form /BBox narrows a placement's Box ------------------------
+//
+// content.XObject has no BBox field today (walk.go's doc comment: "a Form
+// XObject's /BBox clips its content... and Walk ignores it"), so every test
+// below references a `BBox` field that does not exist yet. THIS IS A
+// DELIBERATE RED-BY-COMPILE-ERROR STATE, not an oversight: unlike the clip
+// tests above, there is no way to exercise "does Walk read and apply a form's
+// /BBox" without first giving Env somewhere to put one, and content.XObject
+// is that place (mirroring Matrix and Scope, the two other form-only fields
+// already there). `go vet ./internal/content/...` at this state must fail
+// with a compile error naming the missing BBox field, and that failure IS the
+// expected RED for this section — see the test run transcript in the lane
+// report for the verbatim message.
+//
+// The field is `*Box`: nil is how a form with no /BBox is told apart from one
+// whose /BBox happens to be the zero rectangle, which
+// TestWalkMissingFormBBoxDoesNotClip below depends on.
+
+// A form's /BBox crops content painted inside it, including an oversized
+// image (ISO 32000-1 8.10.2: "The result is to trim the form XObject... to
+// the boundaries of that rectangle"). Both form Matrix and enclosing CTM are
+// identity here, so BBox user-space coordinates equal device-space ones and
+// this isolates the crop itself from the mapping tested next.
+func TestWalkFormBBoxCropsThePlacement(t *testing.T) {
+	env := mapEnv{
+		{"Fm0": {
+			Content: []byte("q 1000 0 0 1000 0 0 cm /Im0 Do Q"),
+			Matrix:  Identity,
+			Scope:   1,
+			BBox:    &Box{LLX: 0, LLY: 0, URX: 50, URY: 50},
+		}},
+		{"Im0": {Image: true, ID: 1}},
+	}
+	s, err := Walk([]byte("/Fm0 Do"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 50, 50)
+}
+
+// The /BBox lives in the form's own coordinate system, which is /Matrix
+// composed with the CTM in force at the Do that invoked it -- the exact
+// composition doXObject already builds for its recursive walk() call
+// (xo.Matrix.Mul(gs.ctm)). This test gives Matrix and the enclosing cm
+// different, non-identity values so a wrong composition (only one of the two,
+// or the wrong order) produces a different wrong answer than either alone.
+//
+// Matrix translate(5,5), enclosing CTM scale(3): combined is
+// translate(5,5).Mul(scale(3)) = {3 0 0 3 15 15} (apply translate, then
+// scale). BBox 0,0,10,10 maps through that to 15,15,45,45. The image inside
+// the form is oversized well past it, so the reported box is the mapped BBox
+// exactly.
+func TestWalkFormBBoxIsMappedThroughMatrixAndCTM(t *testing.T) {
+	env := mapEnv{
+		{"Fm0": {
+			Content: []byte("q 1000 0 0 1000 0 0 cm /Im0 Do Q"),
+			Matrix:  Matrix{1, 0, 0, 1, 5, 5},
+			Scope:   1,
+			BBox:    &Box{LLX: 0, LLY: 0, URX: 10, URY: 10},
+		}},
+		{"Im0": {Image: true, ID: 1}},
+	}
+	s, err := Walk([]byte("q 3 0 0 3 0 0 cm /Fm0 Do Q"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 15, 15, 45, 45)
+}
+
+// /BBox is required by ISO 32000-1 table 95, but Byblos reads other malformed
+// PDFs without erroring and a form missing it should be no different. Pinned
+// choice: a nil BBox applies no BBox-derived clipping at all -- the form
+// behaves as it did before byb-b1.12, not as though it clipped to nothing.
+// Silently clipping to an empty box would be worse than the status quo bug:
+// it would make every placement inside a malformed form disappear rather than
+// merely overstate its box.
+func TestWalkMissingFormBBoxDoesNotClip(t *testing.T) {
+	env := mapEnv{
+		{"Fm0": {
+			Content: []byte("q 1000 0 0 1000 0 0 cm /Im0 Do Q"),
+			Matrix:  Identity,
+			Scope:   1,
+			// BBox left nil: the form's /BBox was absent or unreadable.
+		}},
+		{"Im0": {Image: true, ID: 1}},
+	}
+	s, err := Walk([]byte("/Fm0 Do"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.Images) != 1 {
+		t.Fatalf("Images = %+v; want one", s.Images)
+	}
+	boxEq(t, s.Images[0].Box, 0, 0, 1000, 1000)
+}
