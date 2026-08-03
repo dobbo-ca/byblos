@@ -199,21 +199,38 @@ type PageProvenance struct {
 // than erroring (a wrongly-typed value, e.g. a string, does still error),
 // which would misrepresent a partial record as a real (if
 // degenerate) measurement. Byblos's own writer always sets both together.
+// The same short-array hazard applies to ClipBox, once its presence bit says
+// it is there at all: a short clip_box array still zero-fills rather than
+// erroring, reading as a real (if degenerate) measured clip.
 //
-// ADDING A THIRD BOX LATER: it must carry its OWN presence bit -- *[4]float64,
-// or a sibling bool -- and must not be a bare [4]float64 like these two.
-// Geometry's nil-ness is the presence bit for the pair above and for nothing
-// else, so a value-typed box added now would zero-fill on every record written
-// before it existed, and by the rule two paragraphs up a zero box inside a
-// non-nil Geometry reads as a real degenerate measurement rather than as an
-// absent one. The pair above escape this only because they are the reason
-// Geometry becomes non-nil in the first place. byb-b1.12 is the live case:
-// once content.Walk honours form /BBox and clip paths it will want to record
-// the clip box here, and every byb-b5.1-era record would otherwise claim it
-// measured a [0 0 0 0] clip.
+// ClipBox is the third box, added by byb-b1.12 once content.Walk started
+// honouring form /BBox and clip paths. It carries its OWN presence bit --
+// *[4]float64, not a bare [4]float64 -- for exactly the reason the paragraph
+// above warns about: a value-typed box would zero-fill on every record
+// written before it existed, and a zero box inside a non-nil Geometry already
+// means "measured, and the measurement was degenerate" (the paragraph above
+// this one), so it would make every byb-b5.1-era record lie that it measured
+// a [0 0 0 0] clip.
+//
+// It is populated only when a clip actually narrowed the placement below its
+// unclipped raster box (extract.go compares Placement.Box against
+// Placement.CTM.UnitSquareBox(), the placement's own extent before any clip)
+// -- not whenever a clip merely happened to be in effect. A clip landing
+// exactly on the raster's own edge (a form BBox sized to match its image,
+// say) narrows nothing, so it records no ClipBox, the same as a page with no
+// clip at all: this field answers "did a clip change what shows", not "was a
+// clip present". A page with no narrowing clip in effect leaves ClipBox nil,
+// the same way Geometry itself is nil for a page a build never measured.
+//
+// There is no honest value for "unbounded, nothing clipped this" that fits
+// inside a plain [4]float64 the way RasterBox and PageBox do -- any box-shaped
+// value collides with a real, if degenerate, measurement (the paragraph
+// above). That is the reason ClipBox needs its own presence bit rather than
+// being inferred by comparing RasterBox to something.
 type PageGeometry struct {
-	RasterBox [4]float64 `json:"raster_box"`
-	PageBox   [4]float64 `json:"page_box"`
+	RasterBox [4]float64  `json:"raster_box"`
+	PageBox   [4]float64  `json:"page_box"`
+	ClipBox   *[4]float64 `json:"clip_box,omitempty"`
 }
 
 // CoversPage reports whether RasterBox fills PageBox, within coverTolerancePt.

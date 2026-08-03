@@ -12,15 +12,24 @@ import (
 
 // ImageRef is one painting of an image on a page.
 //
-// Bounds is where the image lands, in PDF default user space: points, origin
-// lower-left, y increasing upward. image.Rectangle is used only as a convenient
-// integer rectangle — do not read it as screen coordinates.
+// Bounds is where the image is actually VISIBLE, in PDF default user space:
+// points, origin lower-left, y increasing upward. image.Rectangle is used
+// only as a convenient integer rectangle — do not read it as screen
+// coordinates.
 //
 // Placement is the matrix the image was painted with, in PDF matrix order
 // [a b c d e f] (ISO 32000-1 section 8.3.3), mapping the image's unit square
-// into user space. Bounds is its axis-aligned bounding box and reports the same
-// rectangle for a clean placement and for one a scanner deskewed by a fraction
-// of a degree; this is where that rotation is visible.
+// into user space. Before byb-b1.12, Bounds was exactly that mapped unit
+// square's axis-aligned bounding box -- the same rectangle for a clean
+// placement and for one a scanner deskewed by a fraction of a degree, with
+// the rotation visible only in Placement. Since byb-b1.12, Bounds is that
+// same bounding box intersected with any W/W* clip path or form /BBox in
+// effect at the Do: a placement clipped to a corner of the page reports the
+// corner, not the raster's own oversized extent, while Placement keeps
+// describing the full unclipped matrix regardless. A caller deriving a scale
+// or DPI from Bounds against the stored raster's pixel dimensions (Width,
+// Height) must account for this — a clipped Bounds does not mean the raster
+// was stored at a different resolution.
 type ImageRef struct {
 	Bounds        image.Rectangle
 	Placement     [6]float64

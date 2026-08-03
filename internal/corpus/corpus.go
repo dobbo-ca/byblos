@@ -133,6 +133,14 @@ func All() []Doc {
 		{"scan", "one page-covering image: the case the whole design targets", scan(0)},
 		{"scan-rotated", "one page-covering image on a /Rotate 90 page", scan(90)},
 		{"scan-in-form", "one page-covering image inside a Form XObject: must NOT divert", scanInForm()},
+		{"scan-clipped-corner", "a full-page image clipped by `re W n` to a 100x100pt corner: must extract with Bounds the corner, not the raster placement, and CoversPage false (byb-b1.12)",
+			scanClippedCorner()},
+		{"scan-cropped-by-form-bbox", "a full-page image inside a Form XObject whose /BBox actually crops it to a 100x100pt corner: must extract with Bounds the corner, and CoversPage false (byb-b1.12; the only form fixture whose /BBox narrows anything)",
+			scanCroppedByFormBBox()},
+		{"scan-clip-narrower-than-raster-box", "a page clip that narrows the placement on Y only, so recorded ClipBox and RasterBox differ: must extract with ClipBox the actual clip, not RasterBox (byb-b1.12)",
+			scanClipNarrowerThanTheRasterBox()},
+		{"scan-clipped-away", "a page-covering image clipped by a `re W n` rectangle entirely off the page: must divert, not extract the full raster against an empty raster_box (byb-b1.12)",
+			scanClippedAway()},
 		{"scan-deskewed", "page-covering image placed with a 0.13 degree scanner deskew: must NOT divert",
 			scanPlaced(cmOperands(DeskewPlacement), 0)},
 		{"scan-natural-dpi", "raster placed at its own 302 DPI on a nominal Letter box, 43.6 points short: must NOT divert",
@@ -379,6 +387,99 @@ func scanInForm() []byte {
 		" /Matrix [1 0 0 1 0 0] /Resources << /XObject << /Im0 %d 0 R >> >>",
 		PageWidthPt, PageHeightPt, img),
 		[]byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	return w.finish(cat)
+}
+
+// scanClippedCorner is a full-page raster placement narrowed by a `re W n`
+// clip path to a 100x100pt corner of the page. The image XObject itself is
+// still placed page-covering (`612 0 0 792 0 0 cm`); only the clip makes the
+// visible mark a corner. It exists for byb-b1.12's acceptance criterion,
+// verbatim: "A placement clipped by a form /BBox or a clip path reports the
+// visible box, and a clipped page-covering image no longer reports CoversPage
+// true."
+func scanClippedCorner() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf(
+		"q 0 0 100 100 re W n %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	return w.finish(cat)
+}
+
+// scanClippedAway is a page-covering image clipped by a `re W n` rectangle
+// entirely off the page and disjoint from the image, so the placement's Box
+// narrows to a zero-area rectangle outside page_box. It exists to pin
+// classify's "clipped-away" reason: extracting here would return the full
+// raster bytes against a raster_box nobody can trust (B-review.json's second
+// major finding).
+func scanClippedAway() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf(
+		"q 700 800 50 50 re W n %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	return w.finish(cat)
+}
+
+// scanCroppedByFormBBox is a full-page image placed inside a Form XObject
+// whose /BBox actually crops it to a 100x100pt corner -- unlike scanInForm's
+// (and every other form fixture's) page-sized /BBox, which narrows nothing.
+// It exists because internal/pdfdoc's /BBox read (the only wire between a
+// real PDF and content.XObject.BBox) had zero end-to-end coverage without it:
+// that read can be deleted and the suite does not notice when every form
+// fixture's /BBox is a no-op (B-mutate.json PROBE 12).
+func scanCroppedByFormBBox() []byte {
+	w := newWriter()
+	cat, pages, page, cont, form, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Fm0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, form, cont))
+	w.fillStream(cont, "", []byte("q 1 0 0 1 0 0 cm /Fm0 Do Q\n"))
+	w.fillStream(form, fmt.Sprintf("/Type /XObject /Subtype /Form /BBox [0 0 100 100]"+
+		" /Matrix [1 0 0 1 0 0] /Resources << /XObject << /Im0 %d 0 R >> >>",
+		img),
+		[]byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	return w.finish(cat)
+}
+
+// scanClipNarrowerThanTheRasterBox is a page clip that narrows the placement
+// on only one axis, so the recorded ClipBox and RasterBox are NOT the same
+// rectangle: the clip is wider than the image's own extent on X (so X is
+// bounded by the image, not the clip) and narrower on Y (so Y is bounded by
+// the clip). It exists because extract.go's ClipBox can be sourced from
+// placement.Box (the already-clipped RasterBox) instead of placement.Clip
+// (the actual clip rectangle) with 0 FAIL on every other fixture, since every
+// other clipped fixture happens to have the clip and the narrowed box come
+// out identical (B-mutate.json PROBE 3).
+func scanClipNarrowerThanTheRasterBox() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img, cont))
+	// Clip: (-50,-50)-(200,200). Image: 100 0 0 300 0 0, i.e. Box (0,0)-(100,300)
+	// before clipping. X: the clip (-50..200) is wider than the image (0..100),
+	// so the image's own edge bounds X. Y: the clip (-50..200) is narrower than
+	// the image (0..300), so the clip bounds Y. Box after clipping is therefore
+	// (0,0)-(100,200) -- neither the clip rectangle nor the unclipped image box.
+	w.fillStream(cont, "", []byte(
+		"q -50 -50 250 250 re W n 100 0 0 300 0 0 cm /Im0 Do Q\n"))
 	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
 	return w.finish(cat)
 }

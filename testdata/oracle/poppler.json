@@ -336,6 +336,94 @@
       ],
       "has_text": false
     },
+    "scan-clip-narrower-than-raster-box": {
+      "pages": 1,
+      "page_width_pt": 612,
+      "page_height_pt": 792,
+      "images": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        }
+      ],
+      "rasters": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "4e7f790d887ae1d7f60d4b10e64739537c9c32984b79549e51b2fcbaf410d820"
+        }
+      ],
+      "has_text": false
+    },
+    "scan-clipped-away": {
+      "pages": 1,
+      "page_width_pt": 612,
+      "page_height_pt": 792,
+      "images": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        }
+      ],
+      "rasters": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "4e7f790d887ae1d7f60d4b10e64739537c9c32984b79549e51b2fcbaf410d820"
+        }
+      ],
+      "has_text": false
+    },
+    "scan-clipped-corner": {
+      "pages": 1,
+      "page_width_pt": 612,
+      "page_height_pt": 792,
+      "images": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        }
+      ],
+      "rasters": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "4e7f790d887ae1d7f60d4b10e64739537c9c32984b79549e51b2fcbaf410d820"
+        }
+      ],
+      "has_text": false
+    },
+    "scan-cropped-by-form-bbox": {
+      "pages": 1,
+      "page_width_pt": 612,
+      "page_height_pt": 792,
+      "images": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        }
+      ],
+      "rasters": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "4e7f790d887ae1d7f60d4b10e64739537c9c32984b79549e51b2fcbaf410d820"
+        }
+      ],
+      "has_text": false
+    },
     "scan-deskewed": {
       "pages": 1,
       "page_width_pt": 612,
