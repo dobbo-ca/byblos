@@ -176,7 +176,10 @@ func (p *DecodeParms) dict() types.Dict {
 // XObject that XObject previously resolved as id.
 //
 // The substitution is in memory; Write serializes it. ImageInfo(id) reflects
-// the new image afterwards.
+// the new image afterwards. /Width and /Height are rewritten to img's
+// dimensions, which need not match the original raster's — placement is a
+// CTM on the unit square, so it is unaffected by the raster shrinking or
+// growing underneath it.
 //
 // It refuses an image carrying /SMask or /Mask. Those describe transparency
 // keyed to the samples being replaced, and neither dropping them nor keeping
