@@ -49,17 +49,62 @@ Pure-Go PDF *rasterization* is enormous — a content-stream interpreter, Type1/
 TrueType/CID font rasterization, color spaces, shadings, transparency groups. It
 would be larger than Cadmus.
 
-Kleio never needs it:
+Kleio needs it in exactly one place, and it is not compression:
 
-- **Born-digital PDFs are explicitly never rasterized.** Kleio's own design says
-  rasterizing them produces something larger and worse. They are linearized and
-  their existing text is kept.
+- **Born-digital PDFs are never rasterized *for compression*.** Kleio's own
+  design says rasterizing them produces something larger and worse. They are
+  linearized and their existing text is kept.
 - **Scanned PDFs are, overwhelmingly, one page-covering image per page.** That
-  does not require rendering. It requires *extracting* — which `pdfcpu` already
-  does.
+  does not require rendering. It requires *extracting* — `pdfcpu` decodes the
+  stream (except JBIG2 and JPX, which it cannot), and Byblos supplies the
+  content-stream walk that decides which placement is the page.
+  Measured (`byb-divert`, 2026-07-28): genuinely composite pages are **1.03% of
+  29,779 scan-shaped pages**, ~1.5% counting blank-base MRC the geometric test
+  cannot see. Do not confuse this with Byblos's own divert rate over *all* pages
+  of an archive sample — 85.73% at 5fbf37d — which is dominated by pages holding
+  no image at all (`no-image`, 105,049 of 134,483 diverts) and does not measure
+  this premise.
+- **The one exception is the thumbnail.** `validate.go:338` calls `Thumbnail`
+  inside `finalize` with no born-digital guard, so every finalized document has
+  page 1 rasterized to a 400px long edge by `pdftoppm`. Nothing else in Kleio
+  rasterizes a born-digital page: `Decide` returns `VerdictPass` for born-digital
+  before any other test (`gate.go:601-602`), so the 150 dpi gate render
+  (`validate.go:295`, guarded by `if !j.BornDigital` at `:219`) and the 1024px
+  judge render (`validate.go:243`, reached only on `VerdictAmbiguous`) never see
+  one. Both of those rasterize only scanned pages, which `ExtractPageRaster`
+  already handles.
 
-So `poppler`'s role collapses from "render arbitrary PDF" to "get the embedded
-raster off a page".
+So two of `poppler`'s four roles in Kleio collapse to "get the embedded raster
+off a page" (`pdfimages`) and "read page geometry" (`pdfinfo`). The other two —
+`pdftotext` word extraction and `pdftoppm` thumbnail rendering — are open scope
+decisions; see `byb-lez` and `byb-0gm`.
+
+### Amendment 2026-08-03: Byblos renders (byb-0gm), fidelity target unsettled
+
+`byb-0gm` decided option (c), **Byblos renders**, against this section's argument
+and against that bead's own recommendation. This section previously asserted
+"Kleio never needs it", which is false; the text above is the correction.
+
+The scope is **one consumer**: the 400px page-1 thumbnail above. That is narrower
+than `byb-0gm` records — its notes name the gate render as a second consumer, but
+the gate render never runs on a born-digital document, so it requires no
+renderer. `byb-0gm` also cites `gate.go:248` for it, which is a comment; the call
+is `validate.go:295`.
+
+**The fidelity target is deliberately not settled here.** The two candidates are
+different projects, and the choice should be made explicitly rather than
+inherited from a spec edit:
+
+| target | what it must render | why you might pick it |
+|---|---|---|
+| **Thumbnail fidelity** | page 1 only, 400px long edge; recognisable rather than faithful — no colour management, no transparency groups | It is the only thing Kleio calls today, and it is bounded by a consumer that already exists. |
+| **Archival fidelity** | any page at any DPI, faithful enough to store | Only this justifies the "larger than Cadmus" cost argument above. Nothing in Kleio asks for it. |
+
+The "larger than Cadmus" argument applies to the second row, not the first. It is
+not an objection to a thumbnail renderer, and a thumbnail renderer is not a
+commitment to an archival one. Until this table resolves to a single row, the §1
+non-goal and `FUTURE.md`'s "A PDF renderer" entry stand as written: both describe
+an archival renderer, which remains deferred.
 
 The residual case — a page with tiled images, a vector overlay, or mixed
 content — is *detected*, not rendered. `ExtractPageRaster` returns
@@ -70,6 +115,14 @@ it already does for other hard failures.
 project rests on the premise that it is rare. If it turns out common, the premise
 is wrong and the design needs revisiting — better to learn that from a counter
 than from a user complaint.
+
+Note what the counter does *not* measure. `DivertRate` counts born-digital and
+unreadable pages too, so it cannot answer the premise on its own — `byb-divert`
+had to select a scan-shaped population separately to do that, and `byb-5kk`
+showed the failure mode directly: a page-tree bug made 1,266 real pages
+unreadable and pushed the measured divert rate *down*. Watch `UnhandledRate` for
+regressions (`stats.go:50-57`), and measure the premise itself over scan-shaped
+pages.
 
 ---
 
@@ -201,6 +254,12 @@ func EncodeJBIG2Generic(b *Bitmap) ([]byte, error)   // lossless; see §5
 
 func QuantizePNG(img image.Image, colors int) ([]byte, error)
 func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error)
+
+// QuantizeIndexed (byb-96p) is QuantizePNG's embeddable variant: same core,
+// but it returns a PDF /Indexed /FlateDecode image rather than a PNG file.
+// NOTE: BuildPDF does not accept it — internal/pdfbuild rejects the Indexed
+// colour space — so at 3fa75a8 it has no exported route into a PDF. See byb-fp6.
+func QuantizeIndexed(img image.Image, colors int) (EncodedImage, error)
 
 // --- assembly ---
 
@@ -411,7 +470,7 @@ oracles**. They never ship and Kleio never depends on them.
 | `EncodeJBIG2Generic` | round-trip through a JBIG2 *decoder*, asserting bit-identical output — this is the definitive lossless check, and it does not need `jbig2enc` |
 | `QuantizePNG`, `Downsample` | size and PSNR bounds against `pngquant`/`ghostscript` output |
 | `StampTextLayer` | `pdftotext` on the result must return the text that was stamped, in reading order |
-| `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input — suspended for `Linearize: true`: over the 27 readable corpus documents it runs +7 to +1007 B against the input (usually but not always larger; the rewrite alone can shrink a document more than linearizing costs), and +649 to +1007 B with no exceptions against the same document rewritten and not linearized (see §4/§6 `Provenance`) |
+| `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input — suspended for `Linearize: true`: over the 27 readable corpus documents *as the corpus then stood* (it is now 32 readable of 33, and this range has not been re-measured) it runs +7 to +1007 B against the input (usually but not always larger; the rewrite alone can shrink a document more than linearizing costs), and +649 to +1007 B with no exceptions against the same document rewritten and not linearized (see §4/§6 `Provenance`) |
 
 The JBIG2 oracle deserves emphasis: because we encode losslessly, correctness is
 verifiable by decoding our own output and comparing bitmaps. No reference encoder
@@ -424,13 +483,20 @@ image-plus-vector-overlay pages, and at least one deliberately malformed file.
 
 ## 9. Kleio integration
 
-Kleio's `compress` worker replaces `exec.Command` calls with Byblos calls. **Its
-preset ladder, born-digital detection, validation gate, and retry policy are
-unchanged** — this is a substitution beneath an existing boundary, not a redesign.
-Work currently in flight on Kleio Plan 2 is unaffected and is not wasted.
+Kleio's `compress` worker will replace its `exec.Command` calls with Byblos
+calls. **Its preset ladder, born-digital detection, validation gate, and retry
+policy are unchanged** — this is a substitution beneath an existing boundary, not
+a redesign. Work currently in flight on Kleio Plan 2 is unaffected.
 
 New in Kleio: `byblos_version` and `byblos_capabilities` columns, and the generic
 reprocess job described in §6.
+
+**Not started.** Kleio does not import Byblos — no reference in its `go.mod` or
+`go.sum` — so nothing in this section has been built or run, and no Byblos code
+has ever executed against the real pipeline. This is the largest gap between
+this document and the world, and it is what makes every parity claim here
+theoretical. Everything above is the intended design, not a description of
+running code.
 
 ---
 
