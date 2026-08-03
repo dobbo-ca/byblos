@@ -14,6 +14,15 @@ jobs:
   # jbig2dec/imagemagick/libtiff-tools/ghostscript are preinstalled or pulled
   # in transitively, so the assertion step below is expected to pass, not a
   # no-op.
+  #
+  # -v on the test step is deliberate, for the same reason the sibling
+  # test-oracles job gives below and with more force: without it a t.Skip() and
+  # a passing test print identically, so this job -- the one where every
+  # oracle-backed test is EXPECTED to skip -- cannot distinguish "the 24 oracle
+  # tests skipped as designed and the rest passed" from "the suite degraded to
+  # all-skips". Both show a green tick. It also means the per-test lines exist,
+  # so a PASS/SKIP count from this job's log is a real number rather than an
+  # inference from `ok` lines.
   test-no-oracles:
     runs-on: ubuntu-24.04
     env:
@@ -41,7 +50,7 @@ jobs:
           exit $fail
       - run: go build ./...
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test ./... -v
       - name: cross-build without cgo
         run: GOOS=linux GOARCH=arm64 go build ./...
       - name: assert only permitted dependencies
