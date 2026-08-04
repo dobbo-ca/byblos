@@ -128,7 +128,9 @@ func interpAtSize(pts []curvePoint, size int) float64 {
 // and 11.89 dB against 2.18.0, so 4.5 dB still fails it by 4.9 dB on the
 // closer of the two. What the slack cannot catch is a regression that
 // also SHRINKS the output, since that slides down pngquant's own curve; the
-// bit-depth and palette-size tests cover that direction instead.
+// bit-depth and palette-size tests cover part of that direction, and
+// TestQuantizePNGPSNRLadderPinned (byb-tq2) covers the rest by pinning the
+// absolute PSNR at every point of this same ladder, with no oracle involved.
 //
 // THE SIZE HALF IS NOT SIZED BY VERSION SPREAD, IT IS SIZED BY A MEASURED
 // REGRESSION WINDOW (byb-0b8, re-derived under byb-20b). The threshold was
@@ -196,8 +198,13 @@ func interpAtSize(pts []curvePoint, size int) float64 {
 // @2.18.0) and the population-split (9.6034 / 12.4655 dB) both blow well
 // past the 4.5 dB slack. Halving the Lloyd budget does NOT -- its worst PSNR
 // margin is -2.72 dB on both builds, inside the 4.5 dB slack, so that mutant
-// passes both halves of this test. THIS IS A KNOWN UNCAUGHT GAP, not a
-// claim that the slack covers it. Forcing 8-bit depth by padding the palette
+// passes both halves of this test. THIS TEST STILL DOES NOT CATCH IT, and it
+// is not meant to: it is a comparison against a moving oracle, and the
+// mutation slides down that oracle's own curve rather than away from it.
+// Catching it is TestQuantizePNGPSNRLadderPinned's job (byb-tq2, quantize_test.go),
+// which pins the absolute PSNR at every point of this ladder to 5e-7 dB and
+// runs in the oracle-free build. Do not widen or narrow the slack here in an
+// attempt to cover that direction. Forcing 8-bit depth by padding the palette
 // out to 256 entries does trip the size gate, at scanpage 2.7893 on every
 // build.
 //
