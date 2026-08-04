@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"math"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -233,8 +234,29 @@ func TestQuantizeIndexedRoundTripPixelsSurvivePdfimages(t *testing.T) {
 // decoded, predictor-removed sample bytes, bit-packed exactly as the PDF
 // spec lays out a sub-8-bit /Indexed image row (MSB first, each row padded
 // to a byte boundary) -- so this test unpacks those samples itself and
-// compares indices directly against QuantizePNG's *image.Paletted.Pix,
-// which is the same core's ground truth.
+// resolves each one through /Indexed's own colour table.
+//
+// IT RESOLVES COLOURS, NOT INDICES (byb-2s4). Until byb-2s4 this test
+// compared the unpacked sample values against QuantizePNG's
+// *image.Paletted.Pix and stopped there, which made it blind to the half of
+// an /Indexed image that actually determines what a reader paints: reversing
+// the PLTE entries handed to ColorSpace.Lookup leaves every index identical
+// and every colour wrong, and this test stayed green through it (measured
+// on this branch: all four subtests PASS with the palette reversed). That
+// mattered more here than anywhere else in the file, because this is the
+// ONLY real-reader coverage BPC 1/2/4 has -- the pdfimages test above cannot
+// run at those depths, for the reason in the previous paragraph. So the
+// comparison now goes index -> enc.ColorSpace.Lookup -> RGB, against the RGB
+// QuantizePNG puts at the same pixel. That is what a PDF consumer computes,
+// and it fails on a wrong palette, a wrong index, or a wrong HiVal.
+//
+// Deliberately NOT also asserting the raw index values: a change that
+// permuted the palette AND the index stream consistently would keep every
+// painted colour correct, which is a relabelling, not a defect -- and the
+// specific relabelling byblos cares about (byb-20b's descending-population
+// order) is pinned by TestQuantizeIndexedPopulationTiesBreakByRGB and
+// TestQuantizePNGPaletteInPopulationOrder, on the property itself rather
+// than on a byte-for-byte match with a sibling function.
 func TestQuantizeIndexedRoundTripAllBitDepthsSurviveQpdf(t *testing.T) {
 	requireTool(t, "qpdf")
 
@@ -246,6 +268,14 @@ func TestQuantizeIndexedRoundTripAllBitDepthsSurviveQpdf(t *testing.T) {
 			enc, err := QuantizeIndexed(img, n)
 			if err != nil {
 				t.Fatalf("QuantizeIndexed: %v", err)
+			}
+			// Guard before the deref below (byb-2s4): a nil DecodeParms is
+			// a plausible regression, and letting it panic takes the whole
+			// test binary down -- every other test in the package with it --
+			// instead of failing this subtest with something CI output can
+			// be read for. Mirrors TestQuantizeIndexedDataIsNotAPNGFile.
+			if enc.DecodeParms == nil {
+				t.Fatal("DecodeParms is nil; an /Indexed FlateDecode stream needs Predictor/Columns/BitsPerComponent to be decodable at all")
 			}
 
 			d := openScanCorpus(t)
@@ -290,10 +320,19 @@ func TestQuantizeIndexedRoundTripAllBitDepthsSurviveQpdf(t *testing.T) {
 						shift := uint(8 - bpc*(x%samplesPerByte+1))
 						idx = (b >> shift) & (1<<uint(bpc) - 1)
 					}
-					want := ref.Pix[ref.PixOffset(rb.Min.X+x, rb.Min.Y+y)]
-					if idx != want {
-						t.Fatalf("index (%d,%d) = %d, want %d (QuantizePNG's palette index for the same input and colour count)",
-							x, y, idx, want)
+					if int(idx) > enc.ColorSpace.HiVal {
+						t.Fatalf("sample (%d,%d) = %d, past HiVal %d -- a reader has no colour to paint for it",
+							x, y, idx, enc.ColorSpace.HiVal)
+					}
+					gr := enc.ColorSpace.Lookup[int(idx)*3]
+					gg := enc.ColorSpace.Lookup[int(idx)*3+1]
+					gb := enc.ColorSpace.Lookup[int(idx)*3+2]
+					wr16, wg16, wb16, _ := ref.At(rb.Min.X+x, rb.Min.Y+y).RGBA()
+					wr, wg, wb := uint8(wr16>>8), uint8(wg16>>8), uint8(wb16>>8)
+					if gr != wr || gg != wg || gb != wb {
+						t.Fatalf("colour (%d,%d) = (%d,%d,%d) via index %d, want (%d,%d,%d) "+
+							"(the RGB QuantizePNG paints at the same pixel for the same input and colour count)",
+							x, y, gr, gg, gb, idx, wr, wg, wb)
 					}
 				}
 			}
@@ -511,6 +550,12 @@ func TestQuantizeIndexedDataIsCompressed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QuantizeIndexed: %v", err)
 	}
+	// Guard before the deref below (byb-2s4): the sibling qpdf test carried
+	// the same unguarded deref and turned a nil DecodeParms into a panic
+	// that took the whole test binary down. This was the file's other one.
+	if enc.DecodeParms == nil {
+		t.Fatal("DecodeParms is nil; there is no declared row geometry to size the uncompressed raster from")
+	}
 
 	rowBytes := (enc.DecodeParms.Columns*enc.DecodeParms.BitsPerComponent + 7) / 8
 	rawSize := (rowBytes + 1) * enc.Height // +1: PNG filter-type byte per row
@@ -609,5 +654,178 @@ func TestQuantizeIndexedMultipleIDATNotTruncated(t *testing.T) {
 	if len(raw) != want {
 		t.Fatalf("inflated Data is %d bytes; want %d -- looks truncated to fewer than the source's IDAT chunks",
 			len(raw), want)
+	}
+}
+
+// --- test 8: the painted raster, decoded without any oracle ----------------
+
+// paethPredictor is ISO/IEC 15948 9.4's PaethPredictor, byte for byte. a is
+// the sample to the left, b the one above, c the one above-left.
+func paethPredictor(a, b, c byte) byte {
+	p := int(a) + int(b) - int(c)
+	pa, pb, pc := p-int(a), p-int(b), p-int(c)
+	if pa < 0 {
+		pa = -pa
+	}
+	if pb < 0 {
+		pb = -pb
+	}
+	if pc < 0 {
+		pc = -pc
+	}
+	switch {
+	case pa <= pb && pa <= pc:
+		return a
+	case pb <= pc:
+		return b
+	}
+	return c
+}
+
+// decodeIndexedRaster paints enc the way a PDF consumer does and returns the
+// resulting RGB image: inflate Data, undo the /Predictor 15 (PNG) row filters,
+// unpack the bit-packed samples MSB-first, and resolve each sample through
+// /Indexed's colour table.
+//
+// It deliberately borrows nothing from image/png. QuantizeIndexed BUILDS its
+// stream with image/png, so a check that read it back with image/png would be
+// asking the encoder to mark its own work; the predictor arithmetic, the
+// sub-byte packing order and the palette lookup are exactly the three things a
+// reader has to get right from /DecodeParms and /ColorSpace alone, and all
+// three are reimplemented here from the spec.
+//
+// The one filter-type subtlety: an /Indexed image is a single component of
+// 1/2/4/8 bits, so PNG's filter offset (bpp, "bytes per complete pixel,
+// rounding up to one") is 1 at every depth this function sees.
+func decodeIndexedRaster(t *testing.T, enc EncodedImage) image.Image {
+	t.Helper()
+	if enc.DecodeParms == nil {
+		t.Fatal("DecodeParms is nil; an /Indexed FlateDecode stream is not decodable without Predictor/Columns/BitsPerComponent")
+	}
+	if enc.DecodeParms.Predictor != 15 {
+		t.Fatalf("Predictor = %d; this decoder implements the PNG predictors (15) only", enc.DecodeParms.Predictor)
+	}
+	bpc := enc.DecodeParms.BitsPerComponent
+	switch bpc {
+	case 1, 2, 4, 8:
+	default:
+		t.Fatalf("BitsPerComponent = %d; want 1, 2, 4 or 8", bpc)
+	}
+
+	r, err := zlib.NewReader(bytes.NewReader(enc.Data))
+	if err != nil {
+		t.Fatalf("Data does not begin a valid zlib stream: %v", err)
+	}
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("inflating Data: %v", err)
+	}
+
+	rowBytes := (enc.Width*bpc + 7) / 8
+	if want := (rowBytes + 1) * enc.Height; len(raw) != want {
+		t.Fatalf("inflated Data is %d bytes; want %d (%d rows of a 1-byte filter tag + %d packed sample bytes)",
+			len(raw), want, enc.Height, rowBytes)
+	}
+
+	const bpp = 1 // one component of <=8 bits, rounded up to one byte
+	out := image.NewRGBA(image.Rect(0, 0, enc.Width, enc.Height))
+	prev := make([]byte, rowBytes)
+	cur := make([]byte, rowBytes)
+	mask := byte(1<<uint(bpc) - 1)
+	samplesPerByte := 8 / bpc
+	for y := 0; y < enc.Height; y++ {
+		off := y * (rowBytes + 1)
+		ft := raw[off]
+		copy(cur, raw[off+1:off+1+rowBytes])
+		for i := 0; i < rowBytes; i++ {
+			var a, c byte
+			if i >= bpp {
+				a, c = cur[i-bpp], prev[i-bpp]
+			}
+			b := prev[i]
+			switch ft {
+			case 0: // None
+			case 1: // Sub
+				cur[i] += a
+			case 2: // Up
+				cur[i] += b
+			case 3: // Average
+				cur[i] += byte((int(a) + int(b)) / 2)
+			case 4: // Paeth
+				cur[i] += paethPredictor(a, b, c)
+			default:
+				t.Fatalf("row %d has filter type %d; want 0..4", y, ft)
+			}
+		}
+		for x := 0; x < enc.Width; x++ {
+			idx := (cur[x/samplesPerByte] >> uint(8-bpc*(x%samplesPerByte+1))) & mask
+			if int(idx) > enc.ColorSpace.HiVal {
+				t.Fatalf("sample (%d,%d) = %d, past HiVal %d -- a reader has no colour to paint for it",
+					x, y, idx, enc.ColorSpace.HiVal)
+			}
+			if lo := (int(idx) + 1) * 3; lo > len(enc.ColorSpace.Lookup) {
+				t.Fatalf("sample (%d,%d) = %d needs Lookup[%d:%d], but Lookup is only %d bytes",
+					x, y, idx, lo-3, lo, len(enc.ColorSpace.Lookup))
+			}
+			out.SetRGBA(x, y, color.RGBA{
+				enc.ColorSpace.Lookup[int(idx)*3],
+				enc.ColorSpace.Lookup[int(idx)*3+1],
+				enc.ColorSpace.Lookup[int(idx)*3+2],
+				255,
+			})
+		}
+		prev, cur = cur, prev
+	}
+	return out
+}
+
+// TestQuantizeIndexedPSNRLadderPinned is the /Indexed path's half of byb-tq2's
+// quality pin, and the only check anywhere that resolves QuantizeIndexed's own
+// sample stream to painted colours without an oracle. The sibling oracle-free
+// tests either read Lookup on its own (TestQuantizeIndexedLookupMatchesQuantizePNGPalette,
+// TestQuantizeIndexedPopulationTiesBreakByRGB) or inflate Data and check only
+// its length and filter tags (TestQuantizeIndexedDataIsNotAPNGFile); none of
+// them puts the two halves back together.
+//
+// Two holes close here at once, and neither is hypothetical:
+//
+//   - byb-tq2 measured that no QuantizeIndexed test caught the halved Lloyd
+//     budget. Today QuantizeIndexed and QuantizePNG share quantizeCore, so the
+//     ladder pin next door covers both by construction -- but "by
+//     construction" is exactly the assumption that stops holding the day the
+//     indexed path grows its own palette handling, and nothing would have said
+//     so. This runs the same pinned numbers through QuantizeIndexed's OWN
+//     output bytes.
+//   - byb-2s4 measured that at BPC 1/2/4 no reader verifies the colours in the
+//     oracle-free build. The qpdf round trip above is the only real-reader
+//     coverage at those depths and it is skipped without qpdf; what remained
+//     was TestQuantizeIndexedLookupMatchesQuantizePNGPalette, which compares
+//     the two entry points against each other and therefore stays green for
+//     any mutation inside the core they share.
+//
+// The comparison is against the SOURCE image, not against QuantizePNG, so it
+// is not a sibling-agreement check: it is the same absolute ladder
+// TestQuantizePNGPSNRLadderPinned asserts, reached through inflate ->
+// unpredict -> unpack -> palette lookup (decodeIndexedRaster, which
+// reimplements all four from the spec). A wrong palette, a wrong bit depth, a
+// wrong predictor or a worse quantizer each move the number.
+//
+// The ladder's colour counts of 2 and 4 are what put BPC 1 and BPC 2 under
+// this check; 8 and 16 give BPC 4, and everything above gives BPC 8.
+func TestQuantizeIndexedPSNRLadderPinned(t *testing.T) {
+	for _, pt := range quantizeLadder {
+		t.Run(fmt.Sprintf("%s/%d", pt.image, pt.colors), func(t *testing.T) {
+			img := ladderImage(t, pt.image)
+			enc, err := QuantizeIndexed(img, pt.colors)
+			if err != nil {
+				t.Fatalf("QuantizeIndexed(%s, %d): %v", pt.image, pt.colors, err)
+			}
+			got := psnrRGB(img, decodeIndexedRaster(t, enc))
+			if math.Abs(got-pt.psnr) > 5e-7 {
+				t.Errorf("QuantizeIndexed(%s, %d) painted PSNR = %.9f dB; want %.9f dB (delta %+.9f) -- "+
+					"the /Indexed raster a reader paints is not the one this ladder was measured from",
+					pt.image, pt.colors, got, pt.psnr, got-pt.psnr)
+			}
+		})
 	}
 }

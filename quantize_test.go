@@ -405,3 +405,154 @@ func TestQuantizePNGQualityUnaffectedByPaletteOrder(t *testing.T) {
 		t.Errorf("QuantizePNG(Scanjpeg, 64) PSNR = %.6f dB; want %.6f dB (pinned from main, byb-20b must not change it)", got, want)
 	}
 }
+
+// --- byb-tq2: the quality ladder, pinned absolutely ------------------------
+
+// quantizeLadderPoint is one (corpus image, colour count) point on the pinned
+// quality ladder below.
+type quantizeLadderPoint struct {
+	image  string
+	colors int
+	psnr   float64
+}
+
+// quantizeLadder is QuantizePNG's PSNR against the original at every point of
+// the acceptance test's colour ladder, plus the two sub-8-bit-depth counts (2
+// and 4) that ladder omits, measured on this branch off main (3fa75a8).
+//
+// Values carry nine decimals against a 5e-7 dB tolerance deliberately: the
+// literal's own rounding error is then ~5e-10, three orders of magnitude
+// inside the tolerance, so the tolerance is entirely headroom for arithmetic
+// and none of it is spent on how the number was written down.
+//
+// Scanpage is absent on purpose. It has four distinct colours, so every entry
+// from 4 up is lossless and its PSNR is +Inf -- a value this table cannot
+// carry usefully, and one TestQuantizePNGLosslessOnFewColourImage already
+// pins directly.
+var quantizeLadder = []quantizeLadderPoint{
+	{"Gradient", 2, 13.733233480},
+	{"Gradient", 4, 17.665946005},
+	{"Gradient", 8, 20.534671243},
+	{"Gradient", 16, 23.703440693},
+	{"Gradient", 32, 26.334065911},
+	{"Gradient", 64, 29.684394883},
+	{"Gradient", 128, 32.099877360},
+	{"Gradient", 256, 35.685541661},
+	{"Photo", 2, 10.473265000},
+	{"Photo", 4, 12.437580927},
+	{"Photo", 8, 16.275573921},
+	{"Photo", 16, 17.905666806},
+	{"Photo", 32, 19.867158042},
+	{"Photo", 64, 22.741621252},
+	{"Photo", 128, 24.879549545},
+	{"Photo", 256, 27.064433252},
+	{"Scanjpeg", 2, 28.657285296},
+	{"Scanjpeg", 4, 31.147341919},
+	{"Scanjpeg", 8, 42.627377572},
+	{"Scanjpeg", 16, 46.633672156},
+	{"Scanjpeg", 32, 51.680758833},
+	{"Scanjpeg", 64, 55.224754167},
+	{"Scanjpeg", 128, 58.758481362},
+	{"Scanjpeg", 256, 62.210347508},
+}
+
+// ladderImage resolves a quantizeLadderPoint's image name to the corpus
+// image itself.
+func ladderImage(t *testing.T, name string) image.Image {
+	t.Helper()
+	switch name {
+	case "Gradient":
+		return corpus.Gradient()
+	case "Photo":
+		return corpus.Photo()
+	case "Scanjpeg":
+		return corpus.Scanjpeg()
+	case "Scanpage":
+		return corpus.Scanpage()
+	}
+	t.Fatalf("no corpus image named %q", name)
+	return nil
+}
+
+// TestQuantizePNGPSNRLadderPinned is byb-tq2's third axis on the acceptance
+// gate, and it exists because the Lloyd work budget was unpinned in BOTH
+// directions -- nothing in the suite could tell a converged quantizer from a
+// half-converged one.
+//
+// THE ESCAPE, REPRODUCED BEFORE THIS TEST WAS WRITTEN. Mutating quantize.go's
+// Lloyd budget from 20_000_000 to 10_000_000 and running the whole suite off
+// main (3fa75a8) gives 1170 PASS / 1 SKIP / 0 FAIL -- not merely
+// TestQuantizePNGRateDistortionAgainstPngquant passing, but every test in the
+// repository. byb-tq2's own note claimed byb-20b's exact-PSNR pin
+// (TestQuantizePNGQualityUnaffectedByPaletteOrder, above) had already closed
+// this; it has not, and the reason is worth recording. That pin measures
+// Scanjpeg, whose histogram is 2646 buckets, so its iteration count is
+//
+//	20_000_000 / (2646 * 64) = 118  ->  clamped to the cap, 10
+//
+// and halving the budget only takes the raw quotient to 59, still past the
+// cap. The budget constant never reaches Scanjpeg at any ladder position. The
+// note's measurement halved the CAP as well (10 -> 5), which is a different
+// mutation and is what actually reddened that pin.
+//
+// WHY THIS HAS TO BE AN ABSOLUTE PIN AND NOT A RELATIVE GATE. Two relative
+// gates were measured and rejected before settling on a table of constants:
+//
+//   - "PSNR within X dB of pngquant's interpolated curve" is the existing
+//     acceptance test, and it cannot see this by construction. A shortened
+//     refinement makes the output SMALLER as well as worse, so it slides down
+//     pngquant's own rate-distortion curve rather than away from it -- the
+//     direction that test's own doc comment already names as the one its
+//     slack cannot catch.
+//   - "PSNR within X dB of the fully converged Lloyd limit from the same
+//     median-cut seed" also cannot separate them. Measured, deficit against a
+//     500-iteration limit, current budget vs halved: the worst point is
+//     Photo@32 at 0.7390 dB under BOTH, because 20_000_000 / (451597 * 32) is
+//     already 1 and the halved budget floors to 1 as well. The worst-case
+//     deficit is identical, so no threshold on it separates the two.
+//
+// What actually distinguishes the two builds is small and exact. Halving the
+// budget changes the iteration count only where the budget binds -- neither
+// floored at 1 nor clamped at 10 -- which on this corpus is six of these 24
+// rows, and the largest move it makes is 0.1297 dB (Gradient@32, 26.334065911
+// -> 26.204403899). Nothing with a threshold measured in tenths of a dB can
+// resolve that. The six rows it does move, and by how much:
+//
+//	Gradient@16  -0.011776593    Photo@4   -0.001076319
+//	Gradient@32  -0.129662012    Photo@8   -0.000068869
+//	Gradient@64  -0.017720223    Photo@16  -0.067126594
+//
+// The narrowest of those, Photo@8, is still 138x the tolerance below. Halving
+// the CAP instead (10 -> 5) moves nine rows, narrowest Scanjpeg@16 at
+// -0.000472147, 944x the tolerance.
+//
+// THE MARGIN AGAINST THE DO-NOTHING NULL. The null for this gate is a
+// QuantizePNG with the Lloyd refinement removed altogether -- median cut's raw
+// box means, no k-means. Measured: every one of the 24 rows fails. The
+// narrowest is Photo@2 at 0.001759832 dB, 3,520x the tolerance; the widest is
+// Scanjpeg@8 at 11.401666512 dB. The gate does not merely "barely" separate
+// correct from gutted -- the closest it comes is three orders of magnitude,
+// and its usual margin is six or seven.
+//
+// WHAT THIS TEST COSTS. It is a golden pin, so any deliberate change to which
+// colours QuantizePNG picks -- including an improvement -- fails it and has to
+// be re-measured. That is the intended price. The Lloyd budget is a calibrated
+// trade of CPU against quality, and the reason it could be halved unnoticed is
+// precisely that no one had written down what it buys.
+func TestQuantizePNGPSNRLadderPinned(t *testing.T) {
+	for _, pt := range quantizeLadder {
+		t.Run(fmt.Sprintf("%s/%d", pt.image, pt.colors), func(t *testing.T) {
+			img := ladderImage(t, pt.image)
+			out, err := QuantizePNG(img, pt.colors)
+			if err != nil {
+				t.Fatalf("QuantizePNG(%s, %d): %v", pt.image, pt.colors, err)
+			}
+			got := psnrRGB(img, decodePalette(t, out))
+			if math.Abs(got-pt.psnr) > 5e-7 {
+				t.Errorf("QuantizePNG(%s, %d) PSNR = %.9f dB; want %.9f dB (delta %+.9f) -- "+
+					"the quantizer no longer picks the colours this ladder was measured from",
+					pt.image, pt.colors, got, pt.psnr, got-pt.psnr)
+			}
+		})
+	}
+}
