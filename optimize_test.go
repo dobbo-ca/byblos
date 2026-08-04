@@ -23,14 +23,15 @@ import (
 // returns min(input, pdfcpu-optimized-output) and records which branch it
 // took on Provenance.Optimized. Measured directly against this corpus
 // (candidate = a document carrying a freshly-written Provenance, vs the raw
-// input) exactly ONE of the 27 non-malformed corpus documents takes the
+// input) exactly TWO of the 34 readable corpus documents take the
 // non-pass-through branch once the provenance-record cost is accounted for:
-// "dup-raster" (raw 2785 B, pdfcpu 1865 B, candidate 2143 B). Every other
-// document, including "indirect-kids" (whose raw pdfcpu.Optimize alone
+// "dup-raster" (raw 2785 B, pdfcpu 1865 B, candidate 2143 B) and "booklet"
+// (raw 12135 B, pdfcpu 10504 B, candidate 10783 B). Every other document,
+// including "indirect-kids" (whose raw pdfcpu.Optimize alone
 // shrinks it, 3042 -> 2895), flips back to pass-through once the record's own
-// weight is added (3042 vs candidate 3174). "dup-raster" is therefore the
-// only non-vacuous fixture available in this corpus for the non-pass-through
-// branch, and is used for every non-pass-through assertion below.
+// weight is added (3042 vs candidate 3174). "dup-raster" is the smaller of the
+// two and is used for every non-pass-through assertion below; "booklet" arrived
+// with byb-woy and is the reason this figure is no longer one.
 //
 // The candidate figures move by a few bytes with the record itself: the JSON
 // is stored hex-encoded in the Info dictionary, so every byte of it costs two,
@@ -44,9 +45,9 @@ import (
 // pdfcpu's validator rejects. That is the existing pdfdoc seam; no new
 // pdfcpu-facing surface was added to write this test.
 
-// nonPassThroughFixture is the one corpus document whose Optimize output is
-// smaller than its raw input even after the provenance record Optimize must
-// write is counted. See the package comment above for the measurement.
+// nonPassThroughFixture is a corpus document whose Optimize output is smaller
+// than its raw input even after the provenance record Optimize must write is
+// counted. See the package comment above for the measurement.
 const nonPassThroughFixture = "dup-raster"
 
 // passThroughFixture is a corpus document whose pdfcpu-optimized-plus-provenance
@@ -60,7 +61,7 @@ const passThroughFixture = "born-digital"
 // document, Optimize's output is never larger than its input. This holds by
 // construction once Optimize takes the smaller of the two candidates; an
 // implementation that always returns pdfcpu's rewrite (ignoring the size
-// policy) fails it on 26 of these 27 documents.
+// policy) fails it on 32 of these 34 readable corpus documents.
 func TestOptimizeNeverLargerThanInput(t *testing.T) {
 	for _, d := range corpus.All() {
 		if d.Name == "malformed" {
@@ -138,9 +139,9 @@ func TestOptimizePassThroughBranch(t *testing.T) {
 // input: Optimize must emit the smaller (pdfcpu-rewritten) bytes and record
 // Optimized="rewritten" in the result's provenance. An implementation that
 // always takes the pass-through branch (or never sets the field) fails
-// this. See the package comment for why dup-raster is the only corpus
-// document that reaches this branch once the provenance record's own cost
-// is counted.
+// this. See the package comment for which corpus documents reach this branch
+// once the provenance record's own cost is counted, and why dup-raster is the
+// one used here.
 func TestOptimizeNonPassThroughBranch(t *testing.T) {
 	in := corpusDoc(t, nonPassThroughFixture)
 
@@ -223,7 +224,7 @@ func TestOptimizeProvenanceSurvivesPassThrough(t *testing.T) {
 // pdfcpu read-validate-optimize-write pass, so its output is already at
 // pdfcpu's fixed point -- a SECOND Optimize call on WriteProvenance's own
 // output has nothing left to shrink and always takes the pass-through
-// branch (measured: every one of the 27 non-malformed corpus documents,
+// branch (measured: every one of the 34 readable corpus documents,
 // pre-loaded with a provenance record via WriteProvenance, takes
 // pass-through). DupRasterWithInfo sidesteps that by setting the Info entry
 // directly in the trailer, so the input has never been through pdfcpu at

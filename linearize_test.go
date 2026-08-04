@@ -111,7 +111,7 @@ type linCase struct {
 }
 
 // linearizeCases is the sweep every structural test runs over. It is
-// deliberately not just corpus.All(): 24 of the 28 corpus documents have a
+// deliberately not just corpus.All(): 29 of the 35 corpus documents have a
 // single page, where part 7 is empty, every per-page hint column is zero-width
 // and the first-page partition is trivially satisfied by ANY layout. A
 // linearizer that is correct only on one-page documents passes a corpus-only
@@ -1692,11 +1692,13 @@ func pdfimagesRows(t *testing.T, bin, name string, b []byte) int {
 // existing size policy sets for this feature. Optimize returns
 // min(input, rewritten) today (optimize.go). Linearization makes every document
 // in this corpus BIGGER -- measured on byblos's own output, +7 to +1007 bytes
-// against the input over the 27 readable documents (e.g. mixed 1965 -> 2949,
+// against the input over the 34 readable documents (e.g. mixed 1965 -> 2949,
 // born-digital 691 -> 1698, scan 1512 -> 2511; the +7 is dup-raster, the one
 // document pdfcpu's rewrite shrinks enough to nearly pay for the linearization).
-// Against the un-linearized candidate the cost is +649 to +1007 with no
-// exceptions. Under the unmodified rule a
+// Against the un-linearized candidate the cost is +649 to +2071 with no
+// exceptions, the ceiling being "booklet": the per-page hint columns are the
+// one part of the cost that scales with page count, and booklet is the only
+// document here with more than two pages. Under the unmodified rule a
 // fully working linearizer would hand back the un-linearized input every single
 // time, and every other test in this file would then fail loudly -- but a
 // careless fix (say, keeping the rule and quietly dropping the linearize
@@ -1934,13 +1936,16 @@ func TestSharedObjectsFixtureIsUsable(t *testing.T) {
 // share a font and an image that page 1 does not use, and page 1 has a font of
 // its own.
 //
-// That is the only shape that puts anything in Annex F PART 8 -- "objects shared
+// That is the shape that puts anything in Annex F PART 8 -- "objects shared
 // between later pages but not used by the first page" -- and part 8 is what
 // Table F.5 items 1 and 2, first_shared_obj and first_shared_offset, describe.
-// Measured with `qpdf --show-linearization` over byblos's own output for all 29
-// other documents in this sweep: first_shared_obj 0, first_shared_offset 0, and
-// nshared_total equal to nshared_first_page in every single one. Both fields
-// could therefore be filled with any value at all and nothing would notice.
+// It needs at least THREE pages, because PlanLayout counts an object's users
+// across pages 2..N only. Measured with `qpdf --show-linearization` over
+// byblos's own output when this fixture was written: every other document in
+// the sweep reported first_shared_obj 0, first_shared_offset 0, and
+// nshared_total equal to nshared_first_page, so both fields could have been
+// filled with any value at all and nothing would have noticed. The corpus's
+// "booklet" (byb-woy) is now a second document with a non-empty part 8.
 func laterPageSharedFixture() []byte {
 	const imgW, imgH = 48, 48
 	w := newFixtureWriter()
