@@ -15,6 +15,8 @@
 package pdfbuild
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -200,6 +202,16 @@ func deviceComponents(space string) (int, bool) {
 //     image (indexes past the end of the decoded row), so writing one would
 //     make a file this library's own read side crashes on, even though other
 //     readers accept it.
+//
+// FlateDecode additionally has its Data checked against the filter it names:
+// EncodedImage.Data is []byte and so is QuantizePNG's return, so a caller can
+// hand a whole PNG FILE to the most obvious "make a PDF" entry point and be
+// told nothing (byb-vq6 -- measured: BuildPDF returned nil, and the written
+// page failed to read back with "zlib: invalid header"). Parsing the zlib
+// header is the cheapest check that catches that entire class. It does not
+// catch a well-formed stream of the wrong dimensions, and deliberately does
+// not decompress: a page image is megabytes, and inflating every one of them
+// to verify a length would cost more than a build.
 func validatePage(p Page) error {
 	if !inRange(p.WidthPt) || !inRange(p.HeightPt) {
 		return fmt.Errorf("page box %gx%g is not in the representable range [%g, %g] points", p.WidthPt, p.HeightPt, minCoord, maxCoord)
@@ -220,6 +232,9 @@ func validatePage(p Page) error {
 		}
 		if _, err := colorSpaceObject(img.ColorSpace); err != nil {
 			return err
+		}
+		if _, err := zlib.NewReader(bytes.NewReader(img.Data)); err != nil {
+			return fmt.Errorf("FlateDecode: data does not decode under the filter it declares: %w", err)
 		}
 	case "DCTDecode":
 		if img.BPC != 8 {

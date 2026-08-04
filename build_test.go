@@ -775,6 +775,41 @@ func TestBuildPDFAcceptsIndexedImage(t *testing.T) {
 	}
 }
 
+// --- T12: Data that cannot decode under its own /Filter (byb-vq6) --------
+
+// EncodedImage.Data is []byte and QuantizePNG returns []byte, so nothing in
+// the type system stops a caller handing BuildPDF a whole PNG FILE and
+// declaring it FlateDecode -- and QuantizePNG and BuildPDF are the two most
+// obvious-looking entry points to wire together.
+//
+// Measured at 17e1936, before this test's fix: BuildPDF returned <nil> and
+// wrote 1043 bytes. zlib.NewReader over those Data bytes gives "zlib: invalid
+// header" (a PNG file starts with its 8-byte signature and IHDR, not a zlib
+// stream), and reading the written page back through byblos's own extractor
+// fails with "byblos/pdfdoc: rendering image 5: zlib: invalid header".
+// Silent at write, loud much later, is the worst place for that failure in an
+// archive.
+func TestBuildPDFRejectsFlateDataThatCannotDecode(t *testing.T) {
+	const w, h = 40, 24
+	pngFile, err := QuantizePNG(colorPattern(w, h), 16)
+	if err != nil {
+		t.Fatalf("QuantizePNG: %v", err)
+	}
+	var buf bytes.Buffer
+	err = BuildPDF(&buf, []BuildPage{{Image: EncodedImage{
+		Width: w, Height: h, BPC: 8,
+		ColorSpace: ColorSpace{Name: "DeviceRGB"},
+		Filter:     "FlateDecode",
+		Data:       pngFile,
+	}, DPI: 300}})
+	if err == nil {
+		t.Fatal("BuildPDF returned nil error for a PNG file declared as FlateDecode; want a rejection")
+	}
+	if !strings.Contains(err.Error(), "FlateDecode") {
+		t.Errorf("error = %v; want it to name the filter whose data does not decode", err)
+	}
+}
+
 // pdfimagesPNG runs pdfimages over pdf and decodes its one extracted image.
 func pdfimagesPNG(t *testing.T, pdf []byte) image.Image {
 	t.Helper()
