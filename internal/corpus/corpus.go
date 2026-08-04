@@ -17,6 +17,27 @@ import (
 	"strings"
 )
 
+// Count is how many documents All() returns; ReadableCount is how many of them
+// a PDF reader can open, which is every one except "malformed", the scan
+// truncated mid-body.
+//
+// THESE ARE THE SINGLE SOURCE OF THE TWO NUMBERS. Both are quoted in prose all
+// over the tree -- the design spec's section 8 acceptance row, and doc comments
+// in optimize.go, optimize_test.go, stamp_test.go and linearize_test.go -- and
+// every one of those said 27 through three successive documentation
+// reconciliations while the corpus grew, because nothing connected the prose to
+// the code (byb-a20).
+//
+// Adding a document is therefore two edits and no more: put it in All(), and
+// bump the constant here. TestAllMatchesTheDeclaredCount (this package) and
+// TestCorpusReadableCountIsWhatTheCorpusDeclares plus
+// TestCorpusCountClaimsMatchTheCorpus (root package, designspec_pin_test.go)
+// then fail until every quoted figure in the tree agrees.
+const (
+	Count         = 35
+	ReadableCount = 34
+)
+
 // Geometry shared by every generated document. US Letter at 72 points/inch.
 const (
 	PageWidthPt  = 612

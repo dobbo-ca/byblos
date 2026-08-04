@@ -52,6 +52,26 @@ func TestAllReturnsTheExpectedCorpus(t *testing.T) {
 	}
 }
 
+// TestAllMatchesTheDeclaredCount is the near half of byb-a20's corpus pin.
+//
+// wantNames above already fails when a document is added without being named,
+// so this is not about the corpus changing unnoticed. It is about Count, which
+// is the value the design spec's section 8 row and five doc comments are
+// checked against by TestCorpusCountClaimsMatchTheCorpus in the root package.
+// If Count could drift from All(), the prose would be pinned to a stale number
+// instead of to the corpus, which is the failure byb-a20 exists to stop.
+func TestAllMatchesTheDeclaredCount(t *testing.T) {
+	if got := len(All()); got != Count {
+		t.Errorf("All() returns %d documents; Count says %d. Count is what the design "+
+			"spec's corpus figures are pinned to: update it, then run the root package's "+
+			"TestCorpusCountClaimsMatchTheCorpus and fix every figure it lists.", got, Count)
+	}
+	if ReadableCount >= Count {
+		t.Errorf("ReadableCount = %d and Count = %d; the corpus carries a deliberately "+
+			"unreadable document, so ReadableCount must be the smaller", ReadableCount, Count)
+	}
+}
+
 // The corpus is a fixture. If it is not byte-stable, the committed poppler
 // goldens in Task 12 stop meaning anything.
 func TestGenerationIsDeterministic(t *testing.T) {

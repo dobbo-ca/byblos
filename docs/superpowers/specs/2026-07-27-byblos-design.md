@@ -259,6 +259,11 @@ func (b *Bitmap) Equal(o *Bitmap) bool
 
 func EncodeJBIG2Generic(b *Bitmap) ([]byte, error)   // lossless; see §5
 
+// Sauvola (byb-jj5) binarizes by local adaptive thresholding, producing the
+// Bitmap EncodeJBIG2Generic takes. Adaptive because a scan with a shadowed
+// gutter has no single global cutoff that works across the page.
+func Sauvola(img image.Image) (*Bitmap, error)
+
 func QuantizePNG(img image.Image, colors int) ([]byte, error)
 func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error)
 
@@ -296,6 +301,12 @@ type BuildPage struct {
 }
 
 func BuildPDF(w io.Writer, pages []BuildPage) error
+
+// ReplaceImages (byb-fp6) substitutes image streams in an EXISTING document,
+// keyed by 1-based page, leaving everything else as it was. It refuses an image
+// carrying /SMask, /Mask or /ImageMask, and writes no provenance: the caller
+// records what it applied, through RecordExtraction and WriteProvenance.
+func ReplaceImages(w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) error
 
 // --- capability errors ---
 
