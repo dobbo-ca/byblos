@@ -208,10 +208,21 @@ func deviceComponents(space string) (int, bool) {
 // hand a whole PNG FILE to the most obvious "make a PDF" entry point and be
 // told nothing (byb-vq6 -- measured: BuildPDF returned nil, and the written
 // page failed to read back with "zlib: invalid header"). Parsing the zlib
-// header is the cheapest check that catches that entire class. It does not
-// catch a well-formed stream of the wrong dimensions, and deliberately does
-// not decompress: a page image is megabytes, and inflating every one of them
-// to verify a length would cost more than a build.
+// header is the cheapest check that catches that entire class. For a
+// non-Indexed image it is the only one: it does not catch a well-formed
+// stream of the wrong dimensions, and deliberately does not decompress,
+// because a page image is megabytes and inflating every one of them to verify
+// a length would cost more than a build.
+//
+// An /Indexed image is the exception and does get inflated, because for it
+// the sample values are not just pixels, they are offsets into a table: a
+// sample larger than hival indexes past the end of the lookup, and pdfcpu
+// -- byblos's own reader -- does not bounds check it (writeImage.go's
+// renderIndexedRGBToPNG panics with "index out of range"). Having inflated
+// it, the check also notices an /Indexed stream that runs out before the rows
+// it declares, which is the same panic from the other side; that is a side
+// effect for /Indexed only, not a dimension check the other colour spaces get.
+// See maxSampleValue for what it costs.
 func validatePage(p Page) error {
 	if !inRange(p.WidthPt) || !inRange(p.HeightPt) {
 		return fmt.Errorf("page box %gx%g is not in the representable range [%g, %g] points", p.WidthPt, p.HeightPt, minCoord, maxCoord)
@@ -236,6 +247,15 @@ func validatePage(p Page) error {
 		if _, err := zlib.NewReader(bytes.NewReader(img.Data)); err != nil {
 			return fmt.Errorf("FlateDecode: data does not decode under the filter it declares: %w", err)
 		}
+		if img.ColorSpace.Name == "Indexed" {
+			max, err := maxSampleValue(img)
+			if err != nil {
+				return fmt.Errorf("FlateDecode: /Indexed data cannot be checked against its palette: %w", err)
+			}
+			if max > img.ColorSpace.HiVal {
+				return fmt.Errorf("FlateDecode: /Indexed data holds index %d, past the palette's hival %d", max, img.ColorSpace.HiVal)
+			}
+		}
 	case "DCTDecode":
 		if img.BPC != 8 {
 			return fmt.Errorf("DCTDecode: bits per component must be 8, got %d", img.BPC)
@@ -254,6 +274,237 @@ func validatePage(p Page) error {
 		return fmt.Errorf("filter %q is not supported", img.Filter)
 	}
 	return nil
+}
+
+// maxSampleValue returns the largest sample in img's FlateDecode data,
+// decoding it the way a reader does: inflate, undo the /DecodeParms
+// predictor, then unpack Width samples of BPC bits from each of Height rows.
+//
+// This is not a free ride on the zlib check above. That check parses the
+// two-byte header and stops; measured on a 2550x3300 4-bit indexed page (US
+// Letter at 300 DPI, the shape QuantizeIndexed produces, 18 KB compressed and
+// 4.2 MB inflated) it costs 0.0017 ms against 1.5 ms to inflate the same
+// stream in full. The lane that started emitting /Indexed declined this check
+// partly on the belief that the stream was already being inflated; it was
+// not.
+//
+// What it does cost, on that page: 6.8 ms and 45 KB, against 0.0036 ms for
+// the surrounding Write, which only copies an already-compressed stream
+// through. So this is very nearly the entire cost of writing an indexed page.
+// In context it is still small: deflating that same page at the compression
+// QuantizeIndexed uses takes 37.5 ms, five times more, and the caller has
+// already paid it before BuildPDF is ever reached. A 500-page archive spends
+// about 3.4 s here.
+//
+// It streams. One row is held plus the row before it (the PNG predictors
+// reference the row above), so the memory cost is a row, not a page, however
+// large the image.
+func maxSampleValue(img pdfdoc.EncodedImage) (int, error) {
+	zr, err := zlib.NewReader(bytes.NewReader(img.Data))
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = zr.Close() }()
+
+	predicted, err := pngPredicted(img)
+	if err != nil {
+		return 0, err
+	}
+	// ISO 32000-1 section 8.9.5.1: each image row begins on a byte boundary.
+	rowLen := (img.Width*img.BPC + 7) / 8
+
+	largest := 0
+	var cur, prev []byte
+	ft := make([]byte, 1)
+	for y := 0; y < img.Height; y++ {
+		if predicted {
+			if _, err := io.ReadFull(zr, ft); err != nil {
+				return 0, fmt.Errorf("row %d: reading the predictor's filter type: %w", y+1, err)
+			}
+		}
+		if cur == nil {
+			// The first row is read into a buffer that grows as the bytes
+			// arrive, so a Width x Height declaration far larger than the
+			// data behind it is reported as a short stream rather than
+			// allocated for. Once one row has proven the stream really is
+			// that wide, prev can be allocated outright.
+			var err error
+			if cur, err = readRow(zr, rowLen); err != nil {
+				return 0, fmt.Errorf("row %d: %w", y+1, err)
+			}
+			// PNG treats the row above row 1 as all zeroes.
+			prev = make([]byte, rowLen)
+		} else if _, err := io.ReadFull(zr, cur); err != nil {
+			return 0, fmt.Errorf("row %d: %w", y+1, err)
+		}
+		if predicted {
+			if err := unfilterPNGRow(ft[0], cur, prev); err != nil {
+				return 0, fmt.Errorf("row %d: %w", y+1, err)
+			}
+		}
+		if v := maxInRow(cur, img.BPC, img.Width); v > largest {
+			largest = v
+		}
+		// The reconstructed row becomes the row above; its predecessor is
+		// the buffer the next row is read into.
+		cur, prev = prev, cur
+	}
+	return largest, nil
+}
+
+// readRow reads exactly n bytes, growing its buffer as they arrive rather
+// than allocating n up front.
+func readRow(r io.Reader, n int) ([]byte, error) {
+	row, err := io.ReadAll(io.LimitReader(r, int64(n)))
+	if err != nil {
+		return nil, err
+	}
+	if len(row) != n {
+		return nil, fmt.Errorf("stream holds %d of the %d bytes the row needs", len(row), n)
+	}
+	return row, nil
+}
+
+// pngPredicted reports whether img's data carries the PNG predictors' per-row
+// filter type byte -- ISO 32000-1 table 10 gives /Predictor >= 10 to them,
+// and 1 or absent to "no prediction" -- and refuses parameters whose layout
+// maxSampleValue cannot reconstruct rather than guessing at one.
+func pngPredicted(img pdfdoc.EncodedImage) (bool, error) {
+	p := img.DecodeParms
+	if p == nil || p.Predictor <= 1 {
+		return false, nil
+	}
+	if p.Predictor < 10 {
+		return false, fmt.Errorf("/DecodeParms /Predictor %d (TIFF prediction) has no byblos producer", p.Predictor)
+	}
+	// ISO 32000-1 table 10 defaults: 1 colour, 8 bits, 1 column.
+	colors, bpc, columns := p.Colors, p.BitsPerComponent, p.Columns
+	if colors == 0 {
+		colors = 1
+	}
+	if bpc == 0 {
+		bpc = 8
+	}
+	if columns == 0 {
+		columns = 1
+	}
+	if colors != 1 || bpc != img.BPC || columns != img.Width {
+		return false, fmt.Errorf("/DecodeParms (%d colours, %d bits, %d columns) describes different rows than the image (1 colour, %d bits, %d columns)",
+			colors, bpc, columns, img.BPC, img.Width)
+	}
+	return true, nil
+}
+
+// unfilterPNGRow reconstructs one PNG-predicted row in place, given the
+// reconstructed row above it (ISO/IEC 15948 section 9.2, which ISO 32000-1
+// table 10 adopts wholesale for /Predictor >= 10).
+//
+// PNG's bpp -- the byte distance to the pixel on the left -- is 1 for every
+// row that reaches here: pngPredicted has already required /Colors 1, and BPC
+// is at most 8, so a "pixel" rounds up to a single byte.
+func unfilterPNGRow(ft byte, row, prev []byte) error {
+	switch ft {
+	case 0: // None
+	case 1: // Sub
+		for i := 1; i < len(row); i++ {
+			row[i] += row[i-1]
+		}
+	case 2: // Up
+		for i := range row {
+			row[i] += prev[i]
+		}
+	case 3: // Average
+		for i := range row {
+			var left byte
+			if i > 0 {
+				left = row[i-1]
+			}
+			row[i] += byte((int(left) + int(prev[i])) / 2)
+		}
+	case 4: // Paeth
+		for i := range row {
+			var left, upLeft byte
+			if i > 0 {
+				left, upLeft = row[i-1], prev[i-1]
+			}
+			row[i] += paethPredictor(left, prev[i], upLeft)
+		}
+	default:
+		return fmt.Errorf("predictor filter type %d is not one of PNG's 0..4", ft)
+	}
+	return nil
+}
+
+// paethPredictor is ISO/IEC 15948 section 9.4's PaethPredictor: of the byte
+// to the left (a), the byte above (b) and the byte above-left (c), the one
+// closest to a+b-c.
+func paethPredictor(a, b, c byte) byte {
+	p := int(a) + int(b) - int(c)
+	pa, pb, pc := absInt(p-int(a)), absInt(p-int(b)), absInt(p-int(c))
+	switch {
+	case pa <= pb && pa <= pc:
+		return a
+	case pb <= pc:
+		return b
+	}
+	return c
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// maxInRow returns the largest of the first width samples of bpc bits packed
+// into row, high-order bits first (ISO 32000-1 section 8.9.5.1). Bits past
+// the last sample are row padding, which a reader ignores, so they are not
+// considered here either.
+//
+// It walks bytes, not samples, because a sample-indexed loop needs a divide
+// and a modulo per sample to find the byte and the shift, and there are
+// Width x Height of them: at 8.4 megapixels that division was measured at
+// most of this check's whole cost.
+func maxInRow(row []byte, bpc, width int) int {
+	if bpc == 8 {
+		largest := 0
+		for _, b := range row[:width] {
+			if int(b) > largest {
+				largest = int(b)
+			}
+		}
+		return largest
+	}
+	perByte := 8 / bpc
+	full := width / perByte
+	largest := 0
+	for _, b := range row[:full] {
+		if v := maxInByte(b, bpc, perByte); v > largest {
+			largest = v
+		}
+	}
+	// The last byte of a row whose width is not a whole number of bytes is
+	// only partly samples; the rest is padding.
+	if rem := width % perByte; rem > 0 {
+		if v := maxInByte(row[full], bpc, rem); v > largest {
+			largest = v
+		}
+	}
+	return largest
+}
+
+// maxInByte returns the largest of the first n samples of bpc bits in b,
+// high-order bits first.
+func maxInByte(b byte, bpc, n int) int {
+	mask := byte(1<<bpc - 1)
+	largest := 0
+	for i := 0; i < n; i++ {
+		if v := int(b >> (8 - bpc*(i+1)) & mask); v > largest {
+			largest = v
+		}
+	}
+	return largest
 }
 
 // decodeParmsDict renders /DecodeParms, or "" when there is nothing to say.
