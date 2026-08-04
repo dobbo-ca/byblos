@@ -60,24 +60,31 @@ Kleio needs it in exactly one place, and it is not compression:
   content-stream walk that decides which placement is the page.
   Measured (`byb-divert`, 2026-07-28): genuinely composite pages are **1.03% of
   29,779 scan-shaped pages**, ~1.5% counting blank-base MRC the geometric test
-  cannot see. Do not confuse this with Byblos's own divert rate over *all* pages
-  of an archive sample — 85.73% at 5fbf37d — which is dominated by pages holding
-  no image at all (`no-image`, 105,049 of 134,483 diverts) and does not measure
-  this premise.
-- **The one exception is the thumbnail.** `validate.go:338` calls `Thumbnail`
+  cannot see. Do not confuse this with Byblos's own divert rate, which is
+  measured on a *different sample*: 85.73% over all 156,872 pages of a
+  four-corpus mix that is 78.8% `govdocs1` — which `byb-divert` records is not a
+  scanned corpus at all (3.7% scan-shaped, Acrobat Distiller end to end). That
+  rate is dominated by pages holding no image at all (`no-image`, 105,049 of
+  134,483 diverts); excluding `govdocs1` it is 43.71%. It does not measure this
+  premise.
+- **The one exception is the thumbnail.** (File:line references in this bullet
+  are `kleio/internal/pipeline/` at `e63ffa2`.) `validate.go:338` calls `Thumbnail`
   inside `finalize` with no born-digital guard, so every finalized document has
   page 1 rasterized to a 400px long edge by `pdftoppm`. Nothing else in Kleio
   rasterizes a born-digital page: `Decide` returns `VerdictPass` for born-digital
   before any other test (`gate.go:601-602`), so the 150 dpi gate render
   (`validate.go:295`, guarded by `if !j.BornDigital` at `:219`) and the 1024px
   judge render (`validate.go:243`, reached only on `VerdictAmbiguous`) never see
-  one. Both of those rasterize only scanned pages, which `ExtractPageRaster`
-  already handles.
+  one. Both of those rasterize only scanned pages — the population
+  `ExtractPageRaster` targets, though it still diverts the JBIG2 and JPX rasters
+  it cannot decode (`byb-riy`), which no renderer would fix.
 
-So two of `poppler`'s four roles in Kleio collapse to "get the embedded raster
-off a page" (`pdfimages`) and "read page geometry" (`pdfinfo`). The other two —
-`pdftotext` word extraction and `pdftoppm` thumbnail rendering — are open scope
-decisions; see `byb-lez` and `byb-0gm`.
+So two of `poppler`'s four roles in Kleio collapse to "list embedded image
+geometry to detect born-digital" (`pdfimages -list`, its only invocation —
+`tools.go:341`, inside `HasFullPageImage`) and "read page count and page
+geometry" (`pdfinfo`). The other two — `pdftotext` word extraction and
+`pdftoppm` thumbnail rendering — are open scope decisions; see `byb-lez` and
+`byb-0gm`.
 
 ### Amendment 2026-08-03: Byblos renders (byb-0gm), fidelity target unsettled
 
@@ -258,7 +265,7 @@ func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error)
 // QuantizeIndexed (byb-96p) is QuantizePNG's embeddable variant: same core,
 // but it returns a PDF /Indexed /FlateDecode image rather than a PNG file.
 // NOTE: BuildPDF does not accept it — internal/pdfbuild rejects the Indexed
-// colour space — so at 3fa75a8 it has no exported route into a PDF. See byb-fp6.
+// colour space — so it has no exported route into a PDF today. See byb-5jy and byb-fp6.
 func QuantizeIndexed(img image.Image, colors int) (EncodedImage, error)
 
 // --- assembly ---
@@ -470,7 +477,7 @@ oracles**. They never ship and Kleio never depends on them.
 | `EncodeJBIG2Generic` | round-trip through a JBIG2 *decoder*, asserting bit-identical output — this is the definitive lossless check, and it does not need `jbig2enc` |
 | `QuantizePNG`, `Downsample` | size and PSNR bounds against `pngquant`/`ghostscript` output |
 | `StampTextLayer` | `pdftotext` on the result must return the text that was stamped, in reading order |
-| `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input — suspended for `Linearize: true`: over the 27 readable corpus documents *as the corpus then stood* (it is now 32 readable of 33, and this range has not been re-measured) it runs +7 to +1007 B against the input (usually but not always larger; the rewrite alone can shrink a document more than linearizing costs), and +649 to +1007 B with no exceptions against the same document rewritten and not linearized (see §4/§6 `Provenance`) |
+| `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input — suspended for `Linearize: true`: over the 27 readable corpus documents *as the corpus then stood* (it is now 32 readable of 33; the bounds below have not been re-measured, but at 3fa75a8 every one of the 32 grows) it runs +7 to +1007 B against the input (the +7 is `dup-raster`, the one document pdfcpu's rewrite shrinks enough to nearly pay for the linearization), and +649 to +1007 B with no exceptions against the same document rewritten and not linearized (see §4/§6 `Provenance`) |
 
 The JBIG2 oracle deserves emphasis: because we encode losslessly, correctness is
 verifiable by decoding our own output and comparing bitmaps. No reference encoder

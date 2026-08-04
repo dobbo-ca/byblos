@@ -35,11 +35,11 @@ rasterized at all. Pages that are neither are detected and reported
   symbol matching. Lossy JBIG2 can silently substitute characters in scanned
   documents — the 2013 Xerox scanner defect — and produces output that looks
   *cleaner* while being wrong. See [FUTURE.md](FUTURE.md) for the full reasoning.
-- **Capability-based provenance.** Every output records what each page actually
-  received, and claims only the capabilities that call exercised — never the
-  whole build's, which would suppress a later version's upgrade check. So a
-  later version can identify exactly which stored documents would benefit from
-  re-processing, and skip the ones that wouldn't.
+- **Capability-based provenance.** Every output `Optimize` rewrites records what
+  each page actually received, and claims only the capabilities that call
+  exercised — never the whole build's, which would suppress a later version's
+  upgrade check. So a later version can identify exactly which stored documents
+  would benefit from re-processing, and skip the ones that wouldn't.
 - **Policy stays with the caller.** Byblos exposes primitives — `Inspect`,
   `ExtractPageRaster`, `Optimize`, `StampTextLayer`, `BuildPDF`, and the image
   codecs. Preset ladders and validation rules belong to the application.
