@@ -636,6 +636,33 @@ func TestReplaceImageRefusesWhatItCannotDoCorrectly(t *testing.T) {
 		}
 	})
 
+	// No corpus document carries a /Mask image, so the precondition is
+	// synthesized the same way "direct object" below synthesizes its own:
+	// by setting the one field ReplaceImage's refusal switch inspects.
+	t.Run("mask", func(t *testing.T) {
+		d := openCorpus(t, "scan")
+		id := firstImage(t, d, 1)
+		info := d.(*doc).images[id]
+		info.Mask = true
+		d.(*doc).images[id] = info
+		if err := d.ReplaceImage(id, good); err == nil {
+			t.Error("replacing a /Mask image succeeded")
+		}
+	})
+
+	// internal/corpus's jbig2 note already flags that no fixture carries an
+	// /ImageMask stencil; synthesize the precondition the same way.
+	t.Run("imagemask", func(t *testing.T) {
+		d := openCorpus(t, "scan")
+		id := firstImage(t, d, 1)
+		info := d.(*doc).images[id]
+		info.ImageMask = true
+		d.(*doc).images[id] = info
+		if err := d.ReplaceImage(id, good); err == nil {
+			t.Error("replacing an /ImageMask image succeeded")
+		}
+	})
+
 	// ISO 32000-1 7.3.8.1: every stream shall be an indirect object. There is
 	// no corpus document with a direct image stream, so the precondition is
 	// synthesized the same way a real one would present it to ReplaceImage:
