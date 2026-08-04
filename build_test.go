@@ -635,14 +635,26 @@ func TestBuiltPDFPixelsMatchPdfimages(t *testing.T) {
 
 	dct, wantDCT := jpegImage(t, w, h)
 
+	// The indexed case is the one where a foreign decoder earns the most: a
+	// /ColorSpace ARRAY carries the palette itself, so a wrong base, a wrong
+	// hival or a mis-encoded lookup is a whole-image colour error that
+	// ExtractPageRaster (pdfcpu) and poppler would have to get wrong in the
+	// same way to hide.
+	indexedSrc := colorPattern(w, h)
+	indexed, err := QuantizeIndexed(indexedSrc, 16)
+	if err != nil {
+		t.Fatalf("QuantizeIndexed: %v", err)
+	}
+
 	compared := 0
 	for name, tc := range map[string]struct {
 		img       EncodedImage
 		want      image.Image
 		tolerance int
 	}{
-		"flate": {flate, wantFlate, 0},
-		"dct":   {dct, wantDCT, dctTolerance},
+		"flate":   {flate, wantFlate, 0},
+		"dct":     {dct, wantDCT, dctTolerance},
+		"indexed": {indexed, quantizePNGPalette(t, indexedSrc, 16), 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := buildOrFatal(t, []BuildPage{{Image: tc.img, DPI: 300}})
