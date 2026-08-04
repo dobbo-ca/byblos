@@ -101,10 +101,11 @@ func exportedDecls(t *testing.T, name, src string) map[string]string {
 				switch s := s.(type) {
 				case *ast.TypeSpec:
 					if s.Name.IsExported() {
+						k := kind
 						if s.Assign.IsValid() {
-							kind = "alias"
+							k = "alias"
 						}
-						out[s.Name.Name] = kind
+						out[s.Name.Name] = k
 					}
 				case *ast.ValueSpec:
 					for _, n := range s.Names {
@@ -129,6 +130,28 @@ func exportedDecls(t *testing.T, name, src string) map[string]string {
 		}
 	}
 	return out
+}
+
+// TestExportedDeclsGroupedAliasDoesNotLeakKind guards against a grouped
+// GenDecl -- `type ( Alias = X; Real struct{...} )` -- where an alias spec
+// earlier in the block mutates the kind used for a later, non-alias spec.
+// exportedDecls computed "kind" once per GenDecl and reassigned it to "alias"
+// inside the per-spec loop, so every later TypeSpec in the same block
+// inherited "alias" even though it was a plain type declaration.
+func TestExportedDeclsGroupedAliasDoesNotLeakKind(t *testing.T) {
+	const src = `package p
+type (
+	Alias = int
+	Real  struct{ X int }
+)
+`
+	got := exportedDecls(t, "grouped.go", src)
+	if got["Alias"] != "alias" {
+		t.Errorf(`got["Alias"] = %q, want "alias"`, got["Alias"])
+	}
+	if got["Real"] != "type" {
+		t.Errorf(`got["Real"] = %q, want "type"`, got["Real"])
+	}
 }
 
 func receiverTypeName(fl *ast.FieldList) string {
@@ -290,8 +313,8 @@ func TestCorpusCountClaimsMatchTheCorpus(t *testing.T) {
 	//   plans      docs/superpowers/plans holds dated implementation records,
 	//              including bd notes quoting the corpus size on the day they
 	//              were written. Those are history and must not be rewritten.
-	//   corpus     testdata/corpus is generated output (make corpus), gitignored.
-	skipDir := map[string]bool{".git": true, "plans": true, "corpus": true}
+	//   testdata/corpus  generated output (make corpus), gitignored.
+	skipDir := map[string]bool{".git": true, "plans": true}
 
 	claims := 0
 	files := map[string]bool{}
@@ -300,7 +323,7 @@ func TestCorpusCountClaimsMatchTheCorpus(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if skipDir[d.Name()] {
+			if skipDir[d.Name()] || path == "testdata/corpus" {
 				return fs.SkipDir
 			}
 			return nil
