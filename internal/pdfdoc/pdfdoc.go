@@ -270,17 +270,75 @@ func (d *doc) Page(n int) (p *Page, err error) {
 		p.CropBox = rectOf(inh.CropBox)
 	}
 
-	// A page with no /Contents is legal and empty. Check the dictionary rather
-	// than matching on pdfcpu's error text: PageContent returns a
-	// github.com/pkg/errors value that errors.Is cannot match against a sentinel.
+	// A page with no /Contents is legal and empty, and so is a page whose
+	// /Contents is there and resolves to zero bytes: an ordinary blank page,
+	// which is a duplex scan's back side, a section separator, or a form page
+	// left deliberately empty. pdfcpu reports both with model.ErrNoContent.
+	//
+	// Guarding on the presence of the KEY alone -- which is all this did before
+	// byb-cqs -- makes the second case an error and, because Inspect walks every
+	// page, fails the WHOLE document over one page that contains nothing.
+	// byb-uxb measured that against poppler over 200 govdocs1 files: six of the
+	// seven disagreements were this, 3% of the sample lost outright.
 	if _, ok := pd.Find("Contents"); ok {
 		c, err := xt.PageContent(pd, n)
-		if err != nil {
+		switch {
+		case errors.Is(err, model.ErrNoContent):
+			if err := d.verifyEmptyContent(pd["Contents"]); err != nil {
+				return nil, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
+			}
+		case err != nil:
 			return nil, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
+		default:
+			p.Content = c
 		}
-		p.Content = c
 	}
 	return p, nil
+}
+
+// verifyEmptyContent reports the distinction pdfcpu does not: whether a page
+// that came back as model.ErrNoContent is BLANK or BROKEN.
+//
+// PageContent returns that sentinel when the page's content streams
+// concatenate to zero bytes, which is exactly what a legal blank page looks
+// like. But under the relaxed validation mode Open uses, decodeContentStream
+// swallows a "flate: corrupt input before offset" failure -- it logs "skipped"
+// and returns nil, leaving that stream's content empty -- so a shredded
+// content stream arrives here as the identical sentinel and the identical zero
+// bytes. Keying the blank-page decision on the sentinel alone would trade a
+// false failure for a silent one, and a page reported as valid and empty when
+// its content did not decode is the worse of the two.
+//
+// So the streams are decoded again here, on copies, purely to read the error
+// pdfcpu discarded. Their bytes are of no interest: PageContent has already
+// established there are none.
+func (d *doc) verifyEmptyContent(contents types.Object) error {
+	xt := d.ctx.XRefTable
+	o, err := xt.Dereference(contents)
+	if err != nil {
+		return err
+	}
+	// /Contents is one stream or an array of them (ISO 32000-1 table 30).
+	objs := types.Array{o}
+	if arr, ok := o.(types.Array); ok {
+		objs = arr
+	}
+	for _, obj := range objs {
+		sd, err := xt.Dereference(obj)
+		if err != nil {
+			return err
+		}
+		// A null entry, or a shape PageContent already rejected with an error
+		// other than ErrNoContent. Neither is this function's to judge.
+		s, ok := sd.(types.StreamDict)
+		if !ok {
+			continue
+		}
+		if err := s.Decode(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addScope appends a resource scope and returns its handle.
