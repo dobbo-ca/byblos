@@ -86,7 +86,7 @@ geometry" (`pdfinfo`). The other two — `pdftotext` word extraction and
 `pdftoppm` thumbnail rendering — are open scope decisions; see `byb-lez` and
 `byb-0gm`.
 
-### Amendment 2026-08-03: Byblos renders (byb-0gm), fidelity target unsettled
+### Amendment 2026-08-03: Byblos renders (byb-0gm), at thumbnail fidelity
 
 `byb-0gm` decided option (c), **Byblos renders**, against this section's argument
 and against that bead's own recommendation. This section previously asserted
@@ -98,20 +98,20 @@ the gate render never runs on a born-digital document, so it requires no
 renderer. `byb-0gm` also cites `gate.go:248` for it, which is a comment; the call
 is `validate.go:295`.
 
-**The fidelity target is deliberately not settled here.** The two candidates are
-different projects, and the choice should be made explicitly rather than
-inherited from a spec edit:
+**The fidelity target is thumbnail fidelity**, decided 2026-08-04 and recorded on
+`byb-0gm`. The two candidates were different projects, so the choice was made
+explicitly rather than inherited from a spec edit:
 
-| target | what it must render | why you might pick it |
+| target | what it must render | status |
 |---|---|---|
-| **Thumbnail fidelity** | page 1 only, 400px long edge; recognisable rather than faithful — no colour management, no transparency groups | It is the only thing Kleio calls today, and it is bounded by a consumer that already exists. |
-| **Archival fidelity** | any page at any DPI, faithful enough to store | Only this justifies the "larger than Cadmus" cost argument above. Nothing in Kleio asks for it. |
+| **Thumbnail fidelity** | page 1 only, 400px long edge; recognisable rather than faithful — no colour management, no transparency groups | **Chosen.** It is the only thing Kleio calls today, and it is bounded by a consumer that already exists. |
+| **Archival fidelity** | any page at any DPI, faithful enough to store | Not chosen, and not a later phase of `byb-0gm`. Only this justifies the "larger than Cadmus" cost argument above. Nothing in Kleio asks for it. |
 
-The "larger than Cadmus" argument applies to the second row, not the first. It is
-not an objection to a thumbnail renderer, and a thumbnail renderer is not a
-commitment to an archival one. Until this table resolves to a single row, the §1
-non-goal and `FUTURE.md`'s "A PDF renderer" entry stand as written: both describe
-an archival renderer, which remains deferred.
+The "larger than Cadmus" argument applies to the second row, not the first, so it
+is **not** an objection to the renderer `byb-0gm` will build — and equally, that
+renderer is not a commitment to an archival one. The §1 non-goal and `FUTURE.md`'s
+"A PDF renderer" entry both stand as written: each describes the archival
+renderer, which remains deferred on the measured evidence above.
 
 The residual case — a page with tiled images, a vector overlay, or mixed
 content — is *detected*, not rendered. `ExtractPageRaster` returns

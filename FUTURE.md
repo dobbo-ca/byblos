@@ -146,8 +146,10 @@ renderer described in *this entry* — the one that would rescue
 gate rather than passing it**: it is driven by Kleio rasterizing every
 born-digital document for a 400px thumbnail, which is a different page population
 and a different job from anything this entry describes. Do not read `byb-0gm` as
-having opened this gate. See design spec §2's 2026-08-03 amendment, where the
-fidelity question that separates the two is still open.
+having opened this gate. Design spec §2's amendment settles `byb-0gm` at
+**thumbnail fidelity** — page 1, 400px, recognisable rather than faithful — which
+is what keeps the two apart: the renderer *this entry* describes is the archival
+one, and it stays deferred.
 
 **Upgrade path:** documents whose provenance records `diverted: not-single-raster`,
 or any page whose provenance records `dropped_annots > 0` (byb-b5.1): rendering
