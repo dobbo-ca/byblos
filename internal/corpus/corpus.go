@@ -171,6 +171,7 @@ func All() []Doc {
 		{"mrc", "bitonal page-covering base plus a smaller non-bitonal patch: must divert", mrc()},
 		{"mrc-inset-base", "the MRC shape with the placements Google Books really emits: the base falls short of the page box on every edge", mrcInsetBase()},
 		{"indirect-kids", "page tree whose /Kids is an indirect reference: both pages must still read", indirectKids()},
+		{"blank-page", "two pages: a scan, then a page whose /Contents decodes to zero bytes -- one blank page must not fail the document", blankPage()},
 		{"malformed", "the scan document truncated mid-body", malformed()},
 	}
 }
@@ -984,6 +985,105 @@ func indirectKids() []byte {
 	w.fill(res2, fmt.Sprintf("<< /XObject << /Im0 %d 0 R >> >>", img2))
 	w.fillStream(cont2, "", []byte(body))
 	w.fillStream(img2, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 6))
+	return w.finish(cat)
+}
+
+// blankPage is a two-page document whose second page is blank in the way six
+// of 200 govdocs1 files are blank (byb-uxb; byb-cqs). Page 2's /Contents is a
+// perfectly well-formed /FlateDecode stream whose payload decodes to ZERO
+// bytes -- the shape dug out of govdocs1/750088.pdf p2, where object 3 is
+// << /Filter /FlateDecode /Length 9 >> and those nine bytes inflate to
+// nothing. Nothing on the page, nothing wrong with the page: a duplex
+// scanner's back side, a section separator, a deliberately blank form page.
+// poppler reads all six of those files without complaint.
+//
+// Page 1 carries the ordinary page-covering scan so the document measures the
+// real cost. pdfcpu's PageContent reports a zero-byte content stream with
+// model.ErrNoContent, so a reader that takes that for a failure loses page 1
+// as well -- the whole document, over a page that contains nothing at all.
+func blankPage() []byte {
+	w := newWriter()
+	cat, pages := w.reserve(), w.reserve()
+	p1, c1, img := w.reserve(), w.reserve(), w.reserve()
+	p2, c2 := w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R %d 0 R] /Count 2 >>", p1, p2))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img, c1))
+	w.fillStream(c1, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	w.fill(p2, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, c2))
+	// Flate-compressed emptiness: a real stream, a real /Length, no bytes out.
+	w.fillStream(c2, "", nil)
+	return w.finish(cat)
+}
+
+// CorruptContentStreamPayload is the nine bytes blankPage's empty content
+// stream would carry if it had been damaged in transit: a valid zlib header
+// (0x78 0x9c, exactly what compress/zlib writes) followed by a deflate block
+// whose type bits are the reserved value 11. zlib.NewReader accepts the
+// header, and the inflate then fails with "flate: corrupt input before offset
+// N".
+//
+// That prefix is load-bearing. pdfcpu's decodeContentStream swallows precisely
+// that error under the relaxed validation mode pdfdoc.Open uses -- it logs
+// "skipped" and returns nil -- which leaves the stream's content empty, and
+// PageContent then reports the page with the SAME model.ErrNoContent it uses
+// for a legitimately blank one. A shredded page and an empty page arrive at
+// pdfdoc as the identical error.
+var CorruptContentStreamPayload = []byte{0x78, 0x9c, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}
+
+// CorruptContentStream is blankPage with page 2's zero-byte content stream
+// replaced by CorruptContentStreamPayload: the same /FlateDecode dictionary,
+// the same zero bytes of usable content, and a stream that did not decode.
+//
+// CorruptContentStreamInArray is the same damage with page 2's /Contents
+// written as the array form ISO 32000-1 table 30 also permits -- an intact
+// empty stream first, the corrupt one second. Real producers write /Contents
+// as an array routinely (every incremental append does), and a reader that
+// checks only the first entry, or only handles the single-stream form, gets
+// the identical zero bytes and the identical model.ErrNoContent from pdfcpu
+// while being wrong about the page.
+//
+// Neither is in All(). poppler reads both files as two pages and simply
+// renders nothing for page 2, so a document that must make Byblos report a
+// damaged page cannot also satisfy TestInspectAgreesWithPoppler -- the
+// divergence is the point of the fixture. Same reasoning, same treatment as
+// MixedPageTwoUnreadable.
+func CorruptContentStream() []byte { return corruptContentStream(false) }
+
+// CorruptContentStreamInArray is CorruptContentStream with page 2's /Contents
+// written as an array. See CorruptContentStream.
+func CorruptContentStreamInArray() []byte { return corruptContentStream(true) }
+
+func corruptContentStream(inArray bool) []byte {
+	w := newWriter()
+	cat, pages := w.reserve(), w.reserve()
+	p1, c1, img := w.reserve(), w.reserve(), w.reserve()
+	p2, c2 := w.reserve(), w.reserve()
+	contents := fmt.Sprintf("%d 0 R", c2)
+	empty := 0
+	if inArray {
+		empty = w.reserve()
+		contents = fmt.Sprintf("[%d 0 R %d 0 R]", empty, c2)
+	}
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R %d 0 R] /Count 2 >>", p1, p2))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img, c1))
+	w.fillStream(c1, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	w.fill(p2, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << >> /Contents %s >>",
+		pages, PageWidthPt, PageHeightPt, contents))
+	w.fillRawStream(c2, "/Filter /FlateDecode", CorruptContentStreamPayload)
+	if empty != 0 {
+		w.fillStream(empty, "", nil)
+	}
 	return w.finish(cat)
 }
 

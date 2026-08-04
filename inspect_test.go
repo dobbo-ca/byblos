@@ -227,6 +227,56 @@ func TestInspectMalformedReturnsAnError(t *testing.T) {
 	}
 }
 
+// One blank page must not fail the whole document.
+//
+// byb-uxb ran Inspect against pdfinfo over 200 govdocs1 files and got seven
+// disagreements; six were this, and none of the seven was a wrong number —
+// every one was Byblos erroring where poppler succeeds. The page reads as
+// what it is: a valid box, no images, no text. See byb-cqs.
+func TestInspectBlankPageDoesNotFailTheDocument(t *testing.T) {
+	pages := inspect(t, "blank-page")
+	if len(pages) != 2 {
+		t.Fatalf("got %d pages; want 2", len(pages))
+	}
+	if len(pages[0].Images) != 1 || pages[0].Images[0].Bounds != fullPage {
+		t.Errorf("page 1 = %+v; want one page-covering placement", pages[0].Images)
+	}
+	blank := pages[1]
+	if blank.Index != 2 {
+		t.Errorf("Index = %d; want 2", blank.Index)
+	}
+	if blank.Bounds != fullPage {
+		t.Errorf("blank page Bounds = %v; want %v", blank.Bounds, fullPage)
+	}
+	if len(blank.Images) != 0 {
+		t.Errorf("blank page Images = %+v; want none", blank.Images)
+	}
+	if blank.TextChars != 0 {
+		t.Errorf("blank page TextChars = %d; want 0", blank.TextChars)
+	}
+}
+
+// A content stream that did not decode is not a blank page, and Inspect must
+// still refuse it. Byblos is deliberately less permissive than poppler here —
+// poppler renders nothing for the page and moves on — because reporting a
+// damaged page as empty is a silent wrong answer, which is the failure mode
+// byb-cqs's fix must not introduce while removing a loud one.
+func TestInspectCorruptContentStreamIsStillAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"one stream", corpus.CorruptContentStream()},
+		{"array of streams", corpus.CorruptContentStreamInArray()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Inspect(bytes.NewReader(tc.data)); err == nil {
+				t.Fatal("Inspect(corrupt content stream): want an error, got nil")
+			}
+		})
+	}
+}
+
 // Bitonal is the field B2's JBIG2 path selects on, so it needs a document that
 // makes it true, not only ones that make it false.
 func TestInspectReportsBitonalForOneBitImages(t *testing.T) {

@@ -445,6 +445,89 @@ func TestPageWithoutContentsIsEmptyNotAnError(t *testing.T) {
 	}
 }
 
+// A page whose /Contents stream decodes to zero bytes is blank, not broken.
+// The key is there, the stream is there, the stream is well-formed, and it
+// inflates to nothing — a duplex scanner's back side. pdfcpu's PageContent
+// reports it with model.ErrNoContent, and taking that for a failure is what
+// byb-uxb measured costing 3% of a 200-document govdocs1 sample: the whole
+// file, over a page with nothing on it. See byb-cqs.
+func TestPageWhoseContentsDecodesToNothingIsBlankNotAnError(t *testing.T) {
+	d := open(t, "blank-page")
+	if got := d.PageCount(); got != 2 {
+		t.Fatalf("PageCount() = %d; want 2", got)
+	}
+	p, err := d.Page(2)
+	if err != nil {
+		t.Fatalf("Page(2) on a blank page: want no error, got %v", err)
+	}
+	if len(p.Content) != 0 {
+		t.Errorf("Content = %q; want empty", p.Content)
+	}
+	// A blank page still has geometry. Returning it is the whole difference
+	// between "this page is empty" and "this page is unreadable".
+	want := Rect{0, 0, corpus.PageWidthPt, corpus.PageHeightPt}
+	if p.MediaBox != want {
+		t.Errorf("MediaBox = %+v; want %+v", p.MediaBox, want)
+	}
+	if p.CropBox != want {
+		t.Errorf("CropBox = %+v; want %+v", p.CropBox, want)
+	}
+	// And the page that is NOT blank must still read. This is the assertion
+	// that measures the bug's real cost: one blank page took the document.
+	p1, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) alongside a blank page: want no error, got %v", err)
+	}
+	if !strings.Contains(string(p1.Content), "/Im0 Do") {
+		t.Errorf("page 1 Content = %q; want the scan", p1.Content)
+	}
+}
+
+// The other half of the same decision, and the one that makes it a decision:
+// a content stream that did not decode is NOT a blank page and must still be
+// an error.
+//
+// pdfcpu gives this package no help here. Under the relaxed validation mode
+// Open uses, decodeContentStream swallows a "flate: corrupt input before
+// offset" failure and leaves the stream empty, so PageContent reports a
+// shredded page with the SAME model.ErrNoContent it reports a blank one with.
+// A fix that keyed on that sentinel alone would trade a false failure for a
+// silent one: page 2 would come back as valid, empty, and wrong.
+// Both /Contents shapes are covered because both reach this seam identically
+// and each has its own way of being read wrong: the array form is what a
+// reader that stops at the first entry, or that never expands the array at
+// all, reports blank while the damage sits in the second stream.
+func TestPageWithACorruptContentStreamIsStillAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"one stream", corpus.CorruptContentStream()},
+		{"array of streams", corpus.CorruptContentStreamInArray()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := Open(bytes.NewReader(tc.data))
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			p, err := d.Page(2)
+			if err == nil {
+				t.Fatalf("Page(2) on a corrupt content stream: want an error, got Content = %q", p.Content)
+			}
+			if !strings.Contains(err.Error(), "page 2 content") {
+				t.Errorf("error = %v; want it to name page 2's content", err)
+			}
+			// The failure must be confined to the damaged page: this fixture
+			// differs from the blank-page one in nine bytes, so a
+			// document-wide rejection here would mean the fix had simply moved
+			// the over-reaction.
+			if _, err := d.Page(1); err != nil {
+				t.Errorf("Page(1) error = %v; want the undamaged page to still read", err)
+			}
+		})
+	}
+}
+
 func pad10(n int) string {
 	s := itoa(n)
 	for len(s) < 10 {
