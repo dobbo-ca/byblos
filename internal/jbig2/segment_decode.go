@@ -39,6 +39,18 @@ var ErrUnsupportedFeature = errors.New("jbig2: unsupported feature")
 //
 // 2^29 pixels is 67 MB packed. A 1200-dpi A4 page is 279 million pixels, so
 // this admits every plausible scan and rejects the absurd.
+//
+// It is applied THREE times, and the third is the one that is easy to leave
+// out. One header driving one allocation is bounded by the per-region check in
+// parseRegionInfo, and the page those regions resolve to is bounded by the
+// check in DecodeEmbeddedStream -- but a stream may carry any number of
+// regions, each individually legal, every one of them decoded and RETAINED
+// before the page is composed. So the same constant also bounds their SUM, read
+// from the headers, before the first region is decoded. Without that third use
+// the cost is linear in segment count at 37 bytes per region: 326 bytes of
+// input measured 38.7 seconds and 512 MiB before erroring, and 40 KB would ask
+// for 64 GiB. A decoder reached from an untrusted PDF (extract.go) cannot leave
+// that open.
 const maxRegionPixels = 1 << 29
 
 // segment is one parsed T.88 7.2 segment header together with the slice of the
@@ -337,6 +349,30 @@ func DecodeEmbeddedStream(s []byte) (*Bitmap, error) {
 	}
 	if len(regions) == 0 {
 		return nil, errors.New("jbig2: stream has no immediate generic region segment")
+	}
+
+	// A running pixel budget over every region in the stream, spent from the
+	// HEADERS before any region is decoded. Each region and the resolved page
+	// are already capped one at a time; nothing caps how many regions a stream
+	// may carry, and every one of them is decoded and held until the page below
+	// is composed, so the per-region cap times the segment count is what the
+	// caller actually pays. See maxRegionPixels.
+	//
+	// Region info that does not parse is passed over rather than reported here.
+	// The decode loop below reaches it in stream order and says what is actually
+	// wrong with it, which keeps a malformed stream's error the one it was
+	// before this budget existed.
+	budget := int64(maxRegionPixels)
+	for _, sg := range regions {
+		info, err := parseRegionInfo(sg.data)
+		if err != nil {
+			continue
+		}
+		budget -= int64(info.w) * int64(info.h)
+		if budget < 0 {
+			return nil, fmt.Errorf("jbig2: segment %d: the stream's %d regions exceed the "+
+				"%d-pixel budget for one page", sg.number, len(regions), uint64(maxRegionPixels))
+		}
 	}
 
 	// Decode first, then allocate: an unknown page height is only known once

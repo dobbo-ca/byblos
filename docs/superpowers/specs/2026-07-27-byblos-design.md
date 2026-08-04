@@ -284,6 +284,19 @@ func EncodeJBIG2Generic(b *Bitmap) ([]byte, error)   // lossless; see §5
 // gutter has no single global cutoff that works across the page.
 func Sauvola(img image.Image) (*Bitmap, error)
 
+// ErrUnsupportedJBIG2Feature reports a JBIG2 stream that parsed correctly and
+// uses a coding feature byblos does not implement: symbol dictionaries and text
+// regions, refinement, halftones, MMR, or a generic region coded with anything
+// other than GBTEMPLATE 0 and the nominal AT pixels. Distinct from a decode
+// failure: this one says the bytes are fine and byblos is not enough.
+var ErrUnsupportedJBIG2Feature = errors.New("byblos: JBIG2 stream uses a feature byblos does not decode")
+
+// DecodeJBIG2Generic is the exact inverse of EncodeJBIG2Generic and nothing
+// wider (byb-riy): immediate generic regions only. It is what makes a
+// byblos-compressed page re-openable by byblos, and it is the decoder
+// ExtractPageRaster runs on an inbound /JBIG2Decode image. See §5.
+func DecodeJBIG2Generic(data []byte) (*Bitmap, error)
+
 func QuantizePNG(img image.Image, colors int) ([]byte, error)
 func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error)
 func DownsampleDeclaredBPC(img image.Image, declaredBPC int, srcDPI, dstDPI float64) (image.Image, error)
