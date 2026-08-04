@@ -11,42 +11,53 @@ import (
 	"github.com/dobbo-ca/byblos/internal/corpus"
 )
 
-// TestSauvolaAgreesWithJbig2enc is byb-jj5's acceptance test. Binarization
-// quality has no byte-exact oracle -- "is this threshold correct" is
-// perceptual, so this is a TOLERANCE comparison (fraction of disagreeing
-// pixels), never byte-for-byte, against jbig2enc's own local threshold:
-// `jbig2 -O <outfile.png> <infile.png>` dumps the thresholded image it would
-// otherwise feed straight into JBIG2 generic-region coding, with no -G, so it
-// exercises jbig2enc's default LOCAL ADAPTIVE thresholding, the same
-// behaviour byblos is replacing.
+// TestSauvolaAgreesWithJbig2enc is a SANITY CROSS-CHECK, not byb-jj5's
+// acceptance gate. The acceptance gate is
+// TestSauvolaSeparatesTextUnderUnevenIllumination in sauvola_test.go, which
+// needs no oracle and tests the property the bead actually bought. Read this
+// test as "byblos lands in the same neighbourhood as a shipping encoder on
+// scan-shaped input", and nothing stronger, for two measured reasons.
 //
-// THE TOLERANCE IS A MEASUREMENT, NOT A GUESS. Measured against jbig2enc
-// 0.32 (Homebrew) on this corpus's two scan-shaped images -- scanpage (flat
-// synthetic ink on paper) and scanjpeg (the same page round-tripped through
-// JPEG at quality 75, so it carries real DCT block artifacts) -- the
-// disagreement is:
+// FIRST, THE ORACLE IS NOT ADAPTIVE IN ANY USEFUL SENSE. `jbig2 -O out.png
+// in.png` with no -G is documented as local adaptive thresholding, and that
+// documentation is what an earlier draft of this file took at face value.
+// Measured, jbig2enc 0.32 puts a SINGLE INTENSITY CUT across a smooth
+// horizontal ramp: over a 240x240 ramp its decision boundary is maxInk=59 /
+// minBg=60 in every one of eight row bands, and on the corpus gradient its
+// ink pixels span grey 0..53 against background 51..255. That is an
+// Otsu-style cut, so on the corpus's continuous-tone images (gradient, photo)
+// it converts texture-free tone into large black areas -- 9.42% and 26.48% of
+// the frame -- where correct Sauvola emits almost none. Those two images are
+// excluded from this gate because the disagreement there measures jbig2enc's
+// choice, not a byblos defect; see the gradient case in
+// TestSauvolaSeparatesTextUnderUnevenIllumination's fixture for the same
+// situation with ground truth attached, where jbig2enc scores 46.48% wrong
+// and byblos scores 0%.
 //
-//	scanpage  2001/480000 = 0.4169%
-//	scanjpeg  2922/480000 = 0.6088%
+// SECOND, THE INPUTS IT DOES GATE ON ARE NEARLY BILEVEL, SO THEY CANNOT
+// DISCRIMINATE. Measured grey distributions:
 //
-// disagreementMax = 2% leaves scanjpeg (the noisier, more realistic input)
-// 3.3x headroom over its measured rate.
+//	scanpage  <64: 2.939%   64..200: 0.000%   >200: 97.061%   4 grey levels
+//	scanjpeg  <64: 2.825%   64..200: 0.114%   >200: 97.061%   111 grey levels
 //
-// photo and gradient -- this corpus's two continuous-tone, non-text images --
-// were also measured and are DELIBERATELY EXCLUDED from this gate: 25.74%
-// and 9.39% disagreement respectively. That is not a byblos defect. Sauvola
-// (and jbig2enc's own local threshold) are built for text-on-paper, where a
-// window straddles a thin dark stroke against a light background; on a smooth
-// gradient or photographic image there is no such structure, so two
-// independently-implemented local thresholders diverge heavily on which side
-// of a near-flat local mean each pixel falls, without either being "wrong".
-// Binarizing a photograph is not a real byblos use case (Sauvola/JBIG2 target
-// scanned text), so gating this test on it would make the gate noise rather
-// than signal.
+// With no midtones to place, every thresholder lands within a percent of
+// every other one here; replacing the whole formula with a constant 128 still
+// clears the 2% tolerance below. Tightening the number does not fix that --
+// only an input with midtone structure does, which is what the acceptance
+// gate supplies.
+//
+// What this test still earns: it catches gross breakage against a real
+// encoder -- inverted output, wrong dimensions, ink volume off by an order of
+// magnitude -- on realistic scan input including JPEG DCT artifacts.
+// Measured disagreement is 0.4169% (scanpage) and 0.6088% (scanjpeg) against
+// a 2% tolerance, and Sauvola's ink volume is 0.827x and 0.765x the oracle's
+// (it hollows out the solid blue stamp, which is larger than the window; see
+// Sauvola's doc comment) against an inkRatio band of 0.5x..1.5x.
 func TestSauvolaAgreesWithJbig2enc(t *testing.T) {
 	requireTool(t, "jbig2")
 
 	const disagreementMax = 0.02
+	const inkRatioMin, inkRatioMax = 0.5, 1.5
 	dir := t.TempDir()
 
 	images := map[string]image.Image{
@@ -92,7 +103,7 @@ func TestSauvolaAgreesWithJbig2enc(t *testing.T) {
 				t.Fatalf("oracle output is %v; want %dx%d", ob, bm.Width, bm.Height)
 			}
 
-			disagree := 0
+			disagree, oracleTotal, ourTotal := 0, 0, 0
 			total := bm.Width * bm.Height
 			for y := 0; y < bm.Height; y++ {
 				for x := 0; x < bm.Width; x++ {
@@ -101,6 +112,8 @@ func TestSauvolaAgreesWithJbig2enc(t *testing.T) {
 					if r>>8 < 128 {
 						oracleInk = 1
 					}
+					oracleTotal += int(oracleInk)
+					ourTotal += int(bm.At(x, y))
 					if oracleInk != bm.At(x, y) {
 						disagree++
 					}
@@ -110,6 +123,17 @@ func TestSauvolaAgreesWithJbig2enc(t *testing.T) {
 			if rate > disagreementMax {
 				t.Errorf("%s: disagreement %.4f%% (%d/%d px) exceeds %.2f%%",
 					name, 100*rate, disagree, total, 100*disagreementMax)
+			}
+			// Ink VOLUME, not just per-pixel agreement: on a page this sparse
+			// a binarizer that stops emitting ink altogether disagrees on only
+			// the 2.4% of pixels that are ink, which a percentage-of-frame
+			// tolerance alone cannot see.
+			if oracleTotal == 0 {
+				t.Fatalf("%s: oracle produced no ink at all", name)
+			}
+			if ratio := float64(ourTotal) / float64(oracleTotal); ratio < inkRatioMin || ratio > inkRatioMax {
+				t.Errorf("%s: ink volume %d px is %.3fx the oracle's %d px; want %.1fx..%.1fx",
+					name, ourTotal, ratio, oracleTotal, inkRatioMin, inkRatioMax)
 			}
 		})
 	}

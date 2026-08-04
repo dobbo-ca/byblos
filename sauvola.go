@@ -10,24 +10,33 @@ import (
 // Pietikäinen, "Adaptive document image binarization", Pattern Recognition
 // 33(2), 2000), returning a Bitmap ready for EncodeJBIG2Generic.
 //
-// jbig2enc's default is local adaptive thresholding, not global -- -G is the
-// documented opt-out to a single global threshold -- so matching its shipped
-// behaviour means adaptive, not a single cutoff over the whole page. Sauvola
-// computes, for every pixel, a threshold from the mean m and standard
-// deviation s of an odd windowSize x windowSize neighbourhood centred on it:
+// Adaptive, not global: a scan with uneven illumination -- a shadowed gutter,
+// a page corner lifted off the platen -- has no single cutoff that both keeps
+// the shadow white and keeps the text in the bright half black, because the
+// ink and paper intensity bands overlap. Sauvola computes, for every pixel, a
+// threshold from the mean m and standard deviation s of an odd windowSize x
+// windowSize neighbourhood centred on it:
 //
 //	T(x,y) = m * (1 + k * (s/r - 1))
 //
 // r is the dynamic range of s, fixed at 128 for 8-bit greyscale, and k
 // controls how strongly local contrast lowers the threshold in text-bearing
-// regions. windowSize=31 and k=0.5 are the values most implementations (and
-// Sauvola's own paper) treat as defaults; see sauvola_oracle_test.go for how
-// they were checked against jbig2enc's own local threshold rather than just
-// assumed.
+// regions. k=0.5 is Sauvola's own paper's value; windowSize=31 suits the
+// stroke widths in this corpus. Both were swept (windowSize 15..41, k
+// 0.2..0.5) and the output moves smoothly and monotonically across that
+// range -- more ink for a wider window, less for a larger k -- so these are a
+// conservative point on a continuum, not a cliff edge.
 //
 // A pixel with value strictly less than its local threshold is ink (bit 1);
 // this matches Bitmap's convention (set bit = black), the inverse of
 // /DeviceGray.
+//
+// Known and intrinsic: a uniform dark region LARGER than the window comes out
+// hollow. Inside such a region s is ~0 and m is the fill's own value, so
+// T -> m*(1-k) and no pixel clears it. Sauvola marks edges of solid fills,
+// not their interiors; that is the algorithm, not a defect in this code, and
+// it costs nothing for text (strokes are thinner than the window) while
+// visibly hollowing out stamps and logos.
 //
 // The mean and variance are both obtained from a single pass over two
 // integral images (sum and sum-of-squares) built from img, giving O(1) work
