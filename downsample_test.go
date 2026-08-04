@@ -1,6 +1,7 @@
 package byblos
 
 import (
+	"bytes"
 	"image"
 	"image/color"
 	"math"
@@ -172,5 +173,266 @@ func TestDownsampleNonZeroOriginBounds(t *testing.T) {
 	b := out.Bounds()
 	if b.Dx() != wantW || b.Dy() != wantH {
 		t.Errorf("Downsample non-zero-origin output %dx%d; want %dx%d", b.Dx(), b.Dy(), wantW, wantH)
+	}
+}
+
+// bitonalScanpage is corpus.Scanpage forced to pure black and white: the shape
+// of a bitonal text scan, as an *image.RGBA, which is what a decoded 1-bpc PDF
+// image actually looks like in memory (pdfcpu renders it to PNG and
+// image.Decode returns *image.RGBA -- measured, and asserted by
+// TestDownsampleDeclaredBPC1KeepsABilevelSourceBilevel below).
+//
+// The same pixels serve both sides of byb-plj, which is the point: declared
+// 1 bpc they must be subsampled, declared 8 bpc they must be interpolated, and
+// nothing about the pixels themselves can tell the two apart.
+func bitonalScanpage() *image.RGBA {
+	src := corpus.Scanpage()
+	b := src.Bounds()
+	out := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	for y := 0; y < b.Dy(); y++ {
+		for x := 0; x < b.Dx(); x++ {
+			r, g, bl, _ := src.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			// Rec. 601 luma, the weighting a scanner's bitonal threshold uses.
+			luma := (299*float64(r>>8) + 587*float64(g>>8) + 114*float64(bl>>8)) / 1000
+			v := uint8(0)
+			if luma >= 128 {
+				v = 255
+			}
+			out.SetRGBA(x, y, color.RGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+	return out
+}
+
+// distinctLevels returns the distinct 8-bit channel values in img. A bilevel
+// image has exactly two; anything more on a bilevel source is a grey level the
+// resampling kernel invented and 1 bpc cannot store.
+func distinctLevels(img image.Image) map[uint32]bool {
+	levels := map[uint32]bool{}
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, _, _, _ := img.At(x, y).RGBA()
+			levels[r>>8] = true
+		}
+	}
+	return levels
+}
+
+// packDeviceGray1 packs img into 1-bpc /DeviceGray samples, MSB first, one row
+// per (Width+7)/8 bytes. DeviceGray 1 is WHITE (the inverse of byblos.Bitmap,
+// where a set bit is black ink), so a pixel at or above mid-grey sets its bit.
+func packDeviceGray1(img image.Image) []byte {
+	b := img.Bounds()
+	stride := (b.Dx() + 7) / 8
+	out := make([]byte, stride*b.Dy())
+	for y := 0; y < b.Dy(); y++ {
+		for x := 0; x < b.Dx(); x++ {
+			if r, _, _, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA(); r>>8 >= 128 {
+				out[y*stride+x/8] |= 1 << (7 - uint(x)%8)
+			}
+		}
+	}
+	return out
+}
+
+// bitonalPDF is a one-page PDF whose only image is declared
+// /BitsPerComponent 1 /DeviceGray /FlateDecode -- exactly the shape byb-plj
+// reports on -- placed so its pixels land at srcDPI.
+func bitonalPDF(t *testing.T, img image.Image, srcDPI float64) []byte {
+	t.Helper()
+	b := img.Bounds()
+	enc := EncodedImage{
+		Width:      b.Dx(),
+		Height:     b.Dy(),
+		BPC:        1,
+		ColorSpace: ColorSpace{Name: "DeviceGray"},
+		Filter:     "FlateDecode",
+		Data:       flateEncode(t, packDeviceGray1(img)),
+	}
+	var buf bytes.Buffer
+	if err := BuildPDF(&buf, []BuildPage{{
+		Image:    enc,
+		WidthPt:  float64(b.Dx()) * 72 / srcDPI,
+		HeightPt: float64(b.Dy()) * 72 / srcDPI,
+	}}); err != nil {
+		t.Fatalf("BuildPDF: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestDownsampleDeclaredBPC1KeepsABilevelSourceBilevel is byb-plj end to end,
+// on the exact path the bead reports: a PDF image declared /BitsPerComponent 1
+// goes in, ExtractPageRaster decodes it, and the decoded raster is downsampled.
+//
+// It asserts the reachability finding the fix is built on as well as the fix.
+// Inspect DOES know the declaration -- ImageRef.Bitonal is true, keyed by
+// ObjNr -- while the decoded raster does NOT: it comes back with 8-bit
+// channels holding two distinct values, and no depth. That gap is why
+// Downsample cannot be repaired in place and why DownsampleDeclaredBPC takes
+// the depth as an argument. Handed the same raster with no depth, Downsample
+// returns 99 distinct levels here (measured); handed the declaration, this
+// returns 2.
+//
+// Kill power, with no oracle involved:
+//   - kernel reverted to Catmull-Rom for declaredBPC 1: the level count fails
+//     (99 levels, not 2).
+//   - body gutted to `return img, nil`: the dimension check fails (600x800,
+//     not 300x400). This is the mutation the previous attempt at byb-plj
+//     shipped green.
+func TestDownsampleDeclaredBPC1KeepsABilevelSourceBilevel(t *testing.T) {
+	src := bitonalScanpage()
+	pdf := bitonalPDF(t, src, 300)
+
+	pages, err := Inspect(bytes.NewReader(pdf))
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if len(pages) != 1 || len(pages[0].Images) != 1 {
+		t.Fatalf("Inspect returned %d pages; want one page with one image", len(pages))
+	}
+	if !pages[0].Images[0].Bitonal {
+		t.Fatal("ImageRef.Bitonal = false on a /BitsPerComponent 1 image; " +
+			"the declared depth is what DownsampleDeclaredBPC needs and Inspect is where a caller reads it")
+	}
+
+	raster, err := ExtractPageRaster(bytes.NewReader(pdf), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster: %v", err)
+	}
+	if levels := distinctLevels(raster.Image); len(levels) != 2 {
+		t.Fatalf("the extracted raster has %d distinct levels %v; want the 2 the 1-bpc source had", len(levels), levels)
+	}
+
+	out, err := DownsampleDeclaredBPC(raster.Image, 1, 300, 150)
+	if err != nil {
+		t.Fatalf("DownsampleDeclaredBPC: %v", err)
+	}
+	if b := out.Bounds(); b.Dx() != 300 || b.Dy() != 400 {
+		t.Errorf("DownsampleDeclaredBPC(_, 1, 300, 150) output %dx%d; want 300x400", b.Dx(), b.Dy())
+	}
+	levels := distinctLevels(out)
+	if len(levels) != 2 || !levels[0] || !levels[255] {
+		t.Errorf("DownsampleDeclaredBPC(_, 1, ...) on a bilevel raster produced levels %v; "+
+			"want exactly {0, 255} -- a 1-bpc image cannot store anything else", levels)
+	}
+}
+
+// TestDownsampleDoesNotInferBilevelFromPixels is the other half of byb-plj, and
+// the reason the first attempt at it was rejected. An 8-bpc source whose pixels
+// happen to be pure black and white -- a bitonal scan widened to 8 bpc, which is
+// legitimate and common -- is not a mono image to any PDF tool, and Ghostscript
+// sends it through /ColorImageDownsampleType like any other colour image. So
+// Downsample must go on interpolating it, and the pixels must not be consulted.
+//
+// This needs no oracle to discriminate: Catmull-Rom must invent intermediate
+// greys on this input and point subsampling cannot invent any. The oracle-backed
+// cost of getting it wrong was measured at 41.66 dB down to 21.24 dB against
+// this package's 34 dB gate.
+func TestDownsampleDoesNotInferBilevelFromPixels(t *testing.T) {
+	out, err := Downsample(bitonalScanpage(), 300, 150)
+	if err != nil {
+		t.Fatalf("Downsample: %v", err)
+	}
+	levels := distinctLevels(out)
+	if len(levels) <= 2 {
+		t.Errorf("Downsample produced only %v on a pure-black-and-white 8-bpc source: "+
+			"it inferred bilevel-ness from pixel data instead of interpolating. "+
+			"Depth is declared, not detected -- DownsampleDeclaredBPC(img, 1, ...) is for a source declared 1 bpc", levels)
+	}
+}
+
+// TestDownsampleDeclaredBPCRejectsAnUndeclarableDepth pins the validation.
+// 0 matters most: it is pdfdoc.ImageInfo.BPC's "no /BitsPerComponent entry", so
+// a caller forwarding an unknown depth must get an error and not the contone
+// kernel by default -- being silently given the contone kernel IS byb-plj.
+func TestDownsampleDeclaredBPCRejectsAnUndeclarableDepth(t *testing.T) {
+	img := bitonalScanpage()
+	for _, bpc := range []int{0, -1, 3, 5, 7, 9, 24, 32} {
+		if _, err := DownsampleDeclaredBPC(img, bpc, 300, 150); err == nil {
+			t.Errorf("DownsampleDeclaredBPC(_, %d, ...): want an error, got nil", bpc)
+		}
+	}
+	for _, bpc := range []int{1, 2, 4, 8, 16} {
+		if _, err := DownsampleDeclaredBPC(img, bpc, 300, 150); err != nil {
+			t.Errorf("DownsampleDeclaredBPC(_, %d, ...): %v", bpc, err)
+		}
+	}
+}
+
+// TestDownsampleDeclaredBPC1ObeysDownsamplesRules pins, on the bilevel path
+// specifically, every rule DownsampleDeclaredBPC's doc comment claims it shares
+// with Downsample. The previous attempt at byb-plj made that same claim in a
+// doc comment and pinned none of it, which is why its bilevel function passed
+// the whole suite when gutted to `return img, nil`.
+func TestDownsampleDeclaredBPC1ObeysDownsamplesRules(t *testing.T) {
+	img := bitonalScanpage()
+
+	if _, err := DownsampleDeclaredBPC(nil, 1, 300, 150); err == nil {
+		t.Error("DownsampleDeclaredBPC(nil, 1, ...): want an error, got nil")
+	}
+	empty := image.NewRGBA(image.Rect(0, 0, 0, 0))
+	if _, err := DownsampleDeclaredBPC(empty, 1, 300, 150); err == nil {
+		t.Error("DownsampleDeclaredBPC on empty bounds: want an error, got nil")
+	}
+	for _, tc := range []struct{ src, dst float64 }{
+		{0, 150}, {-300, 150}, {300, 0}, {300, -150},
+		{math.NaN(), 150}, {300, math.NaN()},
+		{math.Inf(1), 150}, {300, math.Inf(1)},
+	} {
+		if _, err := DownsampleDeclaredBPC(img, 1, tc.src, tc.dst); err == nil {
+			t.Errorf("DownsampleDeclaredBPC(_, 1, %v, %v): want an error, got nil", tc.src, tc.dst)
+		}
+	}
+	// The two no-op rules: not merely an image of the same size, the identical
+	// image value.
+	for _, tc := range []struct{ src, dst float64 }{
+		{150, 300}, {150, 150}, {300, 299.9},
+	} {
+		out, err := DownsampleDeclaredBPC(img, 1, tc.src, tc.dst)
+		if err != nil {
+			t.Fatalf("DownsampleDeclaredBPC(_, 1, %v, %v): %v", tc.src, tc.dst, err)
+		}
+		if out != image.Image(img) {
+			t.Errorf("DownsampleDeclaredBPC(_, 1, %v, %v) did not return the identical image value", tc.src, tc.dst)
+		}
+	}
+	// And the resampling case really does resample, so none of the above is
+	// passing because the function returns its input for everything.
+	out, err := DownsampleDeclaredBPC(img, 1, 300, 150)
+	if err != nil {
+		t.Fatalf("DownsampleDeclaredBPC: %v", err)
+	}
+	if b := out.Bounds(); b.Dx() != 300 || b.Dy() != 400 {
+		t.Errorf("DownsampleDeclaredBPC(_, 1, 300, 150) output %dx%d; want 300x400", b.Dx(), b.Dy())
+	}
+}
+
+// TestDownsampleIsDownsampleDeclaredBPC8 pins the binding Downsample's doc
+// comment states, which is what keeps the two entry points from drifting into
+// two implementations: Downsample is not a peer of DownsampleDeclaredBPC, it is
+// one call of it with the depth it always silently assumed.
+func TestDownsampleIsDownsampleDeclaredBPC8(t *testing.T) {
+	for _, src := range []image.Image{corpus.Scanpage(), bitonalScanpage()} {
+		plain, err := Downsample(src, 300, 150)
+		if err != nil {
+			t.Fatalf("Downsample: %v", err)
+		}
+		declared, err := DownsampleDeclaredBPC(src, 8, 300, 150)
+		if err != nil {
+			t.Fatalf("DownsampleDeclaredBPC: %v", err)
+		}
+		pb, db := plain.Bounds(), declared.Bounds()
+		if pb != db {
+			t.Fatalf("bounds differ: Downsample %v, DownsampleDeclaredBPC(_, 8, ...) %v", pb, db)
+		}
+		for y := pb.Min.Y; y < pb.Max.Y; y++ {
+			for x := pb.Min.X; x < pb.Max.X; x++ {
+				if plain.At(x, y) != declared.At(x, y) {
+					t.Fatalf("pixel (%d,%d) differs: Downsample %v, DownsampleDeclaredBPC(_, 8, ...) %v",
+						x, y, plain.At(x, y), declared.At(x, y))
+				}
+			}
+		}
 	}
 }
