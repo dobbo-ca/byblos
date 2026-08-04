@@ -3,9 +3,10 @@
 A pure-Go PDF pipeline for scanned documents. No cgo, no shared libraries, no
 subprocesses.
 
-Byblos replaces the PDF-side tools a scan pipeline normally shells out to —
+Byblos is replacing the PDF-side tools a scan pipeline normally shells out to —
 `ghostscript`, `jbig2enc`, `pngquant`, `poppler`, `img2pdf` — with a Go library
-that compiles into your binary.
+that compiles into your binary. None of the five is fully replaced yet: each is
+partially covered, and the residue is tracked per binary rather than estimated.
 
 > Byblos was the port that traded papyrus to Greece; "biblion", and eventually
 > "book", comes from its name. This library handles the paper.
@@ -34,12 +35,14 @@ rasterized at all. Pages that are neither are detected and reported
   symbol matching. Lossy JBIG2 can silently substitute characters in scanned
   documents — the 2013 Xerox scanner defect — and produces output that looks
   *cleaner* while being wrong. See [FUTURE.md](FUTURE.md) for the full reasoning.
-- **Capability-based provenance.** Every output records what Byblos could do and
-  what each page received, so a later version can identify exactly which stored
-  documents would benefit from re-processing — and skip the ones that wouldn't.
-- **Policy stays with the caller.** Byblos exposes primitives: inspect, extract,
-  compress, stamp, optimize. Preset ladders and validation rules belong to the
-  application.
+- **Capability-based provenance.** Every output `Optimize` rewrites records what
+  each page actually received, and claims only the capabilities that call
+  exercised — never the whole build's, which would suppress a later version's
+  upgrade check. So a later version can identify exactly which stored documents
+  would benefit from re-processing, and skip the ones that wouldn't.
+- **Policy stays with the caller.** Byblos exposes primitives — `Inspect`,
+  `ExtractPageRaster`, `Optimize`, `StampTextLayer`, `BuildPDF`, and the image
+  codecs. Preset ladders and validation rules belong to the application.
 
 ## Relationship to other projects
 

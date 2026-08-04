@@ -137,6 +137,20 @@ than the OCR engine.
 `needs_review` is the correct permanent answer, and a renderer would be an
 enormous amount of code serving a handful of documents.
 
+**This gate was evaluated and it stayed shut.** `byb-divert` measured genuinely
+composite pages at 1.03% of 29,779 scan-shaped pages (2026-07-28). Rare. So the
+renderer described in *this entry* — the one that would rescue
+`ErrNotSingleRaster` pages — remains deferred on the evidence.
+
+`byb-0gm` decided Byblos will render anyway, and that decision **bypasses this
+gate rather than passing it**: it is driven by Kleio rasterizing every
+born-digital document for a 400px thumbnail, which is a different page population
+and a different job from anything this entry describes. Do not read `byb-0gm` as
+having opened this gate. Design spec §2's amendment settles `byb-0gm` at
+**thumbnail fidelity** — page 1, 400px, recognisable rather than faithful — which
+is what keeps the two apart: the renderer *this entry* describes is the archival
+one, and it stays deferred.
+
 **Upgrade path:** documents whose provenance records `diverted: not-single-raster`,
 or any page whose provenance records `dropped_annots > 0` (byb-b5.1): rendering
 appearance streams into the raster would change the output for those pages.
@@ -179,8 +193,20 @@ indefinitely, since documents processed by earlier versions will carry it.
 
 Despeckling, border removal, and page-splitting for two-up scans.
 
-**Why deferred:** Cadmus L0 already provides the primitives (morphology,
-connected components, deskew), so this is mostly a matter of assembling them with
-sensible defaults. Not urgent, because Kleio's current pipeline gets acceptable
+**Why deferred:** not urgent, because Kleio's current pipeline gets acceptable
 results without it — and aggressive cleanup risks removing real content, which
 needs the same scrutiny as lossy compression.
+
+**Byblos cannot assemble Cadmus's primitives, and this entry used to say it
+could.** Cadmus has the equivalents (morphology, connected components, deskew,
+and a Sauvola binarizer) but they live under `cadmus/internal/imaging/`, which
+Go's `internal/` rule puts out of reach — and design spec §3 forbids the import
+independently. Whatever Byblos builds here, it writes itself. `byb-jj5` is the
+worked example: it needed a binarizer, Cadmus had one, and Byblos is writing its
+own regardless.
+
+**Scope note.** This entry covers despeckling, border removal and page-splitting;
+its primitive list is morphology, connected components and deskew. Thresholding
+is in neither list, so `byb-jj5`'s binarizer does not land here and this entry
+did not need amending for it — contrary to the documentation debt that bead
+records against it. A binarizer is a JBIG2 input stage, not page cleanup.
