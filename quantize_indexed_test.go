@@ -659,28 +659,9 @@ func TestQuantizeIndexedMultipleIDATNotTruncated(t *testing.T) {
 
 // --- test 8: the painted raster, decoded without any oracle ----------------
 
-// paethPredictor is ISO/IEC 15948 9.4's PaethPredictor, byte for byte. a is
-// the sample to the left, b the one above, c the one above-left.
-func paethPredictor(a, b, c byte) byte {
-	p := int(a) + int(b) - int(c)
-	pa, pb, pc := p-int(a), p-int(b), p-int(c)
-	if pa < 0 {
-		pa = -pa
-	}
-	if pb < 0 {
-		pb = -pb
-	}
-	if pc < 0 {
-		pc = -pc
-	}
-	switch {
-	case pa <= pb && pa <= pc:
-		return a
-	case pb <= pc:
-		return b
-	}
-	return c
-}
+// paethPredictor lives in build_test.go, which is this same package. byb-5jy
+// (#34) and byb-2s4 (#40) each added an equivalent copy in a different file, so
+// the two branches never conflicted textually and the merge broke the build.
 
 // decodeIndexedRaster paints enc the way a PDF consumer does and returns the
 // resulting RGB image: inflate Data, undo the /Predictor 15 (PNG) row filters,
