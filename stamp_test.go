@@ -171,12 +171,65 @@ func TestStampTextLayerFontLoadsCleanlyInPoppler(t *testing.T) {
 	if errOut := stderrOf(t, "pdftoppm", "-png", path, filepath.Join(t.TempDir(), "page")); len(errOut) != 0 {
 		t.Errorf("pdftoppm reported a problem with the embedded glyphless font: %s", errOut)
 	}
-	if _, err := exec.LookPath("pdffonts"); err == nil {
-		if errOut := stderrOf(t, "pdffonts", path); len(errOut) != 0 {
-			t.Errorf("pdffonts reported a problem with the embedded font: %s", errOut)
+}
+
+// The pdffonts half of A2, as its own test gated by requireTool like every
+// other oracle assertion in this file. It used to sit inline in the test above
+// behind `if LookPath == nil { ... } else { t.Log(...) }`, which degraded to a
+// silent PASS: with pdffonts off PATH that test still reported PASS, printed
+// nothing at all without -v, and contributed ZERO skip events to `go test
+// -json` -- so the half vanished from the greppable SKIP lines byb-6ov added
+// -v to CI to produce (byb-34k).
+//
+// It asserts pdffonts' STDOUT, not an empty stderr. Measured on poppler
+// 26.06.0, pdffonts and pdftoppm have IDENTICAL stderr sensitivity here: both
+// print "Syntax Error: Embedded font file may be invalid" for a garbage or
+// empty font program, and both stay silent for a truncated one AND for a
+// /FontDescriptor carrying no /FontFile2 at all. A stderr-only pdffonts
+// assertion would therefore have had no kill power the pdftoppm half above
+// does not already have, and would not have been worth a SKIP line. The
+// listing row is what only pdffonts reports: that poppler resolved the font
+// dictionary, and that it sees the program as EMBEDDED rather than quietly
+// substituting an installed font whose widths are not the ones prepareWord
+// computed against.
+func TestStampTextLayerFontIsEmbeddedAccordingToPdffonts(t *testing.T) {
+	requireTool(t, "pdffonts")
+	base := corpusDoc(t, "scan")
+	tl := TextLayer{Pages: [][]PositionedWord{{{Text: "Scanned", Bounds: image.Rect(72, 700, 149, 712)}}}}
+	stamped := stampBytes(t, base, tl)
+	path := writeTempFile(t, stamped, "stamped.pdf")
+
+	cmd := exec.Command("pdffonts", path)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("pdffonts: %v: %s", err, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("pdffonts reported a problem with the embedded font: %s", stderr.Bytes())
+	}
+
+	// Columns are "name type encoding emb sub uni object ID".
+	var row string
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if strings.HasPrefix(line, glyphlessBaseFont+" ") {
+			row = line
+			break
 		}
-	} else {
-		t.Log("pdffonts not installed; skipping that half of the font check")
+	}
+	if row == "" {
+		t.Fatalf("pdffonts does not list %s among the document's fonts:\n%s", glyphlessBaseFont, stdout.Bytes())
+	}
+	col := strings.Fields(row)
+	if len(col) < 4 {
+		t.Fatalf("pdffonts row %q has %d columns, want at least 4", row, len(col))
+	}
+	if col[1] != "TrueType" {
+		t.Errorf("pdffonts reports %s with type %q, want TrueType", glyphlessBaseFont, col[1])
+	}
+	if col[3] != "yes" {
+		t.Errorf("pdffonts reports %s with emb=%q, want yes: poppler is substituting an installed"+
+			" font, whose widths are not the ones StampTextLayer sized the box against", glyphlessBaseFont, col[3])
 	}
 }
 
@@ -492,6 +545,139 @@ func TestStampTextLayerCountersTopLevelYFlip(t *testing.T) {
 	path := writeTempFile(t, stamped, "yflip.pdf")
 
 	assertWordBBoxRoundTrips(t, path, want, "Byblos", float64(corpus.PageHeightPt))
+}
+
+// G (byb-9ee): the two pins above are named for countering a top-level CTM,
+// and countering a top-level CTM is all they do -- they hold AppendContent's
+// q/Q + inverse-cm unwind. Neither of them, nor either bbox round-trip in this
+// file, notices a sign error in the stamper's OWN placement matrix: change
+// preparedWord.ops's "1 0 0 1 tx ty Tm" to "1 0 0 -1 tx ty Tm" and all four
+// stay GREEN.
+//
+// Measured on poppler 26.06.0, on an unrotated page `pdftotext -bbox` reports
+// the flipped word at byte-identical coordinates to the unflipped one --
+// xMin=200 yMin=372 xMax=260.000013 yMax=392 either way -- because poppler
+// rebuilds the box from the glyph advance and the /FontDescriptor's
+// ascent/descent and orders the edges, and the glyphless font's empty outlines
+// give it nothing else to go on. Its -tsv output normalises identically. There
+// is no baseline anywhere in poppler's output to assert against, so NO
+// assertion built on `pdftotext -bbox` can be made y-sensitive, and the fix
+// this bead suggested for assertWordBBoxRoundTrips is not reachable.
+//
+// This pin therefore reads the placement matrix straight out of the written
+// content stream. Oracle-free, so it has kill power in the no-oracles run too,
+// and it holds the whole matrix rather than the d component alone: a shear, a
+// scale that ops's own comment says belongs in Tf/Tz, or a translation that
+// puts the em box anywhere but Bounds all fail here.
+func TestStampedTextMatrixDoesNotFlipTheYAxis(t *testing.T) {
+	base := corpusDoc(t, "scan")
+	words := []PositionedWord{
+		{Text: "alpha", Bounds: image.Rect(200, 400, 260, 420)},
+		{Text: "gamma", Bounds: image.Rect(72, 96, 112, 108)},
+	}
+	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{words}})
+
+	d, err := pdfdoc.Open(bytes.NewReader(stamped))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open(stamped): %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+
+	// "scan" carries no text of its own (see this file's header comment), so
+	// every Tm/Tj pair in the page's content is one StampTextLayer wrote.
+	matrices := map[string][6]float64{}
+	var (
+		nums    []float64
+		lastStr string
+		tm      [6]float64
+		haveTm  bool
+	)
+	lex := content.NewLexer(p.Content)
+	for {
+		tok, err := lex.Next()
+		if err != nil {
+			break
+		}
+		switch tok.Kind {
+		case content.KindNumber:
+			nums = append(nums, tok.Num)
+			continue
+		case content.KindString:
+			lastStr = string(tok.Text)
+		case content.KindKeyword:
+			switch string(tok.Text) {
+			case "Tm":
+				if len(nums) < 6 {
+					t.Fatalf("Tm with %d operands, want 6", len(nums))
+				}
+				copy(tm[:], nums[len(nums)-6:])
+				haveTm = true
+			case "Tj":
+				if !haveTm {
+					t.Fatalf("Tj showing %q with no Tm before it", lastStr)
+				}
+				matrices[lastStr] = tm
+				haveTm = false
+			}
+		}
+		nums = nums[:0]
+	}
+
+	// -Descent/UnitsPerEm is the fraction of the font size that sits below the
+	// baseline; it is what puts the em box's bottom edge exactly on
+	// Bounds.Min.Y (see glyphlessTrueTypeFont's comment). Derived from the
+	// descriptor rather than copied from prepareWord's 0.2, so the two have to
+	// agree with each other and not merely with a literal.
+	descentEm := -float64(glyphlessTrueTypeFont().Descent) / float64(glyphless.UnitsPerEm)
+
+	for _, w := range words {
+		m, ok := matrices[w.Text]
+		if !ok {
+			t.Fatalf("no Tm/Tj pair for %q in the stamped content stream", w.Text)
+		}
+		if m[0] != 1 || m[1] != 0 || m[2] != 0 || m[3] != 1 {
+			t.Errorf("%q: Tm linear part = [%g %g %g %g], want [1 0 0 1]."+
+				" A d-component of -1 mirrors the em box about the baseline and makes poppler read"+
+				" the word backwards on a /Rotate page; any non-identity part means placement is no"+
+				" longer a pure translation with all scaling in Tf/Tz", w.Text, m[0], m[1], m[2], m[3])
+		}
+		fs := float64(w.Bounds.Dy())
+		wantTx := float64(w.Bounds.Min.X)
+		wantTy := float64(w.Bounds.Min.Y) + descentEm*fs
+		const tol = 1e-4 // ops writes the translation with %.4f
+		if math.Abs(m[4]-wantTx) > tol || math.Abs(m[5]-wantTy) > tol {
+			t.Errorf("%q: Tm translation = (%.4f, %.4f), want (%.4f, %.4f) -- the baseline that puts"+
+				" the em box on %v", w.Text, m[4], m[5], wantTx, wantTy, w.Bounds)
+		}
+	}
+}
+
+// G (byb-9ee): today the ONLY thing in the suite that reddens under that
+// flipped Tm is TestStampTextLayerAcrossTheCorpus/scan-rotated, and it does so
+// by luck -- it asserts bytes.Contains(text, "OCR") and a mirrored matrix
+// happens to make poppler emit "RCO". A palindromic fixture word would have
+// hidden it entirely. This pins the same property on purpose: on a /Rotate
+// page a mirrored text matrix reverses the extracted characters, so assert the
+// whole extraction equals a non-palindrome, not that it contains one.
+func TestStampedTextIsNotMirroredOnARotatedPage(t *testing.T) {
+	requireTool(t, "pdftotext")
+	base := corpusDoc(t, "scan-rotated")
+	const word = "Byblos"
+	stamped := stampBytes(t, base, TextLayer{Pages: [][]PositionedWord{{
+		{Text: word, Bounds: image.Rect(200, 400, 260, 420)},
+	}}})
+	path := writeTempFile(t, stamped, "rotated.pdf")
+
+	out, err := exec.Command("pdftotext", path, "-").Output()
+	if err != nil {
+		t.Fatalf("pdftotext: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != word {
+		t.Errorf("pdftotext on a /Rotate 90 page = %q, want %q (a mirrored text matrix reads backwards)", got, word)
+	}
 }
 
 // G: the bbox round-trip tests above happen to use "Byblos", whose Helvetica
