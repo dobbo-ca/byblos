@@ -15,6 +15,7 @@
 package pdfbuild
 
 import (
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math"
@@ -126,17 +127,54 @@ func inRange(v float64) bool {
 	return !math.IsNaN(v) && v >= minCoord && v <= maxCoord
 }
 
-// colorSpaceName returns the /ColorSpace name for cs, or an error for
-// anything this package does not support. Indexed and any other space are
-// rejected outright: nothing in Byblos produces them for a built page, and
-// supporting them here would be untested code.
-func colorSpaceName(cs pdfdoc.ColorSpace) (string, error) {
-	switch cs.Name {
-	case "DeviceGray", "DeviceRGB", "DeviceCMYK":
-		return cs.Name, nil
-	default:
+// colorSpaceObject renders cs as the object /ColorSpace takes: a name for a
+// device space, or the [/Indexed base hival <lookup>] array of ISO 32000-1
+// section 8.6.6.3.
+//
+// Indexed is here because Byblos produces it: QuantizeIndexed (byb-96p) emits
+// exactly this shape, and BuildPDF is the only exported consumer of an
+// EncodedImage, so refusing it left that encoder with no route into a PDF at
+// all (byb-5jy). img2pdf, the binary BuildPDF replaces, accepts indexed PNGs
+// for the same reason. Any other space still has no Byblos producer and is
+// rejected rather than emitted as untested output.
+//
+// The palette checks mirror internal/pdfdoc's ColorSpace.object, which the
+// write seam applies to this same struct: a lookup table that disagrees with
+// its own declared base and hival is a colour space no reader can resolve.
+func colorSpaceObject(cs pdfdoc.ColorSpace) (string, error) {
+	if cs.Name == "Indexed" {
+		n, ok := deviceComponents(cs.Base)
+		if !ok {
+			return "", fmt.Errorf("indexed base %q is not a device colour space", cs.Base)
+		}
+		if cs.HiVal < 0 || cs.HiVal > 255 {
+			return "", fmt.Errorf("indexed hival %d is outside 0..255", cs.HiVal)
+		}
+		if want := (cs.HiVal + 1) * n; len(cs.Lookup) != want {
+			return "", fmt.Errorf("indexed lookup is %d bytes, want %d for hival %d over %s",
+				len(cs.Lookup), want, cs.HiVal, cs.Base)
+		}
+		return fmt.Sprintf("[/Indexed /%s %d <%s>]", cs.Base, cs.HiVal, hex.EncodeToString(cs.Lookup)), nil
+	}
+	if _, ok := deviceComponents(cs.Name); !ok {
 		return "", fmt.Errorf("colour space %q is not supported", cs.Name)
 	}
+	return "/" + cs.Name, nil
+}
+
+// deviceComponents returns the sample count of a device colour space. It
+// mirrors internal/pdfdoc's componentsOf, which is unexported; both list the
+// three device spaces ISO 32000-1 section 8.6.4 defines.
+func deviceComponents(space string) (int, bool) {
+	switch space {
+	case "DeviceGray":
+		return 1, true
+	case "DeviceRGB":
+		return 3, true
+	case "DeviceCMYK":
+		return 4, true
+	}
+	return 0, false
 }
 
 // validatePage rejects anything this writer cannot safely turn into a PDF a
@@ -180,7 +218,7 @@ func validatePage(p Page) error {
 		default:
 			return fmt.Errorf("FlateDecode: bits per component %d is not one of 1, 2, 4, 8", img.BPC)
 		}
-		if _, err := colorSpaceName(img.ColorSpace); err != nil {
+		if _, err := colorSpaceObject(img.ColorSpace); err != nil {
 			return err
 		}
 	case "DCTDecode":
@@ -233,11 +271,11 @@ func decodeParmsDict(p *pdfdoc.DecodeParms) string {
 // imageDict renders the image XObject dictionary contents (without the
 // enclosing << >>, which fillStream adds) for img.
 func imageDict(img pdfdoc.EncodedImage) (string, error) {
-	cs, err := colorSpaceName(img.ColorSpace)
+	cs, err := colorSpaceObject(img.ColorSpace)
 	if err != nil {
 		return "", err
 	}
-	d := fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d /BitsPerComponent %d /ColorSpace /%s /Filter /%s",
+	d := fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d /BitsPerComponent %d /ColorSpace %s /Filter /%s",
 		img.Width, img.Height, img.BPC, cs, img.Filter)
 	// /DecodeParms only has a defined meaning for FlateDecode here (see
 	// decodeParmsDict); DCTDecode and JBIG2Decode take none of these keys.

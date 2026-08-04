@@ -12,6 +12,7 @@ package byblos
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/hex"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -472,6 +473,23 @@ func TestBuildPDFRejectsUnsupportedInput(t *testing.T) {
 			Filter:     "FlateDecode",
 			Data:       flateEncode(t, make([]byte, 128)),
 		}, DPI: 300}}},
+		// indexed-short-lookup and indexed-bad-base: an /Indexed space whose
+		// palette does not match its own declaration. Writing either produces
+		// a /ColorSpace array a reader cannot resolve; internal/pdfdoc's write
+		// seam already refuses both (ColorSpace.object), and pdfbuild must
+		// agree rather than emit a broken array.
+		{"indexed-short-lookup", []BuildPage{{Image: EncodedImage{
+			Width: 8, Height: 8, BPC: 4,
+			ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: 15, Lookup: []byte{1, 2, 3}},
+			Filter:     "FlateDecode",
+			Data:       flateEncode(t, make([]byte, 32)),
+		}, DPI: 300}}},
+		{"indexed-bad-base", []BuildPage{{Image: EncodedImage{
+			Width: 8, Height: 8, BPC: 4,
+			ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceLab", HiVal: 0, Lookup: []byte{1}},
+			Filter:     "FlateDecode",
+			Data:       flateEncode(t, make([]byte, 32)),
+		}, DPI: 300}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -677,6 +695,84 @@ func grayPatternImage(w, h int, px []byte) image.Image {
 	im := image.NewGray(image.Rect(0, 0, w, h))
 	copy(im.Pix, px)
 	return im
+}
+
+// --- T11: the Indexed image QuantizeIndexed produces (byb-5jy) -----------
+
+// colorPattern returns a deterministic RGB raster with far more distinct
+// colours than a 16-entry palette can hold, so quantizing it is a real
+// reduction rather than an identity that would hide a wrong palette.
+func colorPattern(w, h int) image.Image {
+	im := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			im.SetRGBA(x, y, color.RGBA{
+				R: byte((x*7 + y*3) % 256),
+				G: byte((x*11 + y*5) % 256),
+				B: byte((x*3 + y*13) % 256),
+				A: 255,
+			})
+		}
+	}
+	return im
+}
+
+// BuildPDF is the only exported consumer of an EncodedImage, so it is the
+// only route QuantizeIndexed's output has into a PDF at all (ReplaceImage
+// hangs off internal/pdfdoc's unexported doc). Measured at 3fa75a8, BuildPDF
+// refused that output outright with `colour space "Indexed" is not
+// supported`, which made QuantizeIndexed unreachable from outside the module.
+//
+// The pixel comparison goes through QuantizePNG's palette, not through the
+// source image: QuantizeIndexed and QuantizePNG share quantizeCore, so
+// QuantizePNG's decoded output is the exact raster QuantizeIndexed encoded,
+// and any drift between them is itself a defect (byb-96p).
+func TestBuildPDFAcceptsIndexedImage(t *testing.T) {
+	const w, h, colors = 40, 24, 16
+	src := colorPattern(w, h)
+
+	img, err := QuantizeIndexed(src, colors)
+	if err != nil {
+		t.Fatalf("QuantizeIndexed: %v", err)
+	}
+	out := buildOrFatal(t, []BuildPage{{Image: img, DPI: 300}})
+
+	if err := pdfdoc.Validate(bytes.NewReader(out)); err != nil {
+		t.Errorf("pdfdoc.Validate: %v", err)
+	}
+
+	// /ColorSpace for an Indexed image is an ARRAY carrying the base space,
+	// the high index and the palette (ISO 32000-1 8.6.6.3). A bare
+	// `/ColorSpace /Indexed` names nothing a reader can resolve, and a
+	// missing palette silently loses every colour.
+	dict := imageDictString(t, out, "FlateDecode")
+	if !strings.Contains(dict, "/Indexed") || !strings.Contains(dict, "/DeviceRGB") {
+		t.Errorf("image dict = %s; want an /Indexed array over /DeviceRGB", dict)
+	}
+	if !strings.Contains(dict, hex.EncodeToString(img.ColorSpace.Lookup)) {
+		t.Errorf("image dict = %s; want it to carry the %d-byte palette", dict, len(img.ColorSpace.Lookup))
+	}
+
+	pr, err := ExtractPageRaster(bytes.NewReader(out), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster: %v", err)
+	}
+	want := quantizePNGPalette(t, src, colors)
+	b := pr.Image.Bounds()
+	if b.Dx() != w || b.Dy() != h {
+		t.Fatalf("raster is %dx%d; want %dx%d", b.Dx(), b.Dy(), w, h)
+	}
+	wb := want.Bounds()
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			gr, gg, gb, _ := pr.Image.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			wr, wg, wbl, _ := want.At(wb.Min.X+x, wb.Min.Y+y).RGBA()
+			if gr != wr || gg != wg || gb != wbl {
+				t.Fatalf("pixel (%d,%d) = (%d,%d,%d); want (%d,%d,%d)",
+					x, y, gr>>8, gg>>8, gb>>8, wr>>8, wg>>8, wbl>>8)
+			}
+		}
+	}
 }
 
 // pdfimagesPNG runs pdfimages over pdf and decodes its one extracted image.
