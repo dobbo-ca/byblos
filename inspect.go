@@ -30,11 +30,21 @@ import (
 // or DPI from Bounds against the stored raster's pixel dimensions (Width,
 // Height) must account for this — a clipped Bounds does not mean the raster
 // was stored at a different resolution.
+//
+// ObjNr identifies the image XObject itself, and is the handle ReplaceImages
+// takes. It is per-OBJECT, not per-painting: one XObject can be painted on
+// several pages, or twice on one page, and every such ImageRef reports the
+// same ObjNr — which is exactly the signal a caller needs to re-encode a
+// shared raster once rather than once per page. It is negative for an image
+// stream that is a direct object, which ISO 32000-1 section 7.3.8.1 forbids
+// and which ReplaceImages therefore refuses; such a stream has no
+// cross-reference entry to write a substitution back to.
 type ImageRef struct {
 	Bounds        image.Rectangle
 	Placement     [6]float64
 	Width, Height int  // pixel dimensions of the stored raster
 	Bitonal       bool // 1 bit per component, or an image mask
+	ObjNr         int  // the image XObject's PDF object number
 }
 
 // PageInfo describes one page.
@@ -92,6 +102,7 @@ func inspectPage(d pdfdoc.Doc, n int) (*PageInfo, *content.Scan, error) {
 			ref.Width = info.Width
 			ref.Height = info.Height
 			ref.Bitonal = info.BPC == 1 || info.ImageMask
+			ref.ObjNr = info.ObjNr
 		}
 		pi.Images = append(pi.Images, ref)
 	}
