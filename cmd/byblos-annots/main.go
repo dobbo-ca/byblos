@@ -175,13 +175,16 @@ func scanFile(path, root string, s *summary, enc *json.Encoder) {
 
 // scanPage measures one page and survives a panic from below.
 //
-// pdfcpu parses the page's content stream inside PageDict, and its TJ handling
-// indexes an empty slice on a malformed array, so a single damaged page kills
-// the process from inside pdfdoc.Page. pdfcpu's own fault.Catch recovers only
-// its own panic type, which this is not. Recovering here is not a fix — any
-// caller of byblos.Inspect or byblos.ExtractPageRaster on such a file crashes
-// the same way, which is byb-avp — it is what lets a measurement over
-// thousands of real files report the damage instead of dying on it.
+// pdfcpu's TJ handling indexes an empty slice on a malformed array, and
+// pdfcpu's own fault.Catch recovers only its own panic type, which this is not.
+// Recovering here is not a fix — any caller of byblos.Inspect or
+// byblos.ExtractPageRaster on such a file crashes the same way, which is
+// byb-avp — it is what lets a measurement over thousands of real files report
+// the damage instead of dying on it.
+//
+// pdfdoc.Page no longer reaches that parser at all (byb-ged stopped asking
+// pdfcpu to consolidate page resources), so this recover is now insurance
+// against the paths that still can rather than a guard on the common one.
 func scanPage(f io.ReadSeeker, d pdfdoc.Doc, rel string, n int, s *summary, enc *json.Encoder) {
 	defer func() {
 		if r := recover(); r != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 )
@@ -307,9 +308,8 @@ func TestAnnotsStampInTheNaturalDPIStrip(t *testing.T) {
 }
 
 // pdfcpu's skipTJ indexes s[0] in three places with no length check, so a TJ
-// array the content stream ends inside walks off the end. PageDict parses
-// content, which is why the crash arrives from what looks like a dictionary
-// read, and pdfcpu's fault.Catch does not recover it.
+// array the content stream ends inside walks off the end, and pdfcpu's
+// fault.Catch does not recover it.
 //
 // "[(a)" is the shortest trigger: the string literal is consumed, the loop
 // comes round, and TrimLeftFunc leaves nothing to index. "[" alone does NOT do
@@ -319,6 +319,18 @@ func TestAnnotsStampInTheNaturalDPIStrip(t *testing.T) {
 // govdocs1/050734.pdf page 19 is the real file this reproduces: it killed a
 // byblos-annots run over 4,840 files outright. Without the recover this test
 // does not fail, it takes the whole test binary down with it. See byb-avp.
+//
+// WHERE the panic comes from moved with byb-ged. skipTJ is reached only from
+// pdfcpu's parseContent, and parseContent is reached only from
+// consolidateResourcesWithContent — that is, only when PageDict is called with
+// consolidateRes=true. Page and Annots now pass false, so this document is
+// simply READ, which is the point of byb-ged: byblos has its own content
+// parser and does not need pdfcpu's opinion of the same bytes.
+//
+// The panic is still one call away, because api.Optimize does its own
+// PageDict(i, true) internally (pdfcpu/optimize.go), so the guard keeps a live
+// trigger and this test keeps its teeth. Delete catchPanic and the Optimize
+// leg below does not fail, it takes the test binary down.
 func TestMalformedTJIsAnErrorNotAPanic(t *testing.T) {
 	body := "[(a)"
 	data := buildPDF([]string{
@@ -335,8 +347,23 @@ func TestMalformedTJIsAnErrorNotAPanic(t *testing.T) {
 		}
 		return // caught one level up, which is equally fine
 	}
-	if _, err := d.Page(1); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("Page(1) error = %v; want ErrMalformed. If nil, the fixture no "+
+	// The read half: no longer lost. Asserting the content comes back verbatim
+	// is what keeps this from passing on a Page that quietly returned nothing.
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v; want the page read: byblos's own parser "+
+			"handles these bytes and pdfcpu is no longer asked to.", err)
+	}
+	if string(p.Content) != body {
+		t.Fatalf("Content = %q; want %q", p.Content, body)
+	}
+
+	// The guard half: a path that DOES still reach skipTJ must return an error
+	// rather than crash. If this stops reproducing the panic, the assertion
+	// below is the thing that says so.
+	err = Optimize(bytes.NewReader(data), io.Discard)
+	if !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Optimize error = %v; want ErrMalformed. If nil, the fixture no "+
 			"longer reproduces the panic and this test is proving nothing.", err)
 	}
 }
