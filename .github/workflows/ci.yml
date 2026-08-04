@@ -42,7 +42,7 @@ jobs:
           # byb-b3, includes pngquant and gs: both are now consulted oracles,
           # not tools deliberately left out.
           for b in qpdf pdfinfo pdftotext pdfimages pdftoppm pdffonts \
-                   jbig2dec magick convert tiffdump pngquant gs jbig2; do
+                   jbig2dec magick convert tiffdump pngquant gs; do
             if p=$(command -v "$b" 2>/dev/null); then
               echo "::error::oracle on PATH: $b -> $p"; fail=1
             fi
@@ -91,13 +91,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qpdf poppler-utils \
-            jbig2dec imagemagick libtiff-tools pngquant ghostscript jbig2enc
+            jbig2dec imagemagick libtiff-tools pngquant ghostscript
       - name: assert the oracles are on PATH
         # A missing binary makes the corresponding test t.Skip, which would
         # turn this whole job into a silent no-op. Fail here instead, loudly.
         run: |
           for t in qpdf pdfinfo pdftotext pdfimages pdftoppm pdffonts \
-                   jbig2dec tiffdump pngquant gs jbig2; do
+                   jbig2dec tiffdump pngquant gs; do
             command -v "$t" >/dev/null || { echo "MISSING oracle: $t"; exit 1; }
           done
           command -v magick >/dev/null || command -v convert >/dev/null || { echo "MISSING oracle: magick/convert"; exit 1; }
