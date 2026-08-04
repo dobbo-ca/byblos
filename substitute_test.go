@@ -2,6 +2,7 @@ package byblos
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"testing"
@@ -245,6 +246,24 @@ func TestReplaceImagesCarriesAQuantizedIndexedImageIntoAnExistingPDF(t *testing.
 	}
 	if b := pr2.Image.Bounds(); b.Dx() != enc.Width || b.Dy() != enc.Height {
 		t.Errorf("extracted raster is %dx%d; want %dx%d", b.Dx(), b.Dy(), enc.Width, enc.Height)
+	}
+
+	// Width/Height and a decodable raster can be satisfied by leaving the
+	// ORIGINAL stream untouched, since QuantizeIndexed preserves pixel
+	// dimensions. Only these checks prove the substitution actually reached
+	// the file: the quantized stream's own bytes, its bit depth, and its
+	// palette/predictor shape.
+	if !bytes.Contains(out.Bytes(), enc.Data) {
+		t.Error("written PDF does not contain the quantized stream's bytes; substitution did not happen")
+	}
+	if want := []byte(fmt.Sprintf("/BitsPerComponent %d", enc.BPC)); !bytes.Contains(out.Bytes(), want) {
+		t.Errorf("written PDF does not declare %s", want)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("/Indexed")) {
+		t.Error("written PDF does not declare an /Indexed colour space")
+	}
+	if !bytes.Contains(out.Bytes(), []byte("/Predictor")) {
+		t.Error("written PDF does not carry /DecodeParms /Predictor")
 	}
 }
 
