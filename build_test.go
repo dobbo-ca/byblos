@@ -12,10 +12,16 @@ package byblos
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"image/png"
+	"io"
 	"math"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -472,6 +478,62 @@ func TestBuildPDFRejectsUnsupportedInput(t *testing.T) {
 			Filter:     "FlateDecode",
 			Data:       flateEncode(t, make([]byte, 128)),
 		}, DPI: 300}}},
+		// indexed-short-lookup and indexed-bad-base: an /Indexed space whose
+		// palette does not match its own declaration. Writing either produces
+		// a /ColorSpace array a reader cannot resolve; internal/pdfdoc's write
+		// seam already refuses both (ColorSpace.object), and pdfbuild must
+		// agree rather than emit a broken array.
+		{"indexed-short-lookup", []BuildPage{{Image: EncodedImage{
+			Width: 8, Height: 8, BPC: 4,
+			ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: 15, Lookup: []byte{1, 2, 3}},
+			Filter:     "FlateDecode",
+			Data:       flateEncode(t, make([]byte, 32)),
+		}, DPI: 300}}},
+		{"indexed-bad-base", []BuildPage{{Image: EncodedImage{
+			Width: 8, Height: 8, BPC: 4,
+			ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceLab", HiVal: 0, Lookup: []byte{1}},
+			Filter:     "FlateDecode",
+			Data:       flateEncode(t, make([]byte, 32)),
+		}, DPI: 300}}},
+		// indexed-index-past-hival: a self-consistent /Indexed declaration --
+		// the lookup is exactly (hival+1)*3 bytes -- whose SAMPLES name a
+		// palette entry that does not exist. See
+		// TestBuildPDFRejectsIndexPastPalette for the panic this produces.
+		{"indexed-index-past-hival", []BuildPage{{Image: EncodedImage{
+			Width: 8, Height: 8, BPC: 8,
+			ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: 1, Lookup: []byte{0, 0, 0, 255, 255, 255}},
+			Filter:     "FlateDecode",
+			Data:       flateEncode(t, bytes.Repeat([]byte{200}, 64)),
+		}, DPI: 300}}},
+		// indexed-tiff-predictor and indexed-parms-disagree: /DecodeParms
+		// that leave the samples unrecoverable. Every sample below is 0, well
+		// inside the palette, so only a refusal to guess at the row layout
+		// rejects these -- and guessing wrong is how an index past the
+		// palette gets through.
+		{"indexed-tiff-predictor", []BuildPage{{Image: EncodedImage{
+			Width: 8, Height: 8, BPC: 8,
+			ColorSpace:  ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: 3, Lookup: make([]byte, 12)},
+			Filter:      "FlateDecode",
+			DecodeParms: &DecodeParms{Predictor: 2, Colors: 1, BitsPerComponent: 8, Columns: 8},
+			Data:        flateEncode(t, make([]byte, 64)),
+		}, DPI: 300}}},
+		{"indexed-parms-disagree", []BuildPage{{Image: EncodedImage{
+			Width: 8, Height: 8, BPC: 8,
+			ColorSpace:  ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: 3, Lookup: make([]byte, 12)},
+			Filter:      "FlateDecode",
+			DecodeParms: &DecodeParms{Predictor: 15, Colors: 1, BitsPerComponent: 8, Columns: 4},
+			Data:        flateEncode(t, make([]byte, 72)),
+		}, DPI: 300}}},
+		// indexed-short-stream: a well-formed zlib stream that runs out
+		// before the rows the image declares. pdfcpu indexes straight into
+		// its decoded buffer, so this is the other way a byblos-written
+		// indexed page panics byblos's own reader.
+		{"indexed-short-stream", []BuildPage{{Image: EncodedImage{
+			Width: 8, Height: 8, BPC: 8,
+			ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: 3, Lookup: make([]byte, 12)},
+			Filter:     "FlateDecode",
+			Data:       flateEncode(t, make([]byte, 32)),
+		}, DPI: 300}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -617,14 +679,26 @@ func TestBuiltPDFPixelsMatchPdfimages(t *testing.T) {
 
 	dct, wantDCT := jpegImage(t, w, h)
 
+	// The indexed case is the one where a foreign decoder earns the most: a
+	// /ColorSpace ARRAY carries the palette itself, so a wrong base, a wrong
+	// hival or a mis-encoded lookup is a whole-image colour error that
+	// ExtractPageRaster (pdfcpu) and poppler would have to get wrong in the
+	// same way to hide.
+	indexedSrc := colorPattern(w, h)
+	indexed, err := QuantizeIndexed(indexedSrc, 16)
+	if err != nil {
+		t.Fatalf("QuantizeIndexed: %v", err)
+	}
+
 	compared := 0
 	for name, tc := range map[string]struct {
 		img       EncodedImage
 		want      image.Image
 		tolerance int
 	}{
-		"flate": {flate, wantFlate, 0},
-		"dct":   {dct, wantDCT, dctTolerance},
+		"flate":   {flate, wantFlate, 0},
+		"dct":     {dct, wantDCT, dctTolerance},
+		"indexed": {indexed, quantizePNGPalette(t, indexedSrc, 16), 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := buildOrFatal(t, []BuildPage{{Image: tc.img, DPI: 300}})
@@ -677,6 +751,502 @@ func grayPatternImage(w, h int, px []byte) image.Image {
 	im := image.NewGray(image.Rect(0, 0, w, h))
 	copy(im.Pix, px)
 	return im
+}
+
+// --- T11: the Indexed image QuantizeIndexed produces (byb-5jy) -----------
+
+// colorPattern returns a deterministic RGB raster with far more distinct
+// colours than a 16-entry palette can hold, so quantizing it is a real
+// reduction rather than an identity that would hide a wrong palette.
+func colorPattern(w, h int) image.Image {
+	im := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			im.SetRGBA(x, y, color.RGBA{
+				R: byte((x*7 + y*3) % 256),
+				G: byte((x*11 + y*5) % 256),
+				B: byte((x*3 + y*13) % 256),
+				A: 255,
+			})
+		}
+	}
+	return im
+}
+
+// BuildPDF is the only exported consumer of an EncodedImage, so it is the
+// only route QuantizeIndexed's output has into a PDF at all (ReplaceImage
+// hangs off internal/pdfdoc's unexported doc). Measured at 3fa75a8, BuildPDF
+// refused that output outright with `colour space "Indexed" is not
+// supported`, which made QuantizeIndexed unreachable from outside the module.
+//
+// The pixel comparison goes through QuantizePNG's palette, not through the
+// source image: QuantizeIndexed and QuantizePNG share quantizeCore, so
+// QuantizePNG's decoded output is the exact raster QuantizeIndexed encoded,
+// and any drift between them is itself a defect (byb-96p).
+func TestBuildPDFAcceptsIndexedImage(t *testing.T) {
+	const w, h, colors = 40, 24, 16
+	src := colorPattern(w, h)
+
+	img, err := QuantizeIndexed(src, colors)
+	if err != nil {
+		t.Fatalf("QuantizeIndexed: %v", err)
+	}
+	out := buildOrFatal(t, []BuildPage{{Image: img, DPI: 300}})
+
+	if err := pdfdoc.Validate(bytes.NewReader(out)); err != nil {
+		t.Errorf("pdfdoc.Validate: %v", err)
+	}
+
+	// /ColorSpace for an Indexed image is an ARRAY carrying the base space,
+	// the high index and the palette (ISO 32000-1 8.6.6.3). A bare
+	// `/ColorSpace /Indexed` names nothing a reader can resolve, and a
+	// missing palette silently loses every colour.
+	//
+	// Asserted as ONE contiguous substring, hival included. Asserting
+	// "/Indexed" and "/DeviceRGB" separately leaves the integer between them
+	// unpinned: mutating the emission to cs.HiVal-1 still passed this test,
+	// and the only thing that caught it was the poppler comparison, which the
+	// oracle-free CI variant skips.
+	dict := imageDictString(t, out, "FlateDecode")
+	if want := fmt.Sprintf("[/Indexed /DeviceRGB %d ", img.ColorSpace.HiVal); !strings.Contains(dict, want) {
+		t.Errorf("image dict = %s; want it to contain %q", dict, want)
+	}
+	if !strings.Contains(dict, hex.EncodeToString(img.ColorSpace.Lookup)) {
+		t.Errorf("image dict = %s; want it to carry the %d-byte palette", dict, len(img.ColorSpace.Lookup))
+	}
+
+	pr, err := ExtractPageRaster(bytes.NewReader(out), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster: %v", err)
+	}
+	want := quantizePNGPalette(t, src, colors)
+	b := pr.Image.Bounds()
+	if b.Dx() != w || b.Dy() != h {
+		t.Fatalf("raster is %dx%d; want %dx%d", b.Dx(), b.Dy(), w, h)
+	}
+	wb := want.Bounds()
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			gr, gg, gb, _ := pr.Image.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			wr, wg, wbl, _ := want.At(wb.Min.X+x, wb.Min.Y+y).RGBA()
+			if gr != wr || gg != wg || gb != wbl {
+				t.Fatalf("pixel (%d,%d) = (%d,%d,%d); want (%d,%d,%d)",
+					x, y, gr>>8, gg>>8, gb>>8, wr>>8, wg>>8, wbl>>8)
+			}
+		}
+	}
+}
+
+// --- T12: Data that cannot decode under its own /Filter (byb-vq6) --------
+
+// EncodedImage.Data is []byte and QuantizePNG returns []byte, so nothing in
+// the type system stops a caller handing BuildPDF a whole PNG FILE and
+// declaring it FlateDecode -- and QuantizePNG and BuildPDF are the two most
+// obvious-looking entry points to wire together.
+//
+// Measured at 17e1936, before this test's fix: BuildPDF returned <nil> and
+// wrote 1043 bytes. zlib.NewReader over those Data bytes gives "zlib: invalid
+// header" (a PNG file starts with its 8-byte signature and IHDR, not a zlib
+// stream), and reading the written page back through byblos's own extractor
+// fails with "byblos/pdfdoc: rendering image 5: zlib: invalid header".
+// Silent at write, loud much later, is the worst place for that failure in an
+// archive.
+func TestBuildPDFRejectsFlateDataThatCannotDecode(t *testing.T) {
+	const w, h = 40, 24
+	pngFile, err := QuantizePNG(colorPattern(w, h), 16)
+	if err != nil {
+		t.Fatalf("QuantizePNG: %v", err)
+	}
+	var buf bytes.Buffer
+	err = BuildPDF(&buf, []BuildPage{{Image: EncodedImage{
+		Width: w, Height: h, BPC: 8,
+		ColorSpace: ColorSpace{Name: "DeviceRGB"},
+		Filter:     "FlateDecode",
+		Data:       pngFile,
+	}, DPI: 300}})
+	if err == nil {
+		t.Fatal("BuildPDF returned nil error for a PNG file declared as FlateDecode; want a rejection")
+	}
+	if !strings.Contains(err.Error(), "FlateDecode") {
+		t.Errorf("error = %v; want it to name the filter whose data does not decode", err)
+	}
+}
+
+// --- T13: an /Indexed sample naming an entry the palette does not have ----
+
+// pngIDAT concatenates every IDAT payload in pngData. It is deliberately a
+// second, independent chunk walker: quantize_indexed.go has one, and reusing
+// that one here would let a bug in it hide behind itself.
+func pngIDAT(t *testing.T, pngData []byte) []byte {
+	t.Helper()
+	var idat []byte
+	p := pngData[8:] // past the 8-byte signature
+	for len(p) >= 8 {
+		n := int(binary.BigEndian.Uint32(p[:4]))
+		if string(p[4:8]) == "IDAT" {
+			idat = append(idat, p[8:8+n]...)
+		}
+		p = p[8+n+4:]
+	}
+	if idat == nil {
+		t.Fatal("no IDAT chunk in encoded PNG")
+	}
+	return idat
+}
+
+// pngPredictedGray encodes an 8-bit GREYSCALE PNG of w x h whose samples run
+// 0..maxVal, and returns the concatenation of its IDAT payloads: a zlib
+// stream of PNG-predicted rows, byte for byte the shape a PDF /FlateDecode
+// image with /DecodeParms << /Predictor 15 /Colors 1 /BitsPerComponent 8 >>
+// carries.
+//
+// Greyscale rather than paletted on purpose. image/png skips filtering
+// entirely for paletted images ("filters are rarely useful on palette
+// images", writer.go), so a paletted encode exercises only filter type 0 and
+// could not tell a correct un-predictor from one that mishandles Sub, Up,
+// Average or Paeth. An 8-bit greyscale row and an 8-bit index row have the
+// same layout -- one component, one byte per sample -- so the bytes are
+// equally valid as either.
+//
+// It fails the test if image/png happened to choose filter 0 for every row,
+// because that would silently cost this fixture its whole point.
+func pngPredictedGray(t *testing.T, w, h, maxVal int) []byte {
+	t.Helper()
+	im := image.NewGray(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			// Rows of deliberately different character -- flat, a ramp, a
+			// repeat of the ramp, noise, a constant per row -- because
+			// image/png picks each row's filter by minimum absolute sum, and
+			// a uniform pattern makes it pick one filter for the whole image.
+			v := 0
+			switch y % 5 {
+			case 0:
+				v = 7
+			case 1, 2:
+				v = x
+			case 3:
+				v = (x * 17) % 199
+			case 4:
+				v = y * 11
+			}
+			im.SetGray(x, y, color.Gray{Y: byte(v % (maxVal + 1))})
+		}
+	}
+	var buf bytes.Buffer
+	enc := png.Encoder{CompressionLevel: png.BestCompression}
+	if err := enc.Encode(&buf, im); err != nil {
+		t.Fatalf("png encode: %v", err)
+	}
+	idat := pngIDAT(t, buf.Bytes())
+
+	zr, err := zlib.NewReader(bytes.NewReader(idat))
+	if err != nil {
+		t.Fatalf("zlib.NewReader over IDAT: %v", err)
+	}
+	raw, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("inflating IDAT: %v", err)
+	}
+	if want := h * (1 + w); len(raw) != want {
+		t.Fatalf("inflated IDAT is %d bytes, want %d", len(raw), want)
+	}
+	filters := map[byte]bool{}
+	for y := 0; y < h; y++ {
+		filters[raw[y*(1+w)]] = true
+	}
+	if len(filters) < 2 {
+		t.Fatalf("image/png chose filter types %v for every row; this fixture needs a mix to exercise un-prediction", filters)
+	}
+	return idat
+}
+
+// BuildPDF must not write a file byblos's own reader crashes on. An /Indexed
+// image whose lookup table is exactly (hival+1)*n bytes is internally
+// consistent -- pdfcpu's own "corrupt lookup table" guard passes -- yet a
+// SAMPLE larger than hival indexes past the end of it.
+//
+// Measured at 4d5ac96, before this test's fix, for the first case below:
+//
+//	BuildPDF err = <nil>, bytes = 726
+//	pdfdoc.Validate = <nil>
+//	panic: runtime error: index out of range [600] with length 6
+//	  pdfcpu.renderIndexedRGBToPNG  writeImage.go:619
+//	  pdfdoc.(*doc).RawImage        pdfdoc.go:486
+//	  byblos.ExtractPageRaster      extract.go:216
+//
+// A panic, not an error, from an exported API, over bytes byblos itself
+// wrote. At 3fa75a8 it was unreachable only because /Indexed was refused
+// outright; emitting /Indexed (byb-5jy) is what opened it.
+func TestBuildPDFRejectsIndexPastPalette(t *testing.T) {
+	t.Run("raw", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := BuildPDF(&buf, []BuildPage{{Image: EncodedImage{
+			Width: 8, Height: 8, BPC: 8,
+			ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: 1, Lookup: []byte{0, 0, 0, 255, 255, 255}},
+			Filter:     "FlateDecode",
+			Data:       flateEncode(t, bytes.Repeat([]byte{200}, 64)),
+		}, DPI: 300}})
+		if err == nil {
+			t.Fatalf("BuildPDF returned nil for samples of 200 against hival 1; want a rejection (wrote %d bytes)", buf.Len())
+		}
+		if !strings.Contains(err.Error(), "200") || !strings.Contains(err.Error(), "hival") {
+			t.Errorf("error = %v; want it to name the offending index and the hival", err)
+		}
+	})
+
+	// The same defect behind a /Predictor 15 stream: the sample values are
+	// not the stream's bytes, so only code that actually un-predicts can see
+	// them. A check that scanned the compressed -- or the still-filtered --
+	// bytes would pass this by accident or fail the accept case below.
+	t.Run("png-predicted", func(t *testing.T) {
+		const w, h, maxVal = 41, 17, 200
+		var buf bytes.Buffer
+		err := BuildPDF(&buf, []BuildPage{{Image: EncodedImage{
+			Width: w, Height: h, BPC: 8,
+			ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: 100, Lookup: make([]byte, 3*101)},
+			Filter:     "FlateDecode",
+			DecodeParms: &DecodeParms{
+				Predictor: 15, Colors: 1, BitsPerComponent: 8, Columns: w,
+			},
+			Data: pngPredictedGray(t, w, h, maxVal),
+		}, DPI: 300}})
+		if err == nil {
+			t.Fatalf("BuildPDF returned nil for samples up to %d against hival 100; want a rejection (wrote %d bytes)", maxVal, buf.Len())
+		}
+	})
+}
+
+// The mirror of the test above, and the reason the check cannot be the cheap
+// `(1<<BPC)-1 > HiVal` gate: byblos's own encoder routinely emits an image
+// whose bit depth can represent indices its palette does not define.
+// QuantizeIndexed sets HiVal = len(palette)-1 and BPC = paletteBitDepth(len
+// (palette)) (quantize_indexed.go), so any palette that is not a power of two
+// -- ten colours here: BPC 4, hival 9, indices 10..15 representable and
+// undefined -- is legitimate output that such a gate would refuse.
+//
+// The /Predictor 15 stream also makes this the accept-side check on
+// un-prediction: reconstruct a row wrongly and the recovered indices are
+// noise, which almost certainly exceeds 9 and turns this into a failure.
+func TestBuildPDFAcceptsIndexedNonPowerOfTwoPalette(t *testing.T) {
+	const w, h, colors = 40, 24, 10
+	img, err := QuantizeIndexed(colorPattern(w, h), colors)
+	if err != nil {
+		t.Fatalf("QuantizeIndexed: %v", err)
+	}
+	if img.BPC != 4 || img.ColorSpace.HiVal != colors-1 {
+		t.Fatalf("QuantizeIndexed(%d colours) gave BPC %d, hival %d; want 4 and %d -- this test's premise is that byblos emits representable-but-undefined indices",
+			colors, img.BPC, img.ColorSpace.HiVal, colors-1)
+	}
+	out := buildOrFatal(t, []BuildPage{{Image: img, DPI: 300}})
+	if err := pdfdoc.Validate(bytes.NewReader(out)); err != nil {
+		t.Errorf("pdfdoc.Validate: %v", err)
+	}
+	pr, err := ExtractPageRaster(bytes.NewReader(out), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster: %v", err)
+	}
+	if b := pr.Image.Bounds(); b.Dx() != w || b.Dy() != h {
+		t.Errorf("raster is %dx%d; want %dx%d", b.Dx(), b.Dy(), w, h)
+	}
+}
+
+// An 8-bit /Indexed page whose samples all resolve must still be written and
+// still read back, predictor and all -- the accept side of T13 over a stream
+// image/png filtered with a mix of row filters.
+func TestBuildPDFAcceptsPredictedIndexedWithinPalette(t *testing.T) {
+	const w, h, maxVal = 41, 17, 200
+	lookup := make([]byte, 3*(maxVal+1))
+	for i := range lookup {
+		lookup[i] = byte(i % 256)
+	}
+	out := buildOrFatal(t, []BuildPage{{Image: EncodedImage{
+		Width: w, Height: h, BPC: 8,
+		ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: maxVal, Lookup: lookup},
+		Filter:     "FlateDecode",
+		DecodeParms: &DecodeParms{
+			Predictor: 15, Colors: 1, BitsPerComponent: 8, Columns: w,
+		},
+		Data: pngPredictedGray(t, w, h, maxVal),
+	}, DPI: 300}})
+	if err := pdfdoc.Validate(bytes.NewReader(out)); err != nil {
+		t.Errorf("pdfdoc.Validate: %v", err)
+	}
+	pr, err := ExtractPageRaster(bytes.NewReader(out), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster: %v", err)
+	}
+	if b := pr.Image.Bounds(); b.Dx() != w || b.Dy() != h {
+		t.Errorf("raster is %dx%d; want %dx%d", b.Dx(), b.Dy(), w, h)
+	}
+}
+
+// A row of sub-byte samples whose width is not a whole number of bytes ends
+// in padding bits, which ISO 32000-1 section 8.9.5.1 says a reader ignores --
+// pdfcpu's renderIndexedRGBToPNG stops at Width and never looks at them. A
+// palette check that read them as samples would refuse this page, whose five
+// real indices are all inside a four-entry palette and whose sixth nibble,
+// pure padding, is 0xF.
+func TestBuildPDFAcceptsIndexedRowPadding(t *testing.T) {
+	const w, h = 5, 2 // 5 samples of 4 bits = 2.5 bytes, so 3 bytes a row
+	rows := []byte{
+		0x12, 0x30, 0x2F, // samples 1 2 3 0 2, then 0xF of padding
+		0x03, 0x21, 0x3F, // samples 0 3 2 1 3, then 0xF of padding
+	}
+	out := buildOrFatal(t, []BuildPage{{Image: EncodedImage{
+		Width: w, Height: h, BPC: 4,
+		ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: 3, Lookup: make([]byte, 12)},
+		Filter:     "FlateDecode",
+		Data:       flateEncode(t, rows),
+	}, DPI: 300}})
+	if _, err := ExtractPageRaster(bytes.NewReader(out), 1); err != nil {
+		t.Errorf("ExtractPageRaster: %v", err)
+	}
+}
+
+// paethPredictor is ISO/IEC 15948 section 9.4's PaethPredictor over the byte
+// to the left (a), the byte above (b) and the byte above-left (c).
+func paethPredictor(a, b, c byte) byte {
+	p := int(a) + int(b) - int(c)
+	pa, pb, pc := abs(p-int(a)), abs(p-int(b)), abs(p-int(c))
+	switch {
+	case pa <= pb && pa <= pc:
+		return a
+	case pb <= pc:
+		return b
+	}
+	return c
+}
+
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// pngFilterRows encodes rows -- one byte per sample -- as a PDF /Predictor 15
+// stream: each row prefixed with the filter type in filters[i] and filtered
+// under it, the lot deflated.
+//
+// The forward filters are written out from ISO/IEC 15948 section 9.2 here
+// rather than borrowed from pdfbuild, so this and pdfbuild's reconstruction
+// are two independent readings of the same spec. image/png cannot stand in:
+// it only ever chooses three of the five filter types for data of this shape,
+// so Average in particular would go untested.
+func pngFilterRows(t *testing.T, rows [][]byte, filters []byte) []byte {
+	t.Helper()
+	var raw bytes.Buffer
+	prev := make([]byte, len(rows[0]))
+	for i, row := range rows {
+		out := make([]byte, len(row))
+		for j := range row {
+			// a, b, c: left, above, above-left. bpp is 1 because these are
+			// one-component 8-bit rows.
+			var a, c byte
+			if j > 0 {
+				a, c = row[j-1], prev[j-1]
+			}
+			b := prev[j]
+			switch filters[i] {
+			case 0:
+				out[j] = row[j]
+			case 1:
+				out[j] = row[j] - a
+			case 2:
+				out[j] = row[j] - b
+			case 3:
+				out[j] = row[j] - byte((int(a)+int(b))/2)
+			case 4:
+				out[j] = row[j] - paethPredictor(a, b, c)
+			default:
+				t.Fatalf("filter type %d is not one of PNG's 0..4", filters[i])
+			}
+		}
+		raw.WriteByte(filters[i])
+		raw.Write(out)
+		prev = row
+	}
+	return flateEncode(t, raw.Bytes())
+}
+
+// indexedPredictedPage wraps a /Predictor 15 stream of 8-bit samples as a
+// one-page /Indexed build with the given hival.
+func indexedPredictedPage(w, h, hival int, data []byte) []BuildPage {
+	return []BuildPage{{Image: EncodedImage{
+		Width: w, Height: h, BPC: 8,
+		ColorSpace: ColorSpace{Name: "Indexed", Base: "DeviceRGB", HiVal: hival, Lookup: make([]byte, 3*(hival+1))},
+		Filter:     "FlateDecode",
+		DecodeParms: &DecodeParms{
+			Predictor: 15, Colors: 1, BitsPerComponent: 8, Columns: w,
+		},
+		Data: data,
+	}, DPI: 300}}
+}
+
+// Every one of PNG's five row filters, over random rows, pinned at the exact
+// hival boundary: BuildPDF must accept a stream whose largest sample IS hival
+// and refuse the identical stream one hival lower. Accepting at the boundary
+// and refusing below it together say the recovered maximum is exactly the
+// true one, so any filter type reconstructed wrongly shows up as soon as the
+// error moves that maximum -- which random rows make it do quickly.
+//
+// A single fixed row set is much weaker: an off-by-one in Average's rounding
+// (`(left+above+1)/2`) survived one, because the corrupted samples happened
+// to stay under the same maximum. Over the 64 row sets here it does not.
+func TestBuildPDFIndexedHonoursEveryPNGRowFilter(t *testing.T) {
+	const w, h = 16, 5
+	rng := rand.New(rand.NewSource(1))
+	for iter := 0; iter < 64; iter++ {
+		rows := make([][]byte, h)
+		filters := make([]byte, h)
+		maxSample := 0
+		for i := range rows {
+			// Rotating the assignment puts every filter type in every row
+			// position, so each one is exercised both against the implied
+			// zero row above row 1 and against a real row.
+			filters[i] = byte((i + iter) % 5)
+			rows[i] = make([]byte, w)
+			for j := range rows[i] {
+				v := rng.Intn(90)
+				rows[i][j] = byte(v)
+				if v > maxSample {
+					maxSample = v
+				}
+			}
+		}
+		data := pngFilterRows(t, rows, filters)
+
+		if err := BuildPDF(io.Discard, indexedPredictedPage(w, h, maxSample, data)); err != nil {
+			t.Fatalf("row set %d (filters %v): BuildPDF at hival %d, the true largest sample: %v", iter, filters, maxSample, err)
+		}
+		if err := BuildPDF(io.Discard, indexedPredictedPage(w, h, maxSample-1, data)); err == nil {
+			t.Fatalf("row set %d (filters %v): BuildPDF returned nil at hival %d, one below the true largest sample %d", iter, filters, maxSample-1, maxSample)
+		}
+	}
+}
+
+// The stream of the test above must also survive the round trip, not merely
+// be accepted.
+func TestBuildPDFIndexedPredictedRoundTrips(t *testing.T) {
+	const w, h = 16, 5
+	rows := make([][]byte, h)
+	maxSample := 0
+	for i := range rows {
+		rows[i] = make([]byte, w)
+		for j := range rows[i] {
+			v := (i*37 + j*29) % 90
+			rows[i][j] = byte(v)
+			if v > maxSample {
+				maxSample = v
+			}
+		}
+	}
+	out := buildOrFatal(t, indexedPredictedPage(w, h, maxSample,
+		pngFilterRows(t, rows, []byte{0, 1, 2, 3, 4})))
+	if _, err := ExtractPageRaster(bytes.NewReader(out), 1); err != nil {
+		t.Errorf("ExtractPageRaster: %v", err)
+	}
 }
 
 // pdfimagesPNG runs pdfimages over pdf and decodes its one extracted image.
