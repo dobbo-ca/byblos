@@ -291,8 +291,13 @@ func Sauvola(img image.Image) (*Bitmap, error)
 // failure: this one says the bytes are fine and byblos is not enough.
 var ErrUnsupportedJBIG2Feature = errors.New("byblos: JBIG2 stream uses a feature byblos does not decode")
 
-// DecodeJBIG2Generic is the exact inverse of EncodeJBIG2Generic and nothing
-// wider (byb-riy): immediate generic regions only. It is what makes a
+// DecodeJBIG2Generic inverts EncodeJBIG2Generic UP TO A SIZE and nothing wider
+// (byb-riy): immediate generic regions only, and only pages inside the decoder's
+// resource budget -- 67,108,864 pixels packing into 16 MiB, which covers every
+// 600-dpi master and 800-dpi A4 but not 600-dpi A3. The encoder has no size
+// budget and never did, so byblos can write a page it will not read back; the
+// asymmetry is documented on DecodeJBIG2Generic and pinned by
+// TestEncodeDecodeSizeBoundary. Below that size it is what makes a
 // byblos-compressed page re-openable by byblos, and it is the decoder
 // ExtractPageRaster runs on an inbound /JBIG2Decode image. See §5.
 func DecodeJBIG2Generic(data []byte) (*Bitmap, error)
