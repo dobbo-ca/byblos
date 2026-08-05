@@ -45,6 +45,112 @@
       ],
       "has_text": false
     },
+    "booklet": {
+      "pages": 8,
+      "page_width_pt": 612,
+      "page_height_pt": 792,
+      "images": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        },
+        {
+          "page": 2,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        },
+        {
+          "page": 3,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        },
+        {
+          "page": 4,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        },
+        {
+          "page": 5,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        },
+        {
+          "page": 6,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        },
+        {
+          "page": 7,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        },
+        {
+          "page": 8,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        }
+      ],
+      "rasters": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "1b455ebad84f60f0aa35714a9bf095567ad206c60ee3d55fb1b03b13bc905e02"
+        },
+        {
+          "page": 2,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "8a546d4f2d0e2649cd1afd9996c7dc32fc901124640955a9ede96428953c3886"
+        },
+        {
+          "page": 3,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "2b46ba7c5e9995215e51ce77d0855704d8071976363f7adc0977a72ecb9f6484"
+        },
+        {
+          "page": 4,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "8093e00a3232b4e8f2311deab4d5a7f7171998802ccc9bd14ee6f2c3419946c5"
+        },
+        {
+          "page": 5,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "3658d18f0198267ac959eedd547e3cb65c5bb12c1267cc9da816074b7f9eb336"
+        },
+        {
+          "page": 6,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "8700139d68428d31a26dd5f6fc2fe177aabda8360c8197ab31853250c90cac10"
+        },
+        {
+          "page": 7,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "0c9c797c93cae15357f90ace7ee703655a5955c9fcaa70d1234dd8a7e7ee4576"
+        },
+        {
+          "page": 8,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "1734e511f7e327825031cab59c82617f492257fb309bcc37764c6387be76a9bc"
+        }
+      ],
+      "has_text": true
+    },
     "born-digital": {
       "pages": 1,
       "page_width_pt": 612,

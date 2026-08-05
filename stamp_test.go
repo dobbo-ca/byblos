@@ -236,9 +236,12 @@ func TestStampTextLayerFontIsEmbeddedAccordingToPdffonts(t *testing.T) {
 // --- (b): the stamped text is genuinely invisible ---------------------------
 
 // B1: rendering the stamped document produces byte-identical pixels to the
-// unstamped base. Tolerance is exact, not epsilon -- design spec section 5b
-// measured byte-identical rasters on all 27 corpus documents, so an epsilon
-// here would hide a real regression rather than tolerate noise. This alone
+// unstamped base. Tolerance is exact, not epsilon -- design spec section 5b's
+// probe measured byte-identical rasters across the whole corpus, so an epsilon
+// here would hide a real regression rather than tolerate noise. (That probe's
+// own document count is not restated here: it is a record of a run against the
+// corpus as it stood, not a claim about the corpus now, and byb-a20's pin is
+// for figures that are meant to track the corpus.) This alone
 // cannot distinguish a correct 3 Tr from a missing one, because the glyphless
 // font has no outlines either way -- see B3 below, which is what actually
 // pins the render mode.
@@ -358,15 +361,15 @@ func TestStampedWordBoundsRoundTripThroughBBox(t *testing.T) {
 
 // --- (e): the whole corpus ---------------------------------------------------
 
-// Stamps every corpus document with one word on page 1. "malformed" must
-// fail -- pdfdoc.Open cannot parse it (see internal/pdfdoc's own
+// Stamps each of the 35 corpus documents with one word on page 1. "malformed"
+// must fail -- pdfdoc.Open cannot parse it (see internal/pdfdoc's own
 // TestEveryCorpusDocumentSurvivesAWriteRoundTrip for the same split) -- every
 // other document must succeed, and where pdftotext is available its output
 // must contain the stamped word. This does not repeat the B1 raster-identity
 // check per document; that is exercised once, above, against the same word
-// shape, and running pdftoppm 27 times over would not add coverage the design
-// doesn't already claim (section 5e reports it as verified 27/27 in the
-// probe, not asserted per-document here).
+// shape, and running pdftoppm over the whole corpus would not add coverage the
+// design doesn't already claim (section 5e reports its own probe as verified
+// corpus-wide, not asserted per-document here).
 //
 // The word box is (30,30)-(60,42), not a box nearer the top of a Letter page:
 // "mrc-inset-base" is the one corpus document with a non-standard MediaBox

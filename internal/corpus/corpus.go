@@ -17,6 +17,27 @@ import (
 	"strings"
 )
 
+// Count is how many documents All() returns; ReadableCount is how many of them
+// a PDF reader can open, which is every one except "malformed", the scan
+// truncated mid-body.
+//
+// THESE ARE THE SINGLE SOURCE OF THE TWO NUMBERS. Both are quoted in prose all
+// over the tree -- the design spec's section 8 acceptance row, and doc comments
+// in optimize.go, optimize_test.go, stamp_test.go and linearize_test.go -- and
+// every one of those said 27 through three successive documentation
+// reconciliations while the corpus grew, because nothing connected the prose to
+// the code (byb-a20).
+//
+// Adding a document is therefore two edits and no more: put it in All(), and
+// bump the constant here. TestAllMatchesTheDeclaredCount (this package) and
+// TestCorpusReadableCountIsWhatTheCorpusDeclares plus
+// TestCorpusCountClaimsMatchTheCorpus (root package, designspec_pin_test.go)
+// then fail until every quoted figure in the tree agrees.
+const (
+	Count         = 35
+	ReadableCount = 34
+)
+
 // Geometry shared by every generated document. US Letter at 72 points/inch.
 const (
 	PageWidthPt  = 612
@@ -172,6 +193,8 @@ func All() []Doc {
 		{"mrc-inset-base", "the MRC shape with the placements Google Books really emits: the base falls short of the page box on every edge", mrcInsetBase()},
 		{"indirect-kids", "page tree whose /Kids is an indirect reference: both pages must still read", indirectKids()},
 		{"blank-page", "two pages: a scan, then a page whose /Contents decodes to zero bytes -- one blank page must not fail the document", blankPage()},
+		{"booklet", "an eight-page OCR'd booklet: pages 2-8 share one font page 1 does not use, an outline tree spans the document, page 5 states its stream /Length indirectly, and every page carries a different amount of text (byb-woy)",
+			booklet()},
 		{"malformed", "the scan document truncated mid-body", malformed()},
 	}
 }
@@ -228,6 +251,29 @@ func (w *writer) fillStream(n int, dict string, payload []byte) {
 	fmt.Fprintf(&w.buf, "%d 0 obj\n<< %s /Filter /FlateDecode /Length %d >>\nstream\n", n, dict, z.Len())
 	w.buf.Write(z.Bytes())
 	w.buf.WriteString("\nendstream\nendobj\n")
+}
+
+// fillStreamIndirectLength is fillStream with the stream dictionary's /Length
+// stated as a reference to lenObj rather than as a direct integer. ISO 32000-1
+// section 7.3.8.2 explicitly allows it, and real producers do it when they
+// cannot know the length until the stream is finished -- byblos's own writer
+// never emits one, which is exactly why nothing in the corpus carried the
+// shape until booklet() did (byb-woy).
+func (w *writer) fillStreamIndirectLength(n int, dict string, payload []byte, lenObj int) {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write(payload); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	w.offsets[n-1] = w.buf.Len()
+	fmt.Fprintf(&w.buf, "%d 0 obj\n<< %s /Filter /FlateDecode /Length %d 0 R >>\nstream\n",
+		n, dict, lenObj)
+	w.buf.Write(z.Bytes())
+	w.buf.WriteString("\nendstream\nendobj\n")
+	w.fill(lenObj, strconv.Itoa(z.Len()))
 }
 
 // fillRawStream writes a stream object whose payload is stored verbatim. The
@@ -1083,6 +1129,180 @@ func corruptContentStream(inArray bool) []byte {
 	w.fillRawStream(c2, "/Filter /FlateDecode", CorruptContentStreamPayload)
 	if empty != 0 {
 		w.fillStream(empty, "", nil)
+	}
+	return w.finish(cat)
+}
+
+// BookletPages is how many pages booklet() carries. Six to ten was the range
+// byb-woy asked for: enough that the page-offset hint table's per-page loop
+// runs a meaningful number of times, and few enough that the generated document
+// stays in the same size class as the rest of the corpus.
+const BookletPages = 8
+
+// bookletBodyFontFrom is the first page (1-based) that uses the shared OCR body
+// font; bookletHeadFontFrom is the first that ALSO uses the shared heading
+// font. Page 1 is the cover and carries no text at all, which is what makes
+// both fonts objects shared between LATER pages only. The two ranges differ on
+// purpose: it is what stops every later page from having the same set of shared
+// objects as every other, which is the property that gives the shared
+// identifier column something to get wrong (byb-woy).
+const (
+	bookletBodyFontFrom = 2
+	bookletHeadFontFrom = 5
+)
+
+// bookletIndirectLengthPage is the page (1-based) whose content stream states
+// its /Length indirectly. bookletAnnotPage is the page carrying the hidden
+// annotation that makes its object group one bigger than its siblings'.
+const (
+	bookletIndirectLengthPage = 5
+	bookletAnnotPage          = 6
+)
+
+// booklet is the corpus's multi-page document, and it exists because every
+// other one is one or two pages (byb-woy).
+//
+// MEASURED, over byblos's own linearized output for every committed fixture
+// before this document was added: the deepest corpus document was two pages,
+// and part 8 -- "objects shared between later pages but not used by the first
+// page", Annex F.3.1 -- was EMPTY for every single one of them. That is not an
+// accident of the fixtures, it is arithmetic: PlanLayout counts an object's
+// users across pages 2..N only, so on a two-page document that count can never
+// exceed one and the part-8 branch is unreachable. No corpus document carried
+// an outline tree either, so the outline hint table was never present. Both
+// shapes existed only in linearize_test.go's hand-built fixtures, which no
+// other sweep over the corpus -- Inspect, extraction, provenance, the pdfcpu
+// write round trip, the poppler oracle -- ever sees.
+//
+// The shape is an OCR'd scanned booklet, which is where all four properties
+// occur together in the wild:
+//
+//   - EIGHT pages, so the per-page columns of the page offset hint table have
+//     seven rows to disagree about rather than one, and part 7 has seven groups
+//     whose object numbering has to run consecutively across all of them.
+//   - TWO font objects shared between later pages and NOT reachable from page
+//     1, because the cover is a bare scan with no text over it. That is the
+//     part-8 shape, and it is what Table F.5's first_shared_obj and
+//     first_shared_offset describe. They are shared by DIFFERENT ranges of
+//     pages -- the body font from page 2, the heading font from page 5 -- so
+//     the later pages do not all list the same shared identifiers. MEASURED on
+//     byblos's linearized output: pages 2-4 list [7] and pages 5-8 list [7 8],
+//     and this is the ONLY document in the whole linearization sweep whose
+//     later pages differ from each other at all. Every other fixture gives
+//     every later page an identical shared set -- including pdfcpu's 64-page
+//     bookletTest.pdf, where all 63 later pages list [2 3 4 5 6 7 8] -- so
+//     before this document a writer that handed every later page PAGE 2's
+//     identifiers passed the entire suite.
+//   - An OUTLINE TREE spanning the document, with /PageMode /UseOutlines so
+//     F.3.8 places it in the first-page section and the primary hint stream
+//     must carry an outline hint table (/O).
+//   - DIFFERENT amounts of OCR text per page, so the page-length column is not
+//     a run of equal values that any bit order encodes identically. Measured on
+//     byblos's linearized output: eight distinct page lengths.
+//   - ONE page carrying a hidden annotation, so that page's group holds one
+//     more object than its siblings and the object-count column is not a run of
+//     equal values either. /F 2 is the hidden flag: the annotation paints
+//     nothing, so extraction's DroppedAnnots count is unaffected, which is the
+//     same device indirectKids uses.
+//   - Page 5's content stream states its /Length INDIRECTLY, a shape byblos's
+//     own writer never emits and which no corpus document carried. NOTE what
+//     this does and does not reach: Optimize runs pdfcpu's rewrite before the
+//     linearizer, and that rewrite turns the reference back into a direct
+//     integer, so the linearizer never sees it here. What it does exercise is
+//     every path that reads the corpus bytes as they are -- pdfdoc.Open,
+//     Inspect, extraction, the write round trip. linearize_test.go's
+//     indirectLengthFixture, which goes to the linearizer directly, is what
+//     covers the orphan-/Length bug itself.
+//
+// Every body page is a page-covering raster under an invisible OCR layer, so
+// classification treats pages 2..8 exactly as it treats "invisible-text": they
+// extract. Page 1 is a bare page-covering scan.
+func booklet() []byte {
+	w := newWriter()
+	cat, tree := w.reserve(), w.reserve()
+	bodyFont, headFont := w.reserve(), w.reserve()
+	outlineRoot := w.reserve()
+	outlineItem := []int{w.reserve(), w.reserve(), w.reserve()}
+	page := make([]int, BookletPages)
+	cont := make([]int, BookletPages)
+	img := make([]int, BookletPages)
+	for i := range page {
+		page[i], cont[i], img[i] = w.reserve(), w.reserve(), w.reserve()
+	}
+	contLen := w.reserve() // page bookletIndirectLengthPage's /Length object
+	annot := w.reserve()   // page bookletAnnotPage's hidden annotation
+
+	var kids strings.Builder
+	for i := range page {
+		fmt.Fprintf(&kids, "%d 0 R ", page[i])
+	}
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R /Outlines %d 0 R"+
+		" /PageMode /UseOutlines >>", tree, outlineRoot))
+	w.fill(tree, fmt.Sprintf("<< /Type /Pages /Kids [ %s] /Count %d >>", kids.String(), BookletPages))
+	w.fill(bodyFont, helveticaFont)
+	w.fill(headFont, "<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
+
+	for i := range page {
+		fonts := ""
+		body := fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)
+		if i+1 >= bookletBodyFontFrom {
+			fonts = fmt.Sprintf("/F1 %d 0 R", bodyFont)
+			// Rendering mode 3 paints nothing, so this deposits no ink over
+			// the raster; the line count rises with the page number so no two
+			// pages have the same content length.
+			var t strings.Builder
+			t.WriteString("BT\n3 Tr /F1 1 Tf\n")
+			for j := 0; j <= i; j++ {
+				fmt.Fprintf(&t, "11.4 0 0 12 119 %d Tm (page %d line %d)Tj\n", 703-14*j, i+1, j)
+			}
+			t.WriteString("ET\n")
+			body += t.String()
+		}
+		if i+1 >= bookletHeadFontFrom {
+			fonts += fmt.Sprintf(" /F2 %d 0 R", headFont)
+			body += fmt.Sprintf("BT\n3 Tr /F2 1 Tf\n9 0 0 9 72 750 Tm (Chapter %d)Tj\nET\n", i)
+		}
+		res := fmt.Sprintf("/XObject << /Im0 %d 0 R >>", img[i])
+		if fonts != "" {
+			res = fmt.Sprintf("/Font << %s >> %s", fonts, res)
+		}
+		annots := ""
+		if i+1 == bookletAnnotPage {
+			annots = fmt.Sprintf(" /Annots [%d 0 R]", annot)
+		}
+		w.fill(page[i], fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+			" /Resources << %s >> /Contents %d 0 R%s >>",
+			tree, PageWidthPt, PageHeightPt, res, cont[i], annots))
+		if i+1 == bookletIndirectLengthPage {
+			w.fillStreamIndirectLength(cont[i], "", []byte(body), contLen)
+		} else {
+			w.fillStream(cont[i], "", []byte(body))
+		}
+		// A distinct seed per page: the pages must be told apart pixel by
+		// pixel, or a per-page extraction bug that returned page 1's raster
+		// every time would look correct.
+		w.fillStream(img[i], imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 10+i))
+	}
+	w.fill(annot, "<< /Type /Annot /Subtype /Square /Rect [ 0 0 0 0 ] /F 2 >>")
+
+	// A three-item outline naming the first, a middle and the last page, chained
+	// with /Prev and /Next as a reader expects. The /Dest entries are what made
+	// a naive first-page closure wrong: an item's destination must not drag a
+	// later page's objects into the first-page section.
+	dest := []int{0, 3, BookletPages - 1}
+	title := []string{"Cover", "Chapter one", "Colophon"}
+	w.fill(outlineRoot, fmt.Sprintf("<< /Type /Outlines /Count %d /First %d 0 R /Last %d 0 R >>",
+		len(outlineItem), outlineItem[0], outlineItem[len(outlineItem)-1]))
+	for k := range outlineItem {
+		links := ""
+		if k > 0 {
+			links += fmt.Sprintf(" /Prev %d 0 R", outlineItem[k-1])
+		}
+		if k+1 < len(outlineItem) {
+			links += fmt.Sprintf(" /Next %d 0 R", outlineItem[k+1])
+		}
+		w.fill(outlineItem[k], fmt.Sprintf("<< /Title (%s) /Parent %d 0 R /Dest [ %d 0 R /Fit ]%s >>",
+			title[k], outlineRoot, page[dest[k]], links))
 	}
 	return w.finish(cat)
 }

@@ -259,6 +259,11 @@ func (b *Bitmap) Equal(o *Bitmap) bool
 
 func EncodeJBIG2Generic(b *Bitmap) ([]byte, error)   // lossless; see §5
 
+// Sauvola (byb-jj5) binarizes by local adaptive thresholding, producing the
+// Bitmap EncodeJBIG2Generic takes. Adaptive because a scan with a shadowed
+// gutter has no single global cutoff that works across the page.
+func Sauvola(img image.Image) (*Bitmap, error)
+
 func QuantizePNG(img image.Image, colors int) ([]byte, error)
 func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error)
 
@@ -296,6 +301,12 @@ type BuildPage struct {
 }
 
 func BuildPDF(w io.Writer, pages []BuildPage) error
+
+// ReplaceImages (byb-fp6) substitutes image streams in an EXISTING document,
+// keyed by 1-based page, leaving everything else as it was. It refuses an image
+// carrying /SMask, /Mask or /ImageMask, and writes no provenance: the caller
+// records what it applied, through RecordExtraction and WriteProvenance.
+func ReplaceImages(w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) error
 
 // --- capability errors ---
 
@@ -477,7 +488,7 @@ oracles**. They never ship and Kleio never depends on them.
 | `EncodeJBIG2Generic` | round-trip through a JBIG2 *decoder*, asserting bit-identical output — this is the definitive lossless check, and it does not need `jbig2enc` |
 | `QuantizePNG`, `Downsample` | size and PSNR bounds against `pngquant`/`ghostscript` output |
 | `StampTextLayer` | `pdftotext` on the result must return the text that was stamped, in reading order |
-| `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input — suspended for `Linearize: true`: over the 27 readable corpus documents *as the corpus then stood* (it is now 32 readable of 33; the bounds below have not been re-measured, but at 3fa75a8 every one of the 32 grows) it runs +7 to +1007 B against the input (the +7 is `dup-raster`, the one document pdfcpu's rewrite shrinks enough to nearly pay for the linearization), and +649 to +1007 B with no exceptions against the same document rewritten and not linearized (see §4/§6 `Provenance`) |
+| `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input — suspended for `Linearize: true`: over the 34 readable corpus documents it runs +7 to +1007 B against the input, every one of them larger (the +7 is `dup-raster`, the one document pdfcpu's rewrite shrinks enough to nearly pay for the linearization), and +649 to +2071 B with no exceptions against the same document rewritten and not linearized (the +2071 is `booklet`, the eight-page document: linearization's per-page hint columns are the one cost that scales with page count — see §4/§6 `Provenance`) |
 
 The JBIG2 oracle deserves emphasis: because we encode losslessly, correctness is
 verifiable by decoding our own output and comparing bitmaps. No reference encoder
