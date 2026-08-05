@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/dobbo-ca/byblos/internal/corpus"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -165,5 +166,50 @@ func TestStampedFontAndContentValidateCleanly(t *testing.T) {
 	relaxed.ValidationMode = model.ValidationRelaxed
 	if err := api.Validate(bytes.NewReader(out), relaxed); err != nil {
 		t.Errorf("api.Validate(relaxed) = %v, want nil", err)
+	}
+}
+
+// AppendContent must be able to stamp a genuinely blank page -- /Contents
+// present, decodes to zero bytes -- the same shape Page() had to stop
+// treating as an error in byb-cqs. netCTM's caller sees model.ErrNoContent
+// here exactly the way Page() did, and identity is not a guess for zero
+// bytes: it is the only CTM they can leave.
+//
+// This is a guard, not a regression test: it passes even with the
+// verifyEmptyContent call removed, and only fails against an over-broad
+// mutant that rejects every ErrNoContent -- TestAppendContentOnACorruptContentStreamIsAnError
+// is what actually pins the fix below.
+func TestAppendContentOnABlankPageSucceeds(t *testing.T) {
+	d := open(t, "blank-page")
+	if err := d.AppendContent(2, []byte("BT ET\n")); err != nil {
+		t.Fatalf("AppendContent(2) on a blank page: want no error, got %v", err)
+	}
+}
+
+// The twin of the above and the one that makes it a decision, mirroring
+// TestPageWithACorruptContentStreamIsStillAnError: a content stream that did
+// not decode is NOT a blank page. Under the relaxed validation mode Open
+// uses, pdfcpu's decodeContentStream swallows the decode failure and leaves
+// the stream empty, so PageContent reports this page with the SAME
+// model.ErrNoContent and the SAME zero bytes a genuinely blank page gets.
+// AppendContent must not stamp it with a guessed identity CTM -- the page's
+// real net transform is unknown, not zero.
+func TestAppendContentOnACorruptContentStreamIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"one stream", corpus.CorruptContentStream()},
+		{"array of streams", corpus.CorruptContentStreamInArray()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := Open(bytes.NewReader(tc.data))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if err := d.AppendContent(2, []byte("BT ET\n")); err == nil {
+				t.Fatal("AppendContent(2) on a corrupt content stream: want an error, got nil")
+			}
+		})
 	}
 }
