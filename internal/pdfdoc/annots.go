@@ -39,7 +39,12 @@ func (d *doc) Annots(n int) (out []Annot, err error) {
 	if n < 1 || n > d.ctx.PageCount {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d out of range 1..%d", n, d.ctx.PageCount)
 	}
-	pd, _, _, err := d.ctx.XRefTable.PageDict(n, true)
+	// consolidateRes=false for Page's reasons (byb-ged), and one that is this
+	// function's alone: the inherited attributes are discarded here, so
+	// consolidation was only ever buying a content parse whose result is
+	// thrown away — and with it a rejection, and pdfcpu's skipTJ panic, on a
+	// page whose annotations read perfectly well.
+	pd, _, _, err := d.ctx.XRefTable.PageDict(n, false)
 	if err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}

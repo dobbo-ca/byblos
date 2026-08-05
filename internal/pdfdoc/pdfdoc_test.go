@@ -547,3 +547,118 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+// --- byb-ged: pdfcpu's resource consolidation is off ------------------------
+//
+// Page and Annots call XRefTable.PageDict with consolidateRes=false. The two
+// tests below are the two things that changes, and both were measured against
+// poppler over the 4,840-document govdocs1 sample before the argument moved:
+// 26 documents byblos refused and poppler read became 18, and the only two
+// documents whose answer changed gained images poppler also reports.
+
+// A page whose content names a colour space its /Resources does not declare
+// must still be read.
+//
+// This is govdocs1/600140.pdf page 126 reduced to four objects (byb-ged). With
+// consolidateRes=true, pdfcpu's consolidateResourceSubDict raises "missing
+// required resource subdict: ColorSpace" and — because Inspect walks every
+// page — the WHOLE 140-page document is lost. poppler reads it, and so do
+// govdocs1/250237, 350691, 550327, 750403 and 900355, all on the same error.
+//
+// Byblos never resolves a page-level colour space at all: ImageInfo reads
+// /ColorSpace off the image XObject's own dictionary, so this subdict's
+// absence cannot change any number Inspect reports. Refusing the document was
+// pure loss.
+func TestPageToleratesAColorSpaceMissingFromResources(t *testing.T) {
+	body := "/Cs6 cs 1 1 1 scn 0 0 100 100 re f"
+	data := buildPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Contents 4 0 R >>",
+		"<< /Length " + itoa(len(body)) + " >>\nstream\n" + body + "\nendstream",
+	})
+
+	d, err := Open(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Open error = %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v; want the page read. A \"missing required "+
+			"resource subdict\" here means consolidateRes is back on.", err)
+	}
+	// Assert the page is actually usable, not merely non-erroring: a nil-safe
+	// pass that returned an empty page would prove nothing.
+	if want := (Rect{0, 0, 612, 792}); p.MediaBox != want {
+		t.Errorf("MediaBox = %v; want %v", p.MediaBox, want)
+	}
+	if string(p.Content) != body {
+		t.Errorf("Content = %q; want %q", p.Content, body)
+	}
+	if _, err := d.Annots(1); err != nil {
+		t.Errorf("Annots(1) error = %v; want nil (it reads the same page dict)", err)
+	}
+}
+
+// An image a Form XObject paints, and the page's own content stream never
+// names, must still resolve through the form's scope.
+//
+// consolidateRes=true does not only reject; it PRUNES the resource dict it
+// returns down to the names pdfcpu found in the page's own content stream, and
+// pdfcpu never descends into a form's content to do it (its own TODO on
+// consolidateResourcesWithContent says so). /Im1 is therefore deleted from the
+// page /XObject subdict that becomes Page.Scope, and the form — which has no
+// /Resources of its own and so resolves through its parent scope — cannot find
+// it. That is silent loss, not a failure: Inspect reports a page with one
+// fewer image and no error at all.
+//
+// Measured on real files: govdocs1/500973.pdf page 1 reported 1 image where
+// pdfimages lists 5 (objects 672, 674, 676, 678, 680), and 100877.pdf page 1
+// reported 3 where pdfimages lists 4 (the missing one is object 245, 31x22).
+// Both now agree with poppler exactly.
+func TestPageResourcesAreNotPrunedToTheOwnContentStream(t *testing.T) {
+	const form = "q 50 0 0 50 0 0 cm /Im1 Do Q"
+	const page = "/Fm1 Do"
+	data := buildPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+			"/Resources << /XObject << /Fm1 5 0 R /Im1 6 0 R >> >> /Contents 4 0 R >>",
+		"<< /Length " + itoa(len(page)) + " >>\nstream\n" + page + "\nendstream",
+		"<< /Type /XObject /Subtype /Form /BBox [0 0 50 50] /Length " + itoa(len(form)) +
+			" >>\nstream\n" + form + "\nendstream",
+		"<< /Type /XObject /Subtype /Image /Width 4 /Height 4 /BitsPerComponent 8 " +
+			"/ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 33 >>\n" +
+			"stream\n00112233445566778899aabbccddeeff>\nendstream",
+	})
+
+	d, err := Open(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Open error = %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v", err)
+	}
+	fm, ok := d.XObject(p.Scope, "Fm1")
+	if !ok {
+		t.Fatal("XObject(page, Fm1) not found; the page's own content names it, so " +
+			"this fixture is broken rather than the behaviour under test")
+	}
+	im, ok := d.XObject(fm.Scope, "Im1")
+	if !ok {
+		t.Fatal("XObject(form, Im1) not found: the page resource dict was pruned to " +
+			"the page's own content stream, so the form cannot reach the image it " +
+			"paints. This is the silent half of byb-ged.")
+	}
+	if !im.Image {
+		t.Fatalf("XObject(form, Im1).Image = false; want an image XObject")
+	}
+	info, ok := d.ImageInfo(im.ID)
+	if !ok {
+		t.Fatalf("ImageInfo(%d) not found", im.ID)
+	}
+	if info.Width != 4 || info.Height != 4 {
+		t.Errorf("ImageInfo = %dx%d; want 4x4 (resolved the wrong object)", info.Width, info.Height)
+	}
+}

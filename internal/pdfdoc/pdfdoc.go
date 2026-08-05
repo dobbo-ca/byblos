@@ -57,10 +57,14 @@ var ErrUnsupportedCodec = errors.New("byblos/pdfdoc: image codec cannot be rende
 // ErrMalformed reports a document pdfcpu could not parse without panicking.
 //
 // pdfcpu indexes unchecked in several parsers — skipTJ walks off an empty
-// operand slice on a malformed TJ array, and PageDict parses content, so the
-// crash arrives from inside what looks like a dictionary read. Its own
-// fault.Catch recovers only its own panic type, so nothing below this package
-// stops it.
+// operand slice on a malformed TJ array. Its own fault.Catch recovers only its
+// own panic type, so nothing below this package stops it.
+//
+// skipTJ is reached from pdfcpu's parseContent, which runs only when PageDict
+// is asked to consolidate resources. Page and Annots no longer ask (byb-ged),
+// so that crash no longer arrives from what looks like a dictionary read — but
+// Optimize still reaches it, because api.Optimize calls PageDict(i, true)
+// itself.
 //
 // A library for processing archives cannot die on one damaged file out of five
 // thousand, which is what this cost before byb-avp: a whole run lost, and not
@@ -251,7 +255,36 @@ func (d *doc) Page(n int) (p *Page, err error) {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d out of range 1..%d", n, d.ctx.PageCount)
 	}
 	xt := d.ctx.XRefTable
-	pd, _, inh, err := xt.PageDict(n, true)
+	// consolidateRes=false, for the reasons text.go's AddFontResource already
+	// gives, plus one it could not see (byb-ged). true does two things, and
+	// Byblos wants neither:
+	//
+	//   - It PRUNES the returned resource dict to the names pdfcpu found in the
+	//     page's OWN content stream, never descending into a form's content to
+	//     do it (pdfcpu's own TODO on consolidateResourcesWithContent). This
+	//     dict becomes Page.Scope, so an image only a Form XObject paints is
+	//     deleted from the scope the form resolves through, and Inspect reports
+	//     a page with fewer images and no error at all. Measured: govdocs1
+	//     500973.pdf page 1 reported 1 image where pdfimages lists 5.
+	//   - It rejects the page outright when the content names a resource
+	//     category the dict does not declare ("missing required resource
+	//     subdict"), and, via its own content parse, on "corrupt BI expression"
+	//     and "corrupt page content". Because Inspect walks every page, that
+	//     loses the WHOLE document: 8 of 4,840 govdocs1 files, all of which
+	//     poppler reads.
+	//
+	// Neither loss buys anything, because pdfcpu is parsing bytes Byblos parses
+	// itself: content.Walk produces its own, better-located errors on the same
+	// documents. And nothing here reads a page-level colour space — ImageInfo
+	// takes /ColorSpace off the image XObject's own dictionary — so the subdict
+	// this used to insist on cannot change a number Inspect reports.
+	//
+	// What false gives up is pdfcpu's non-standard MERGE of a page's own
+	// /Resources with an ancestor /Pages node's. ISO 32000-1 7.7.3.4 makes
+	// /Resources inheritable, not additive: a page that declares one gets its
+	// own, and poppler agrees. Measured over the same 4,840 documents, no file
+	// changed answer because of it.
+	pd, _, inh, err := xt.PageDict(n, false)
 	if err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}
