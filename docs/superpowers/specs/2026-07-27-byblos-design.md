@@ -172,9 +172,28 @@ loss stays visible rather than silent.
 a swap rather than a rewrite.
 
 **Byblos does not import Cadmus, and Cadmus does not import Byblos.** Byblos
-defines its own `TextLayer` input type; Kleio converts `cadmus.Page` →
-`byblos.TextLayer`. Kleio is the only component that knows both exist. Each
-library stays independently useful and independently testable.
+defines its own `TextLayer` input type (§4). The fan-out this paragraph
+describes — Kleio as the only component that knows both libraries exist,
+each staying independently useful and independently testable — is the right
+shape and stays. But the conversion this paragraph used to name,
+`cadmus.Page` → `byblos.TextLayer`, does not exist anywhere, on either side.
+
+`cadmus.Page` is not a compilable type: `go list ./...` in Cadmus exports no
+library package at all (one `cmd` and six `internal` packages), and `type
+Page` appears nowhere in Cadmus's Go source — only in Cadmus's own design
+doc. `byblos.TextLayer` is real (`stamp.go`), but Kleio does not produce one:
+Kleio's `go.mod` now requires `github.com/dobbo-ca/byblos v0.1.0`, but the
+only calls it makes are `byblos.Inspect` for page metadata
+(`internal/pipeline/inspect.go`); nothing in Kleio calls `StampTextLayer` or
+constructs a `TextLayer`. Kleio still adds its text layer by shelling out to
+`ocrmypdf` (`internal/pipeline/ocr.go:104-105`), and its own OCR-confidence path
+reads tesseract TSV directly (`TesseractTSV`, `internal/pipeline/tools.go`)
+without turning it into a `byblos.TextLayer` either. So `TextLayer` and
+`PositionedWord` currently have no producer anywhere outside Byblos's own
+tests — the same zero-callers shape as G1's audit (byb-js5). Whether the real
+path is Kleio parsing tesseract TSV directly into a `TextLayer`, or something
+else, is a Kleio-side decision this document does not make on Kleio's
+behalf.
 
 ---
 
@@ -511,10 +530,20 @@ a redesign. Work currently in flight on Kleio Plan 2 is unaffected.
 New in Kleio: `byblos_version` and `byblos_capabilities` columns, and the generic
 reprocess job described in §6.
 
-**Not started.** Kleio does not import Byblos — no reference in its `go.mod` or
-`go.sum` — so nothing in this section has been built or run, and no Byblos code
-has ever executed against the real pipeline. This is the largest gap between
-this document and the world, and it is what makes every parity claim here
+**Not started, but no longer unimported.** Kleio's `go.mod` now requires
+`github.com/dobbo-ca/byblos v0.1.0` (`go.mod:16`, recorded in `go.sum:76-77`), and
+`internal/pipeline/inspect.go` imports it and calls `byblos.Inspect` from
+`pageCountViaByblos`. That call is reached only when `PageCount` runs with
+`KLEIO_BYBLOS_INSPECT=1` set; the flag defaults to unset, so in production
+`PageCount` still takes the `pdfinfo` path exactly as it did before Byblos
+existed, and the `compress` worker itself makes no Byblos call at all. The one
+place the flag is ever set is a test, `TestPageCountUnderTheByblosFlagNeedsNoPoppler`
+(`internal/pipeline/inspect_spike_test.go`), which does call `byblos.Inspect`
+through Kleio's real `PageCount` function against a real (ghostscript-generated)
+PDF — so Byblos code has executed once, inside Kleio's test suite, but never
+inside Kleio's production pipeline, and no Byblos function other than `Inspect`
+has been called from Kleio at all. This is still the largest gap between this
+document and the world, and it is what makes every parity claim here
 theoretical. Everything above is the intended design, not a description of
 running code.
 
