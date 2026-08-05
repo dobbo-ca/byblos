@@ -74,9 +74,38 @@ func skewDegrees(m content.Matrix) float64 {
 }
 
 // mrcPatchAreaFrac is how much of the page a non-bitonal placement must cover
-// before it counts as an MRC patch rather than a stamp or a logo. Google Books
-// patches cover about 84% of the page, so the floor only has to be clear of
-// noise; it is not a tuned number.
+// before it counts as an MRC patch rather than a stamp or a logo.
+//
+// It is not clear of noise, and it is load-bearing. Measured over the pinned
+// sample at ~/work/dobbo-ca/.byblos-sample -- 5672 files, 169376 pages -- by
+// walking every page and recording each non-bitonal placement's area fraction
+// on the 742 pages that carry a qualifying bitonal base. The page counts it
+// yields are reproducible with the shipped tool:
+//
+//	byblos-divert -json ~/work/dobbo-ca/.byblos-sample/anchors  # mrc-layers: 176
+//	byblos-divert -json ~/work/dobbo-ca/.byblos-sample/dc       # mrc-layers:  42
+//
+// govdocs1 and ia contribute nothing: no page in either has an MRC base. So
+// 218 pages across 5 files reach mrc-layers. Their patches run 0.020194 to
+// 1.000000 of the page box, median 0.2481 -- so "about 84%" describes the
+// dominant patch, not the distribution, and the low end sits 0.97% above this
+// floor. That single page is ia-municipaldocume00masgoog.pdf p99: a 146x156
+// 8-bit raster placed at 70.08 x 74.88 pt, an inset region under the same JXi0
+// resource name as the page-sized patches. Raise the floor and it stops being
+// mrc-layers.
+//
+// Below the floor is not empty either. The same file's p101 (0.017130), p389
+// (0.015151, 0.006809) and p397 (0.009054) carry JXi0/JXi1 insets over the
+// same J2i0 bitonal base (94.61-94.78%) and classify multiple-images today,
+// which is the mislabel byb-b1.6 is about. The floor cuts through a continuous
+// run of real MRC insets; the nearest thing that is genuinely a stamp is 6.6x
+// further down -- dc-28519909.pdf's greyscale form stamps, 0.003016 and below.
+//
+// It stays at 0.02 anyway. Moving it would relabel 3 pages of 169376, all in
+// one file, and every one of them diverts either way -- and both sides of the
+// gap rest on a single document each, which is not enough to place a threshold
+// with. Whether those pages need both layers is a pixel question (is the base
+// blank?), not a geometry one. TestClassifyMRCPatchFloorBracket pins both ends.
 const mrcPatchAreaFrac = 0.02
 
 // mrcBaseAreaFrac is how much of the page a bitonal placement must cover to be

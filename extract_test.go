@@ -737,6 +737,45 @@ func TestClassify(t *testing.T) {
 // what is under test is the graphics state: painting order, the CTM at the time
 // of the paint, and the path's device-space extent. A Scan literal would let a
 // test assert an ordering the walker never actually produces.
+// TestClassifyMRCPatchFloorBracket pins mrcPatchAreaFrac between the two real
+// pages that bracket it, so the constant cannot drift in either direction
+// without a measurement.
+//
+// Both cases are ia-municipaldocume00masgoog.pdf as walked: identical J2i0
+// base and Wm watermark, only the JXi0 inset differs. p99's inset is the
+// smallest patch that fires mrc-layers anywhere in the pinned sample; p101's
+// is the largest that does not. Raising the floor past 0.020194 kills the
+// first case; lowering it below 0.017130 kills the second.
+func TestClassifyMRCPatchFloorBracket(t *testing.T) {
+	page := pdfdocRect(0, 0, 420, 618.72)
+	base := contentBox(9.96, 1.56, 410.04, 617.16)      // 0.947768 of the page
+	watermark := contentBox(286, 10, 370.0001, 26.5726) // 0.005357, bitonal, on top
+	p99Inset := contentBox(70.44, 88.2, 140.52, 163.08) // 0.020194
+	p101Inset := contentBox(81.96, 448.2, 148.2, 515.4) // 0.017130
+	info := facts(map[int]pdfdoc.ImageInfo{1: {BPC: 1}, 2: {BPC: 8}, 3: {BPC: 1}})
+
+	tests := []struct {
+		name  string
+		inset content.Box
+		want  string
+	}{
+		{"p99's 0.020194 inset is an MRC patch", p99Inset, "mrc-layers"},
+		{"p101's 0.017130 inset is not", p101Inset, "multiple-images"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			scan := &contentScan{Images: layers(
+				placement(1, base, true),
+				placement(2, tc.inset, true),
+				placement(3, watermark, true),
+			)}
+			if _, got := classify(page, scan, info); got != tc.want {
+				t.Fatalf("classify() reason = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClassifyPaintOcclusion(t *testing.T) {
 	page := pdfdocRect(0, 0, 612, 792)
 	const fullPageDo = "q 612 0 0 792 0 0 cm /Im0 Do Q\n"
