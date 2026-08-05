@@ -104,6 +104,21 @@ type ImageInfo struct {
 	Mask          bool // /Mask: a stencil mask or a colour-key range
 	Decode        bool // /Decode is present: samples need a remap this struct does not carry
 
+	// Filter is the image codec the stream declares: /Filter when it is a
+	// name, the LAST entry when it is an array, and "" when /Filter is absent
+	// (an unencoded stream) or is neither of those shapes.
+	//
+	// Last, not first, because a filter array is the DECODE order (ISO 32000-1
+	// section 7.4): in /Filter [/ASCII85Decode /JBIG2Decode] the ASCII85 stage
+	// only unwraps the transport encoding and the image codec is JBIG2Decode.
+	// Reading the first entry would report a chained JBIG2 image as ASCII85 and
+	// undercount exactly the class this field exists to find.
+	//
+	// It is a declaration, like everything else here — RawImage still reports
+	// what pdfcpu actually made of the bytes. The two disagree when a file lies
+	// about its own encoding.
+	Filter string
+
 	// ColorSpace is /ColorSpace when it is a plain name ("DeviceGray",
 	// "DeviceRGB", "DeviceCMYK"), and "" when it is an array or an indirect
 	// reference -- Indexed, ICCBased, Separation, DeviceN. Recompression uses
@@ -419,6 +434,7 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 			SMask:      hasEntry(sd.Dict, "SMask"),
 			Mask:       hasEntry(sd.Dict, "Mask"),
 			Decode:     hasEntry(sd.Dict, "Decode"),
+			Filter:     d.filterName(sd.Dict),
 			ColorSpace: csName,
 		}
 		// Keep the stream dictionary. RawImage renders from this rather than
@@ -652,6 +668,23 @@ func (d *doc) dictEntry(dict types.Dict, key string) types.Dict {
 func hasEntry(dict types.Dict, key string) bool {
 	_, ok := dict.Find(key)
 	return ok
+}
+
+// filterName reports the image codec dict declares; see ImageInfo.Filter for
+// why an array yields its last entry rather than its first.
+func (d *doc) filterName(dict types.Dict) string {
+	switch v := d.deref(dict["Filter"]).(type) {
+	case types.Name:
+		return string(v)
+	case types.Array:
+		if len(v) == 0 {
+			return ""
+		}
+		if n, ok := d.deref(v[len(v)-1]).(types.Name); ok {
+			return string(n)
+		}
+	}
+	return ""
 }
 
 func (d *doc) arrayEntry(dict types.Dict, key string) types.Array {

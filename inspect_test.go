@@ -327,3 +327,34 @@ func TestInspectDupRasterReportsBothPages(t *testing.T) {
 		}
 	}
 }
+
+// ImageRef.Filter is byb-dng's split: over a corpus, "bitonal" answers a very
+// different question depending on whether the raster is already JBIG2 (nothing
+// left to do) or bitonal under some other codec (a re-encode away).
+//
+// The two documents are chosen so the field cannot be faked by a constant. The
+// jbig2 document is bitonal AND JBIG2Decode; the scan document is neither, and
+// its FlateDecode is what a hardcoded "JBIG2Decode" would get wrong.
+func TestInspectReportsTheDeclaredImageFilter(t *testing.T) {
+	for _, tc := range []struct {
+		doc, want string
+		bitonal   bool
+	}{
+		{"jbig2", "JBIG2Decode", true},
+		{"scan", "FlateDecode", false},
+	} {
+		t.Run(tc.doc, func(t *testing.T) {
+			p := inspect(t, tc.doc)[0]
+			if len(p.Images) != 1 {
+				t.Fatalf("Images = %+v; want one", p.Images)
+			}
+			if got := p.Images[0].Filter; got != tc.want {
+				t.Errorf("Filter = %q; want %q", got, tc.want)
+			}
+			if got := p.Images[0].Bitonal; got != tc.bitonal {
+				t.Errorf("Bitonal = %v; want %v -- the split this field exists for "+
+					"is Bitonal AND Filter together", got, tc.bitonal)
+			}
+		})
+	}
+}

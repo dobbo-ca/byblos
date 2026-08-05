@@ -193,6 +193,7 @@ type ImageRef struct {
     Placement     [6]float64      // paint matrix, [a b c d e f] (ISO 32000-1 8.3.3)
     Width, Height int             // pixel dimensions
     Bitonal       bool
+    Filter        string          // declared codec, e.g. "JBIG2Decode"; "" when none
 }
 
 type PageInfo struct {

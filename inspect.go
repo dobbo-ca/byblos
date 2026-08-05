@@ -31,6 +31,15 @@ import (
 // Height) must account for this — a clipped Bounds does not mean the raster
 // was stored at a different resolution.
 //
+// Filter is the codec the stored raster declares: "JBIG2Decode",
+// "CCITTFaxDecode", "DCTDecode", "FlateDecode", and so on; "" when the stream
+// declares no /Filter or declares one this does not recognize as a name. It is
+// the codec, not the transport wrapper — a /Filter [/ASCII85Decode
+// /JBIG2Decode] chain reports JBIG2Decode. Read it beside Bitonal to triage
+// work without decoding anything: Bitonal with Filter "JBIG2Decode" is already
+// what Byblos would produce, Bitonal with any other filter needs only a
+// re-encode, and not Bitonal needs a binarizer first.
+//
 // ObjNr identifies the image XObject itself, and is the handle ReplaceImages
 // takes. It is per-OBJECT, not per-painting: one XObject can be painted on
 // several pages, or twice on one page, and every such ImageRef reports the
@@ -42,9 +51,10 @@ import (
 type ImageRef struct {
 	Bounds        image.Rectangle
 	Placement     [6]float64
-	Width, Height int  // pixel dimensions of the stored raster
-	Bitonal       bool // 1 bit per component, or an image mask
-	ObjNr         int  // the image XObject's PDF object number
+	Width, Height int    // pixel dimensions of the stored raster
+	Bitonal       bool   // 1 bit per component, or an image mask
+	Filter        string // the stored raster's declared codec; "" when it declares none
+	ObjNr         int    // the image XObject's PDF object number
 }
 
 // PageInfo describes one page.
@@ -102,6 +112,7 @@ func inspectPage(d pdfdoc.Doc, n int) (*PageInfo, *content.Scan, error) {
 			ref.Width = info.Width
 			ref.Height = info.Height
 			ref.Bitonal = info.BPC == 1 || info.ImageMask
+			ref.Filter = info.Filter
 			ref.ObjNr = info.ObjNr
 		}
 		pi.Images = append(pi.Images, ref)

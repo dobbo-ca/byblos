@@ -662,3 +662,53 @@ func TestPageResourcesAreNotPrunedToTheOwnContentStream(t *testing.T) {
 		t.Errorf("ImageInfo = %dx%d; want 4x4 (resolved the wrong object)", info.Width, info.Height)
 	}
 }
+
+// ImageInfo.Filter is the declaration byb-dng needed to tell an image that is
+// ALREADY JBIG2 from one that is merely bitonal, without decoding anything.
+//
+// The array case is the one that decides whether the number is right. A filter
+// array is decode order (ISO 32000-1 section 7.4), so the image codec is the
+// LAST entry; reading the first would report /Filter [/ASCII85Decode
+// /JBIG2Decode] as ASCII85Decode and score an already-JBIG2 raster as work
+// still to do. The absent case has to stay distinguishable too: an unencoded
+// stream is not a JBIG2 one.
+func TestImageInfoReportsTheDeclaredFilter(t *testing.T) {
+	const raw = "<< /Type /XObject /Subtype /Image /Width 4 /Height 4 " +
+		"/BitsPerComponent 1 /ColorSpace /DeviceGray "
+	data := buildPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+			"/Resources << /XObject << /Name 4 0 R /Chain 5 0 R /None 6 0 R >> >> >>",
+		raw + "/Filter /JBIG2Decode /Length 4 >>\nstream\n\x00\x01\x02\x03\nendstream",
+		raw + "/Filter [/ASCII85Decode /JBIG2Decode] /Length 4 >>\nstream\n\x00\x01\x02\x03\nendstream",
+		raw + "/Length 2 >>\nstream\n\x00\x0f\nendstream",
+	})
+
+	d, err := Open(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Open error = %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v", err)
+	}
+	for _, tc := range []struct{ name, want string }{
+		{"Name", "JBIG2Decode"},
+		{"Chain", "JBIG2Decode"},
+		{"None", ""},
+	} {
+		xo, ok := d.XObject(p.Scope, tc.name)
+		if !ok || !xo.Image {
+			t.Fatalf("XObject(%q) not resolved as an image; the fixture is broken, "+
+				"not the behaviour under test", tc.name)
+		}
+		info, ok := d.ImageInfo(xo.ID)
+		if !ok {
+			t.Fatalf("ImageInfo for %q not found", tc.name)
+		}
+		if info.Filter != tc.want {
+			t.Errorf("ImageInfo(%q).Filter = %q; want %q", tc.name, info.Filter, tc.want)
+		}
+	}
+}
