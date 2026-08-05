@@ -266,6 +266,7 @@ func Sauvola(img image.Image) (*Bitmap, error)
 
 func QuantizePNG(img image.Image, colors int) ([]byte, error)
 func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error)
+func DownsampleDeclaredBPC(img image.Image, declaredBPC int, srcDPI, dstDPI float64) (image.Image, error)
 
 // QuantizeIndexed (byb-96p) is QuantizePNG's embeddable variant: same core,
 // but it returns a PDF /Indexed /FlateDecode image rather than a PNG file.

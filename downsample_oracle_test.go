@@ -128,3 +128,89 @@ func TestDownsampleAgreesWithGhostscriptBicubic(t *testing.T) {
 		t.Errorf("psnrRGB(gs/Bicubic, byblos CatmullRom) = %.2f dB; want >= %.1f dB", got, wantPSNR)
 	}
 }
+
+// gsDownsampleMonoPDF is gsDownsamplePDF's mono half: it pins the /MonoImage*
+// knobs, which govern images the PDF declares /BitsPerComponent 1, and leaves
+// the /ColorImage* ones alone. Kleio's compress.go passes exactly this
+// -dMonoImageDownsampleType=/Subsample.
+//
+// /FlateEncode is pinned only so the output stays a filter pdfimages decodes
+// without a CCITT round trip; gs's mono default is /CCITTFaxEncode.
+func gsDownsampleMonoPDF(t *testing.T, inPDF []byte, dstDPI int) []byte {
+	t.Helper()
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "in.pdf")
+	outPath := filepath.Join(dir, "out.pdf")
+	if err := os.WriteFile(inPath, inPDF, 0o644); err != nil {
+		t.Fatalf("writing gs input: %v", err)
+	}
+	cmd := exec.Command("gs", "-q", "-dNOPAUSE", "-dBATCH", "-sDEVICE=pdfwrite",
+		"-sOutputFile="+outPath,
+		"-dDownsampleMonoImages=true",
+		fmt.Sprintf("-dMonoImageResolution=%d", dstDPI),
+		"-dMonoImageDownsampleType=/Subsample",
+		"-dEncodeMonoImages=true",
+		"-dMonoImageFilter=/FlateEncode",
+		"-f", inPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gs: %v: %s", err, out)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading gs output: %v", err)
+	}
+	return data
+}
+
+// TestDownsampleDeclaredBPC1AgreesWithGhostscriptSubsample is byb-plj's oracle,
+// the one the previous attempt never built: its bilevel path had none, and its
+// only assertion -- "the output is two-valued" -- is satisfied by a
+// Catmull-Rom-then-threshold and by a subsample at any phase, so it could not
+// tell agreement with Ghostscript from a coincidence.
+//
+// It builds a 300 DPI page whose image is declared /BitsPerComponent 1
+// /DeviceGray, downsamples it two ways -- gs pdfwrite to 150 DPI with
+// -dMonoImageDownsampleType=/Subsample, and DownsampleDeclaredBPC on the same
+// pixels with the same declaration -- and requires the dimensions to match plus
+// psnrRGB >= 34 dB, the same gate as the /Bicubic sibling above.
+//
+// Measured on this fixture, byblos's point subsampling is PIXEL-IDENTICAL to
+// gs's output (+Inf dB), so the 34 dB gate has unbounded headroom while still
+// rejecting every interpolating scaler x/image offers: CatmullRom 20.99 dB,
+// BiLinear 20.68 dB, ApproxBiLinear 21.75 dB. A one-pixel phase error in the
+// subsample would land in that same range.
+//
+// Also measured, and worth knowing before anyone changes the flag: gs produces
+// the same output for /Subsample, /Average AND /Bicubic on this page. It
+// subsamples a mono image whatever /MonoImageDownsampleType asks for, because
+// an interpolating filter produces values 1 bpc cannot store. That is byb-plj's
+// own argument, arrived at independently by Ghostscript, and it is why the
+// DECLARED depth and not the pixels has to pick the kernel.
+func TestDownsampleDeclaredBPC1AgreesWithGhostscriptSubsample(t *testing.T) {
+	requireTool(t, "gs")
+	requireTool(t, "pdfimages")
+
+	src := bitonalScanpage()
+	const srcDPI = 300
+	const dstDPI = 150
+
+	gsOut := gsDownsampleMonoPDF(t, bitonalPDF(t, src, srcDPI), dstDPI)
+	gsImg := pdfimagesPNG(t, gsOut)
+
+	byblosImg, err := DownsampleDeclaredBPC(src, 1, srcDPI, dstDPI)
+	if err != nil {
+		t.Fatalf("DownsampleDeclaredBPC: %v", err)
+	}
+
+	gb, bb := gsImg.Bounds(), byblosImg.Bounds()
+	if gb.Dx() != bb.Dx() || gb.Dy() != bb.Dy() {
+		t.Fatalf("dimensions differ: gs %dx%d, byblos %dx%d", gb.Dx(), gb.Dy(), bb.Dx(), bb.Dy())
+	}
+
+	const wantPSNR = 34.0
+	got := psnrRGB(gsImg, byblosImg)
+	if got < wantPSNR {
+		t.Errorf("psnrRGB(gs/Subsample on a 1-bpc page, byblos DownsampleDeclaredBPC(_, 1, ...)) = %.2f dB; want >= %.1f dB",
+			got, wantPSNR)
+	}
+}
