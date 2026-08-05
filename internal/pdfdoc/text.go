@@ -202,7 +202,13 @@ func (d *doc) AppendContent(n int, ops []byte) (err error) {
 			// /Contents is present but decodes to zero bytes -- e.g. an
 			// array of empty streams. That is legitimately empty content,
 			// not a failure: identity is not a guess, it is the only CTM
-			// zero bytes can leave.
+			// zero bytes can leave. But pdfcpu reports a corrupt content
+			// stream with the identical sentinel and the identical zero
+			// bytes (see verifyEmptyContent), so confirm this page is
+			// actually blank before trusting identity as its CTM.
+			if err := d.verifyEmptyContent(pd["Contents"]); err != nil {
+				return fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
+			}
 		case err != nil:
 			return fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
 		default:
