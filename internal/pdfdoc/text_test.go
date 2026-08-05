@@ -174,6 +174,11 @@ func TestStampedFontAndContentValidateCleanly(t *testing.T) {
 // treating as an error in byb-cqs. netCTM's caller sees model.ErrNoContent
 // here exactly the way Page() did, and identity is not a guess for zero
 // bytes: it is the only CTM they can leave.
+//
+// This is a guard, not a regression test: it passes even with the
+// verifyEmptyContent call removed, and only fails against an over-broad
+// mutant that rejects every ErrNoContent -- TestAppendContentOnACorruptContentStreamIsAnError
+// is what actually pins the fix below.
 func TestAppendContentOnABlankPageSucceeds(t *testing.T) {
 	d := open(t, "blank-page")
 	if err := d.AppendContent(2, []byte("BT ET\n")); err != nil {
