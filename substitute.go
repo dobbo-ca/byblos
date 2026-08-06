@@ -16,6 +16,7 @@ package byblos
 // DPI" for Byblos to pick.
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"maps"
@@ -70,7 +71,24 @@ import (
 // while the old record still says "extract-raster". Re-run RecordExtraction
 // after substituting if the record has to stay true. Page GEOMETRY does not go
 // stale that way -- it is measured in points, and the placement did not move.
+// It cannot be cancelled. Use ReplaceImagesContext when the caller has a
+// deadline.
 func ReplaceImages(w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) error {
+	return ReplaceImagesContext(context.Background(), w, r, subs)
+}
+
+// ReplaceImagesContext is ReplaceImages, cancellable at each page boundary of
+// the resolving walk and at each substitution (byb-xyn).
+//
+// CANCELLATION LATENCY: one page's walk during the walk phase, or one image's
+// substitution during the substitution phase -- but the final d.Write is a
+// single uninterruptible pdfcpu round trip, so a context cancelled once the
+// write has begun is not noticed until the document is fully serialized. A
+// cancelled call writes nothing to w. See context.go.
+func ReplaceImagesContext(ctx context.Context, w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
 	if len(subs) == 0 {
 		return fmt.Errorf("byblos: replace images: no substitutions")
 	}
@@ -86,6 +104,9 @@ func ReplaceImages(w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) erro
 	// RecordExtraction -- there is no way to substitute into half a document
 	// and report that honestly.
 	for n := 1; n <= d.PageCount(); n++ {
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
 		if _, _, err := inspectPage(d, n); err != nil {
 			return fmt.Errorf("byblos: replace images: %w", err)
 		}
@@ -93,6 +114,9 @@ func ReplaceImages(w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) erro
 	// Sorted, so a call with two unsubstitutable images names the same one
 	// every time.
 	for _, objNr := range slices.Sorted(maps.Keys(subs)) {
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
 		if err := d.ReplaceImage(objNr, subs[objNr]); err != nil {
 			return fmt.Errorf("byblos: replace images: %w", err)
 		}

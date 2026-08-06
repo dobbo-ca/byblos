@@ -2,6 +2,7 @@ package byblos
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -235,11 +236,39 @@ func (p PageRaster) CoversPage() bool {
 // image.Image is consumed — OCR, thumbnails, human review — by code that never
 // reads provenance, and a sideways or mirrored raster is wrong there in a way a
 // fraction of a degree is not.
+// It cannot be cancelled. Use ExtractPageRasterContext when the caller has a
+// deadline.
 func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
+	return ExtractPageRasterContext(context.Background(), r, page)
+}
+
+// ExtractPageRasterContext is ExtractPageRaster, cancellable at the two
+// boundaries this primitive has (byb-xyn).
+//
+// CANCELLATION LATENCY: THE WHOLE OF ONE PAGE'S EXTRACTION. This is the
+// weakest guarantee of the nine and the honest statement of it matters more
+// than the check does. Extracting one page is a single unit of work -- open,
+// walk, classify, decode -- with no loop boundary inside it that byblos owns,
+// so once extraction has begun the context is not consulted again. The decode
+// is the expensive part and it is bounded by byb-riy's resource budget, not by
+// this context. A caller that needs a tighter bound than "one page" cannot get
+// it here, and must budget for one page's worst case.
+//
+// The checks sit BEFORE countAttempt deliberately: a call abandoned because
+// the caller's deadline expired is not a failed extraction, and counting it as
+// one would pollute the divert-rate telemetry that design spec section 2's
+// premise rests on with what are really worker timeouts.
+func ExtractPageRasterContext(ctx context.Context, r io.ReadSeeker, page int) (*PageRaster, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
 	d, err := pdfdoc.Open(r)
 	if err != nil {
 		countAttempt()
 		countFailure()
+		return nil, err
+	}
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	pr, _, err := extractPage(d, page)

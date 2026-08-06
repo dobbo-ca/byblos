@@ -1,6 +1,7 @@
 package byblos
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"io"
@@ -74,13 +75,30 @@ type PageInfo struct {
 }
 
 // Inspect reports what every page of r contains. It does not render anything.
+//
+// It cannot be cancelled. Use InspectContext when the caller has a deadline.
 func Inspect(r io.ReadSeeker) ([]PageInfo, error) {
+	return InspectContext(context.Background(), r)
+}
+
+// InspectContext is Inspect, cancellable at each page boundary (byb-xyn).
+//
+// CANCELLATION LATENCY: one page's walk, once pdfcpu has opened the document.
+// The open is not interruptible, so a context cancelled while pdfcpu is still
+// parsing is not noticed until that parse finishes. See context.go.
+func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
 	d, err := pdfdoc.Open(r)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]PageInfo, 0, d.PageCount())
 	for n := 1; n <= d.PageCount(); n++ {
+		if err := checkContext(ctx); err != nil {
+			return nil, err
+		}
 		pi, _, err := inspectPage(d, n)
 		if err != nil {
 			return nil, err
