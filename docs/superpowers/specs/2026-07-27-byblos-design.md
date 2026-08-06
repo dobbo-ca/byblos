@@ -202,7 +202,7 @@ behalf.
 ```go
 package byblos
 
-const Version = "0.1.0"                          // recorded on every Provenance
+const Version = "0.2.0"                          // recorded on every Provenance
 const CapabilityJBIG2Generic = "jbig2-generic"    // provenance capability string
 
 // --- inspection ---
