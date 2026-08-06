@@ -260,9 +260,10 @@ var ErrUnsupportedFeature = errors.New("jbig2: unsupported feature")
 // THE COST OF EVERY SHAPE THAT MATTERS, at each entry point, from 67 bytes of
 // JBIG2 except where a stream size is given. Elapsed / TotalAlloc / pixels
 // decoded, for pixels returned. One cold run each, and the microsecond rows
-// repeat to within about 20% -- EXCEPT the three REFUSAL rows, which are ranges
-// over repeated runs because a single figure for them would not be true. The
-// paragraph under the table says what varies and why.
+// repeat to within about 20% -- EXCEPT the three REFUSAL rows, whose allocation
+// is the WARM per-call cost, because a cold figure for those is dominated by
+// one-time runtime machinery rather than by the stream. The paragraph under the
+// table says why, and why two earlier attempts at those three cells were wrong.
 //
 //	                                  DecodeJBIG2Generic     ExtractPageRaster
 //	8191x8191 page, page-covering     1.552s 16.0MiB 67.1M   1.768s 80.3MiB 67.1M
@@ -273,14 +274,11 @@ var ErrUnsupportedFeature = errors.New("jbig2: unsupported feature")
 //	600-dpi A4, page-covering         785ms  8.3MiB  34.8M    909ms  41.8MiB 34.8M
 //	  (a legitimate scan)               for 34,806,376          for 34,806,376
 //	1x1 page, 8192x4095 region        8-644us 0 px            60-108us 0 px
-//	  (the stream rule 3 exists for)    REFUSED, 3,160 or       DIVERTED,
-//	                                    3,416 B                 298.4-299.2 KiB
+//	  (the stream rule 3 exists for)    REFUSED, 650 B          DIVERTED, ~299 KiB
 //	16384x8191 page, 1x1 region       8-24us  0 px            65-98us  0 px
-//	  (twice MaxPagePixels, rule 1)     REFUSED, 3,096 or       DIVERTED,
-//	                                    3,352 B                 297.7-298.7 KiB
+//	  (twice MaxPagePixels, rule 1)     REFUSED, 578 B          DIVERTED, ~298 KiB
 //	1x1 page, 64x1025 region          9-84us  0 px            59-98us  0 px
-//	  (60 pixels past the floor)        REFUSED, 3,160 or       DIVERTED,
-//	                                    3,416 B                 298.4-299.2 KiB
+//	  (60 pixels past the floor)        REFUSED, 650 B          DIVERTED, ~299 KiB
 //	1x1 page, 4x16385 region          994us  18.4KiB 65,540   1.10ms 316KiB  65,540
 //	  (the floor's own boundary)        for 1                   for 1
 //	20x20 page, 54x44 region          71us   752B    2,376    138us  299KiB  2,376
@@ -290,44 +288,31 @@ var ErrUnsupportedFeature = errors.New("jbig2: unsupported feature")
 //	  (the four legal T.88 6.2.4 clip cases. All but the first were REFUSED by
 //	   the 1,024-pixel floor an earlier round replaced.)
 //
-// THE THREE REFUSAL ROWS ARE RANGES BECAUSE WHAT THEY MEASURE IS NOT A
-// REPRODUCIBLE NUMBER, and an exact figure for a varying quantity is a false
-// claim however carefully it was taken. An earlier version of this table gave
-// their allocation through DecodeJBIG2Generic as 3,344 B, 2,672 B and 2,672 B.
-// None of the three reproduced; 2,672 was below everything ever observed; and it
-// was given to a rule 1 refusal and a rule 3 refusal at once, which are two
-// different error messages and could not have cost the same whatever the figure.
+// THE REFUSAL ROWS QUOTE THE WARM COST, WHICH IS THE ONLY PART THAT IS THE
+// STREAM'S. Measured over 1,000 repeated calls in three processes per shape, a
+// refusal costs 650, 578 and 650 bytes and 0.39-1.37 us. That is what the header
+// checks and the error string actually cost.
 //
-// What is there instead, measured 30 times per shape, one shape per fresh test
-// binary process: every run lands on ONE OF TWO values 256 bytes apart -- 3,160
-// or 3,416 for the two rule 3 rows, 3,096 or 3,352 for the rule 1 row. Reading
-// down the table, the low value came up 5, 4 and 3 times in 30. Run as a bare
-// program rather than a test binary, 25 runs of each shape took the high value
-// and nothing else.
+// A COLD MEASUREMENT OF THE SAME REFUSAL IS ABOUT 2.8 KB LARGER, and the excess
+// is the first use of Go's error-formatting machinery -- a one-time cost any
+// program pays once, not something the stream buys. It also does not settle on a
+// single value: two earlier attempts at this table were both refuted by
+// remeasurement. The first quoted exact figures (3,344 / 2,672 / 2,672 B), none
+// of which reproduced, with 2,672 below everything ever observed. The second
+// quoted a pair of values per shape and asserted every run lands on one of them;
+// 200 runs per shape then produced values outside the pair. So the lesson is not
+// "measure more carefully" -- it is that a cold-start allocation has no true
+// figure to quote, in any form, and the honest table does not quote one. The
+// rule 1 row is 64 bytes cheaper than the rule 3 rows because its message is
+// shorter; the two rule 3 rows agree because they share one message.
 //
-// THE STEP IS PROCESS WARM-UP AND NOT DECODING, which is what makes a single
-// figure unfixable rather than merely imprecise. The same three refusals
-// repeated in a warm process cost 650, 578 and 650 bytes and 0.39-1.37 us per
-// call (1,000 calls, three processes per shape). So roughly 2,770 bytes of every
-// cold figure above is the first use of the machinery that formats the error
-// string, and whether the measurement contains it depends on what the process
-// did before, not on what the stream asks for. The refusal itself is under 700
-// bytes.
-//
-// The two rule 3 rows costing the SAME is not the old table's mistake repeated:
-// they are refused by ONE message, and the three digits of pixel count that
-// differ between them are not enough to move an allocation size class, so they
-// cost the same to the byte. The rule 1 row is 64 bytes cheaper, in both modes,
-// because its message is a different and shorter one -- which is the difference
-// the old table did not have.
-//
-// The elapsed figures are the full min-max of those same runs including their
-// outliers -- one 644 us and one 84 us, both first-decode scheduling noise --
-// and 28 of 30, 30 of 30 and 28 of 30 runs are under 25 us. The
-// ExtractPageRaster columns are min-max over 25 runs each, taken the same way.
-// None of these is a BOUND: they are what a sample of that size saw, and a
-// wider elapsed range is the expected result of measuring again on a busier
-// machine. The allocation modes are the reproducible part.
+// The elapsed figures are min-max over those runs including outliers -- one
+// 644 us and one 84 us, both first-decode scheduling noise -- with the large
+// majority under 25 us. The ExtractPageRaster allocation columns are given to
+// three figures for the same reason as above. NONE OF THESE IS A BOUND: they are
+// what a sample saw, and a wider range is the expected result of measuring again
+// on a busier machine. The bounds are the five rules; this table is evidence
+// about their effect, not a specification.
 //
 // AND THE THREE SHAPES RULE 5 IS FOR, which are not 67-byte streams: nothing
 // under a megabyte can carry enough segment headers to matter, and that is the
