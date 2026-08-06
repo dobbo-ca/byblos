@@ -1,6 +1,7 @@
 package byblos
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"io"
@@ -74,13 +75,35 @@ type PageInfo struct {
 }
 
 // Inspect reports what every page of r contains. It does not render anything.
+//
+// It cannot be cancelled. Use InspectContext when the caller has a deadline.
 func Inspect(r io.ReadSeeker) ([]PageInfo, error) {
+	return InspectContext(context.Background(), r)
+}
+
+// InspectContext is Inspect, cancellable at each page boundary (byb-xyn).
+//
+// CANCELLATION LATENCY: MOST OF THE CALL, despite the per-page check, and the
+// per-page check is not the reason. pdfdoc.Open runs before the loop and is a
+// single uninterruptible pdfcpu parse of the whole document; the walk that
+// follows is comparatively cheap. Measured over 120 pages of 300-dpi scans,
+// the longest stretch between two context checks was 69% of the call, and all
+// of it was the open. So the loop check bounds the WALK by one page, which is
+// worth having, but it does not bound the CALL: a caller must still budget for
+// a full pdfcpu parse. See context.go.
+func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
 	d, err := pdfdoc.Open(r)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]PageInfo, 0, d.PageCount())
 	for n := 1; n <= d.PageCount(); n++ {
+		if err := checkContext(ctx); err != nil {
+			return nil, err
+		}
 		pi, _, err := inspectPage(d, n)
 		if err != nil {
 			return nil, err

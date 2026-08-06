@@ -7,6 +7,7 @@ package byblos
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -163,7 +164,28 @@ func escapePDFString(s string) string {
 // A page whose tl.Pages[i] is empty (including one beyond the end of a
 // shorter tl.Pages) is not touched at all: no font resource is added and no
 // content is appended. len(tl.Pages) greater than r's page count is an error.
+//
+// It cannot be cancelled. Use StampTextLayerContext when the caller has a
+// deadline.
 func StampTextLayer(w io.Writer, r io.ReadSeeker, tl TextLayer) error {
+	return StampTextLayerContext(context.Background(), w, r, tl)
+}
+
+// StampTextLayerContext is StampTextLayer, cancellable at each page boundary
+// and at each word within a page (byb-xyn).
+//
+// CANCELLATION LATENCY: ONE PDFCPU PASS. The checks sit at the top of the page
+// loop and the top of the word loop, so the stamping itself is interrupted
+// between words -- but the per-page tail after that loop (AddFontResource and
+// AppendContent) runs unchecked, and the Open before and the d.Write after are
+// whole uninterruptible pdfcpu passes. Measured over 120 pages carrying one
+// word each, the longest stretch between two context checks was 22% of the
+// call; on a document with fewer, longer pages the write dominates further.
+// A cancelled call writes nothing to w. See context.go.
+func StampTextLayerContext(ctx context.Context, w io.Writer, r io.ReadSeeker, tl TextLayer) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
 	d, err := pdfdoc.Open(r)
 	if err != nil {
 		return fmt.Errorf("byblos: stamp text layer: %w", err)
@@ -175,6 +197,9 @@ func StampTextLayer(w io.Writer, r io.ReadSeeker, tl TextLayer) error {
 
 	font := glyphlessTrueTypeFont()
 	for i, words := range tl.Pages {
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
 		if len(words) == 0 {
 			continue
 		}
@@ -182,6 +207,9 @@ func StampTextLayer(w io.Writer, r io.ReadSeeker, tl TextLayer) error {
 
 		var prepared []preparedWord
 		for wi, word := range words {
+			if err := checkContext(ctx); err != nil {
+				return err
+			}
 			pw, err := prepareWord(word)
 			if err != nil {
 				return fmt.Errorf("byblos: stamp text layer: page %d word %d: %w", pageNum, wi, err)

@@ -7,6 +7,7 @@ package byblos
 // This is Byblos' Go replacement for the img2pdf binary on Kleio's list.
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -51,12 +52,33 @@ type BuildPage struct {
 // JBIG2Decode (carried verbatim); any other filter, or an unsupported
 // BPC/colour-space combination for one of those, is rejected rather than
 // written as a file no reader can open.
+//
+// It cannot be cancelled. Use BuildPDFContext when the caller has a deadline.
 func BuildPDF(w io.Writer, pages []BuildPage) error {
+	return BuildPDFContext(context.Background(), w, pages)
+}
+
+// BuildPDFContext is BuildPDF, cancellable at each page boundary (byb-xyn).
+//
+// CANCELLATION LATENCY: EFFECTIVELY THE WHOLE CALL. The page loop is checked,
+// but it only resolves each page's box -- arithmetic -- while the
+// pdfbuild.Write that follows is a single uninterruptible pass over every
+// page's encoded bytes, and that is where all the time goes. Measured over 120
+// pages, the longest stretch between two context checks was 94% of the call.
+// The per-page boundary here is real but nearly worthless; budget for the
+// whole write. A cancelled call writes nothing to w. See context.go.
+func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
 	if len(pages) == 0 {
 		return fmt.Errorf("byblos: BuildPDF: no pages")
 	}
 	built := make([]pdfbuild.Page, len(pages))
 	for i, p := range pages {
+		if err := checkContext(ctx); err != nil {
+			return err
+		}
 		pw, ph, err := pageBox(p)
 		if err != nil {
 			return fmt.Errorf("byblos: BuildPDF: page %d: %w", i+1, err)

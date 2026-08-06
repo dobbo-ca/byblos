@@ -223,6 +223,7 @@ type PageInfo struct {
 }
 
 func Inspect(r io.ReadSeeker) ([]PageInfo, error)
+func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error)
 
 // --- extraction (no renderer) ---
 
@@ -247,6 +248,7 @@ type PageRaster struct {
 func (p PageRaster) CoversPage() bool
 
 func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error)
+func ExtractPageRasterContext(ctx context.Context, r io.ReadSeeker, page int) (*PageRaster, error)
 
 // --- extraction telemetry ---
 // Instruments the premise §2 rests on: that a page which is not a single
@@ -328,6 +330,7 @@ type TextLayer struct {
 var ErrUnstampableRune = errors.New("byblos: rune is outside the glyphless font's coverage")
 
 func StampTextLayer(w io.Writer, r io.ReadSeeker, tl TextLayer) error
+func StampTextLayerContext(ctx context.Context, w io.Writer, r io.ReadSeeker, tl TextLayer) error
 
 type ColorSpace = pdfdoc.ColorSpace   // §4 write-seam vocabulary, shared with
 type DecodeParms = pdfdoc.DecodeParms // ReplaceImage so BuildPDF isn't a second
@@ -340,12 +343,14 @@ type BuildPage struct {
 }
 
 func BuildPDF(w io.Writer, pages []BuildPage) error
+func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error
 
 // ReplaceImages (byb-fp6) substitutes image streams in an EXISTING document,
 // keyed by 1-based page, leaving everything else as it was. It refuses an image
 // carrying /SMask, /Mask or /ImageMask, and writes no provenance: the caller
 // records what it applied, through RecordExtraction and WriteProvenance.
 func ReplaceImages(w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) error
+func ReplaceImagesContext(ctx context.Context, w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) error
 
 // --- capability errors ---
 
@@ -370,6 +375,7 @@ type OptimizeOptions struct {
 }
 
 func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error
+func OptimizeContext(ctx context.Context, w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error
 
 // --- provenance (§6) ---
 
@@ -402,8 +408,11 @@ type PageGeometry struct {
 func (g PageGeometry) CoversPage() bool
 
 func ReadProvenance(r io.ReadSeeker) (*Provenance, error)
+func ReadProvenanceContext(ctx context.Context, r io.ReadSeeker) (*Provenance, error)
 func WriteProvenance(r io.ReadSeeker, w io.Writer, p Provenance) error
+func WriteProvenanceContext(ctx context.Context, r io.ReadSeeker, w io.Writer, p Provenance) error
 func RecordExtraction(r io.ReadSeeker) (Provenance, error) // runs extraction over every page, ready for WriteProvenance (byb-b5)
+func RecordExtractionContext(ctx context.Context, r io.ReadSeeker) (Provenance, error)
 func UpgradeCandidates(p *Provenance, current []string) []string
 func Capabilities() []string // what this build can do
 ```

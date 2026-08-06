@@ -2,6 +2,7 @@ package byblos
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -104,7 +105,31 @@ type OptimizeOptions struct {
 // a fresh record with an EMPTY Capabilities: Optimize did not extract or
 // inspect anything, so it must not claim those capabilities are done (see
 // the note further down, and upgrade.go's UpgradeCandidates).
+// It cannot be cancelled. Use OptimizeContext when the caller has a deadline.
 func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
+	return OptimizeContext(context.Background(), w, r, opts)
+}
+
+// OptimizeContext is Optimize, cancellable between its stages and inside the
+// JPEG recompression pass (byb-xyn).
+//
+// CANCELLATION LATENCY: A WHOLE PDFCPU ROUND TRIP, and on the default options
+// that is essentially the whole call. Optimize's work is four pdfcpu passes --
+// pdfdoc.Optimize, ReadProvenance, WriteProvenance, and optionally Linearize --
+// none of which is interruptible. What makes the default path cancellable at
+// all is that the checks sit BETWEEN those passes, so the latency is one pass
+// and not the whole call; with RecompressJPEG false there is no finer boundary
+// than that. With RecompressJPEG true the recompression pass adds per-page and
+// per-image boundaries that ARE checked, so a context cancelled during
+// recompression is honoured within one image's re-encode.
+//
+// A caller that needs Optimize to stop promptly does not have that option
+// today; it must budget for the document's full rewrite. A cancelled call
+// writes nothing to w. See context.go.
+func OptimizeContext(ctx context.Context, w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
 	if opts.RecompressJPEG && (opts.JPEGQuality < 1 || opts.JPEGQuality > 100) {
 		return fmt.Errorf("byblos: optimize: JPEGQuality %d is outside 1..100 (75 is a reasonable default)", opts.JPEGQuality)
 	}
@@ -124,12 +149,22 @@ func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 	// input" comparison below falls back to origIn -- see that branch.
 	var applied map[int][]string
 	if opts.RecompressJPEG {
-		in, applied, err = recompressJPEG(in, opts.JPEGQuality)
+		in, applied, err = recompressJPEG(ctx, in, opts.JPEGQuality)
 		if err != nil {
 			return fmt.Errorf("byblos: optimize: %w", err)
 		}
 	}
 
+	// Checked HERE, before the rewrite, and deliberately not again after it.
+	// This boundary is the one that pays: recompressJPEG above can run for a
+	// long time on an image-heavy document, and without this a context that
+	// expired during it would still launch a whole pdfcpu rewrite pass before
+	// anything noticed. A second check after pdfdoc.Optimize would be dead
+	// code -- ReadProvenanceContext below opens with the identical check, and
+	// deleting a post-rewrite check was measured to change no test at all.
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
 	var rewritten bytes.Buffer
 	if err := pdfdoc.Optimize(bytes.NewReader(in), &rewritten); err != nil {
 		return fmt.Errorf("byblos: optimize: %w", err)
@@ -142,7 +177,7 @@ func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 	// write provenance -- not two: writing provenance is itself a full
 	// pdfcpu read-validate-optimize-write pass, so optimizing twice would only
 	// add noise, not change the result.
-	prov, err := ReadProvenance(bytes.NewReader(rewritten.Bytes()))
+	prov, err := ReadProvenanceContext(ctx, bytes.NewReader(rewritten.Bytes()))
 	if err != nil {
 		if !errors.Is(err, errCorruptProvenance) {
 			return fmt.Errorf("byblos: optimize: %w", err)
@@ -194,7 +229,7 @@ func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 	}
 
 	var candidate bytes.Buffer
-	if err := WriteProvenance(bytes.NewReader(rewritten.Bytes()), &candidate, *prov); err != nil {
+	if err := WriteProvenanceContext(ctx, bytes.NewReader(rewritten.Bytes()), &candidate, *prov); err != nil {
 		return fmt.Errorf("byblos: optimize: %w", err)
 	}
 
@@ -252,7 +287,7 @@ func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 // every candidate found was not eligible or not smaller -- in is returned
 // unchanged and applied is nil, without running it through a pdfcpu
 // Open/Write round trip it does not need.
-func recompressJPEG(in []byte, quality int) ([]byte, map[int][]string, error) {
+func recompressJPEG(ctx context.Context, in []byte, quality int) ([]byte, map[int][]string, error) {
 	d, err := pdfdoc.Open(bytes.NewReader(in))
 	if err != nil {
 		return nil, nil, fmt.Errorf("byblos: optimize: recompress: open: %w", err)
@@ -261,6 +296,9 @@ func recompressJPEG(in []byte, quality int) ([]byte, map[int][]string, error) {
 	n := d.PageCount()
 	pageImageIDs := make([][]int, n)
 	for i := 1; i <= n; i++ {
+		if err := checkContext(ctx); err != nil {
+			return nil, nil, err
+		}
 		_, scan, err := inspectPage(d, i)
 		if err != nil {
 			return nil, nil, fmt.Errorf("byblos: optimize: recompress: page %d: %w", i, err)
@@ -282,6 +320,9 @@ func recompressJPEG(in []byte, quality int) ([]byte, map[int][]string, error) {
 	for i := 0; i < n; i++ {
 		pageApplied := false
 		for _, id := range pageImageIDs[i] {
+			if err := checkContext(ctx); err != nil {
+				return nil, nil, err
+			}
 			did, seen := substituted[id]
 			if !seen {
 				did, err = recompressOneImage(d, id, quality)

@@ -1,6 +1,7 @@
 package byblos
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -294,7 +295,27 @@ var errCorruptProvenance = errors.New("byblos: corrupt provenance value")
 // underneath). It needs only an Info dictionary to exist, not an extraction
 // outcome or a text layer -- see byb-0dz, which split this half of B5 off
 // byb-b1/byb-b4 for exactly that reason.
+//
+// It cannot be cancelled. Use WriteProvenanceContext when the caller has a
+// deadline.
 func WriteProvenance(r io.ReadSeeker, w io.Writer, p Provenance) error {
+	return WriteProvenanceContext(context.Background(), r, w, p)
+}
+
+// WriteProvenanceContext is WriteProvenance, cancellable only before its work
+// begins (byb-xyn).
+//
+// CANCELLATION LATENCY: A WHOLE PDFCPU ROUND TRIP. Writing provenance is one
+// indivisible read-validate-optimize-write pass through pdfcpu, which is not
+// context-aware; there is no loop boundary byblos owns inside it, so the
+// context is consulted once on entry and not again. The parameter exists so a
+// caller can decline to START the work, and so this primitive composes with
+// the other eight rather than being the one that silently takes no context.
+// A cancelled call writes nothing to w. See context.go.
+func WriteProvenanceContext(ctx context.Context, r io.ReadSeeker, w io.Writer, p Provenance) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
 	data, err := json.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("byblos: marshal provenance: %w", err)
@@ -337,8 +358,49 @@ func WriteProvenance(r io.ReadSeeker, w io.Writer, p Provenance) error {
 // Linearize:true would then falsely nominate for reprocessing. A record under
 // provenanceKey that fails to parse as JSON is treated as no record at all,
 // matching ReadProvenance/Optimize's errCorruptProvenance handling.
+//
+// It cannot be cancelled. Use RecordExtractionContext when the caller has a
+// deadline.
 func RecordExtraction(r io.ReadSeeker) (Provenance, error) {
-	old, err := ReadProvenance(r)
+	return RecordExtractionContext(context.Background(), r)
+}
+
+// RecordExtractionContext is RecordExtraction, cancellable at each page
+// boundary (byb-xyn).
+//
+// This is the primitive the context convention is really for. It runs
+// extraction over EVERY page, so it is both the most expensive entry point in
+// the package and the one where a per-page check buys the most: on a long
+// document it is the difference between a worker returning in one page's time
+// and a worker held until the SQS visibility timeout redelivers the same file.
+//
+// CANCELLATION LATENCY: one page's extraction -- open, walk, classify, decode
+// -- which is the same indivisible unit ExtractPageRasterContext documents,
+// bounded by byb-riy's decoder budget and not by this context. The initial
+// ReadProvenance and pdfdoc.Open are single uninterruptible pdfcpu passes; a
+// context cancelled during those is not noticed until the page loop is
+// reached.
+//
+// WHAT ONE PAGE COSTS, measured, because this is the number a caller has to
+// budget for and the reassuring one is misleading:
+//
+//	ordinary 300-dpi JPEG scans, 120 pages:  12 ms   (3.2% of the call)
+//	hostile JBIG2 admitted by byb-riy:        seconds per page
+//
+// The second number is the contract. byb-riy's budget
+// admits a page of 67,092,481 pixels, and decoding one costs seconds, so
+// "cancellation stops this within a page" is only a useful promise to a caller
+// who has budgeted SECONDS for that page -- not the milliseconds an ordinary
+// document suggests. A kleio worker whose SQS visibility timeout is shorter
+// than that will still be redelivered onto the same document, which is the
+// exact failure this bead exists to prevent, so the timeout has to be set
+// against the hostile number. See TestCancellationLatencyOnAHostilePage and
+// context.go.
+func RecordExtractionContext(ctx context.Context, r io.ReadSeeker) (Provenance, error) {
+	if err := checkContext(ctx); err != nil {
+		return Provenance{}, err
+	}
+	old, err := ReadProvenanceContext(ctx, r)
 	if err != nil {
 		if !errors.Is(err, errCorruptProvenance) {
 			return Provenance{}, err
@@ -363,6 +425,9 @@ func RecordExtraction(r io.ReadSeeker) (Provenance, error) {
 		p.Capabilities = unionSorted(old.Capabilities, p.Capabilities)
 	}
 	for n := 1; n <= d.PageCount(); n++ {
+		if err := checkContext(ctx); err != nil {
+			return Provenance{}, err
+		}
 		_, rec, err := extractPage(d, n)
 		if err != nil && rec.Diverted == "" {
 			return Provenance{}, fmt.Errorf("byblos: provenance: page %d: %w", n, err)
@@ -389,7 +454,25 @@ func unionSorted(a, b []string) []string {
 // processed -- absence is not an error, and UpgradeCandidates already treats a
 // nil *Provenance as "every capability is a candidate", so callers need no
 // special case for a never-seen file.
+//
+// It cannot be cancelled. Use ReadProvenanceContext when the caller has a
+// deadline.
 func ReadProvenance(r io.ReadSeeker) (*Provenance, error) {
+	return ReadProvenanceContext(context.Background(), r)
+}
+
+// ReadProvenanceContext is ReadProvenance, cancellable only before its work
+// begins (byb-xyn).
+//
+// CANCELLATION LATENCY: A WHOLE PDFCPU READ. Reading the Info dictionary means
+// pdfcpu parsing the document, which is not interruptible and has no
+// byblos-owned loop inside it, so the context is consulted once on entry and
+// not again. It is the cheapest of the nine, but "cheapest" is a property of
+// the document, not a bound this context provides. See context.go.
+func ReadProvenanceContext(ctx context.Context, r io.ReadSeeker) (*Provenance, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
 	props, err := pdfdoc.ReadProperties(r)
 	if err != nil {
 		return nil, fmt.Errorf("byblos: read provenance: %w", err)

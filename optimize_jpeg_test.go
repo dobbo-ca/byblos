@@ -2,6 +2,7 @@ package byblos
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -105,7 +106,7 @@ func TestOptimizeRecompressJPEGRecordsApplied(t *testing.T) {
 // never sees the recompressed candidate's provenance at all).
 func TestOptimizeRecompressJPEGNonDCTPageIsNoOp(t *testing.T) {
 	in := corpusDoc(t, "scan")
-	out, applied, err := recompressJPEG(in, 50)
+	out, applied, err := recompressJPEG(context.Background(), in, 50)
 	if err != nil {
 		t.Fatalf("recompressJPEG on a non-JPEG document: want no error, got %v", err)
 	}
@@ -127,7 +128,7 @@ func TestOptimizeRecompressJPEGNonDCTPageIsNoOp(t *testing.T) {
 // provenance and so cannot tell "skipped" from "never attempted".
 func TestOptimizeRecompressJPEGSkipsSMask(t *testing.T) {
 	in := corpus.ScanSMaskJPEG()
-	out, applied, err := recompressJPEG(in, 10)
+	out, applied, err := recompressJPEG(context.Background(), in, 10)
 	if err != nil {
 		t.Fatalf("recompressJPEG: %v", err)
 	}
