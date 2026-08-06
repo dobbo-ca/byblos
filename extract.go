@@ -290,19 +290,43 @@ func extractPage(d pdfdoc.Doc, page int) (*PageRaster, PageProvenance, error) {
 		countFailure()
 		return nil, PageProvenance{}, err
 	}
+	var img image.Image
 	switch fileType {
-	case "jbig2", "jpx":
-		// pdfcpu returns these as opaque bytes rather than erroring, so the
-		// check has to happen here or the bytes look like a valid image.
+	case "jbig2":
+		// pdfcpu returns JBIG2 as opaque bytes rather than erroring, so nothing
+		// upstream of here has looked at them; image.Decode would not recognise
+		// them either. byblos decodes the generic-region subset itself
+		// (jbig2.go), which is exactly the subset EncodeJBIG2Generic writes, so
+		// a byblos-compressed page is re-extractable by byblos (byb-riy).
+		//
+		// Everything else JBIG2 can be -- symbol mode above all, which is what
+		// most archive scanners emit -- still diverts, under the SAME reason
+		// string as before. The taxonomy does not gain a term for it: a page
+		// that needs a fuller JBIG2 decoder and a page that needs any JBIG2
+		// decoder nominate the same capability, decode-jbig2, and splitting
+		// them is byb-z8j's to decide, not this site's.
+		img, err = decodeJBIG2Placement(data, d.ImageInfo, placement.ID)
+		if err != nil {
+			// No fileType interpolation here, unlike the sibling sites: every
+			// error this branch can produce already opens with "jbig2:", so
+			// adding it again would read "jbig2: jbig2: ...".
+			countDivert("unsupported-codec-jbig2")
+			return nil, PageProvenance{Diverted: divertClass("unsupported-codec-jbig2")}, fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err)
+		}
+	case "jpx":
+		// As above for the opaque bytes, and unlike jbig2 there is no byblos
+		// JPEG2000 code in either direction and x/image ships no JPX decoder, so
+		// every one of these diverts.
 		//
 		// The reason carries fileType so divertClass (extract.go) can emit a
 		// codec-specific class and capabilityRules (upgrade.go) can nominate
-		// decode-jbig2 without also nominating decode-jpx for the same page
+		// decode-jpx without also nominating decode-jbig2 for the same page
 		// (byb-z8j).
-		countDivert("unsupported-codec-" + fileType)
-		return nil, PageProvenance{Diverted: divertClass("unsupported-codec-" + fileType)}, fmt.Errorf("%w: %s", ErrUnsupportedImageCodec, fileType)
+		countDivert("unsupported-codec-jpx")
+		return nil, PageProvenance{Diverted: divertClass("unsupported-codec-jpx")}, fmt.Errorf("%w: jpx", ErrUnsupportedImageCodec)
+	default:
+		img, _, err = image.Decode(bytes.NewReader(data))
 	}
-	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		// As above, the reason carries fileType so the divert nominates one
 		// decoder rather than all three (byb-z8j).

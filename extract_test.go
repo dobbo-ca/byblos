@@ -323,6 +323,18 @@ func TestExtractPageRasterDiverts(t *testing.T) {
 // The trap ErrUnsupportedImageCodec exists for: pdfcpu returns a JBIG2 payload
 // as opaque bytes with no error, so without this check the bytes would reach an
 // image decoder and either fail obscurely or appear to work.
+//
+// The corpus payload is 64 bytes of filler, not a JBIG2 stream at all (see
+// corpus.jbig2Payload), so this page diverts however byblos is built.
+//
+// WHAT THIS PINS CHANGED IN byb-riy. It used to require the message to be
+// EXACTLY the guard's, because the guard did not look at the bytes; byblos now
+// decodes generic-region JBIG2 (jbig2.go), so a jbig2 payload is handed to that
+// decoder and the message carries whatever the decoder said about it. What has
+// not changed is the mutation being guarded against: deleting the jbig2 case
+// sends the payload on to image.Decode, whose failure branch also wraps
+// ErrUnsupportedImageCodec and also interpolates the fileType. The discriminator
+// is image.ErrFormat's own words, which only that path can produce.
 func TestExtractPageRasterRejectsJBIG2(t *testing.T) {
 	data := corpusDoc(t, "jbig2")
 	_, err := ExtractPageRaster(bytes.NewReader(data), 1)
@@ -332,14 +344,11 @@ func TestExtractPageRasterRejectsJBIG2(t *testing.T) {
 	if errors.Is(err, ErrNotSingleRaster) {
 		t.Error("a JBIG2 page-covering scan IS a single raster; it must not also report ErrNotSingleRaster")
 	}
-	// The message must be exactly the guard's, not merely one that mentions the
-	// codec. Deleting the `case "jbig2", "jpx"` guard sends the payload on to
-	// image.Decode, whose failure branch also wraps ErrUnsupportedImageCodec and
-	// also interpolates the fileType — it just appends the decoder's own words
-	// ("...: jbig2: image: unknown format"). A Contains("jbig2") assertion is
-	// satisfied by both, so it pins nothing.
-	if want := ErrUnsupportedImageCodec.Error() + ": jbig2"; err.Error() != want {
-		t.Errorf("error = %q; want exactly %q (a longer message means the guard was bypassed)", err, want)
+	if got := err.Error(); strings.Contains(got, image.ErrFormat.Error()) {
+		t.Errorf("error = %q; the payload reached image.Decode, so the jbig2 branch was bypassed", got)
+	}
+	if want := ErrUnsupportedImageCodec.Error() + ": jbig2: "; !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error = %q; want the prefix %q from byblos's own JBIG2 decoder", err, want)
 	}
 }
 

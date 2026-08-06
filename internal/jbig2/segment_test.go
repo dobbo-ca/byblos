@@ -142,3 +142,85 @@ func TestEmbeddedStreamRejectsOversizeBitmap(t *testing.T) {
 		t.Fatal("EmbeddedStream() on a 2^33-wide bitmap: want error, got nil")
 	}
 }
+
+// TestEmbeddedStreamRejectsAWidthOnePastTheField pins the same guard AT ITS
+// BOUNDARY, which the 2^33 case above cannot reach.
+//
+// 2^33 is TWICE the width the guard is about, and that slack is the whole
+// problem: loosen the comparison to "> math.MaxUint32*2" and 2^33 is still
+// refused -- 8,589,934,592 is two past 8,589,934,590 -- so the mutant passes
+// this file and the entire suite while a bitmap of any width between 2^32 and
+// 2^33 goes out as a stream whose region header declares uint32(W), a number
+// that is not the width of anything. A guard on a 32-bit FIELD has to be pinned
+// at the first value that does not fit the field, which is math.MaxUint32 + 1
+// and nothing else.
+//
+// What the mutant does with this bitmap is not a wrong stream but a panic, and
+// it is worth saying where: EncodeGenericRegion masks the padding of every row
+// first, and the byte holding pixel W-1 of a 2^32-wide row is index 536,870,911
+// of a one-byte Pix. The recover is what keeps that from taking the package's
+// other tests down with it; the panic is still a failure of this test.
+//
+// The HEIGHT half of the same comparison is deliberately left at presence only.
+// The bitmap that would pin it has H = 2^32, and genericRegionSegmentData's
+// first statement is make([]byte, 0, 26+b.H) -- so a mutant that accepts it
+// reserves four gibibytes before it can fail, which makes the test a resource
+// bomb rather than an assertion. There is no cheap boundary case for that half.
+func TestEmbeddedStreamRejectsAWidthOnePastTheField(t *testing.T) {
+	// Through an int64 variable for the same reason as the case above: on a
+	// 32-bit platform int(1<<32) is a compile-time overflow and the guard is
+	// unreachable anyway.
+	w := int64(math.MaxUint32) + 1
+	if w > int64(math.MaxInt) {
+		t.Skip("int is 32 bits on this platform; the 32-bit region dimension guard is unreachable")
+	}
+	b := &Bitmap{W: int(w), H: 1, Stride: 1, Pix: make([]byte, 1)}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("EmbeddedStream() PANICKED on a %d-wide bitmap instead of refusing it: %v",
+				w, r)
+		}
+	}()
+	if _, err := EmbeddedStream(b); err == nil {
+		t.Fatalf("EmbeddedStream() on a bitmap %d wide -- math.MaxUint32 + 1, the first width "+
+			"that does not fit the 32-bit region dimension field of T.88 7.4.1 -- returned no "+
+			"error. The header would carry uint32(%d) = %d, which is not the width of this or "+
+			"any other bitmap.", w, w, uint32(w))
+	}
+}
+
+// TestEmbeddedStreamRejectsAZeroDimension pins EmbeddedStream's own dimension
+// guard, which is the inner half of a defence-in-depth pair and is currently
+// pinned by nothing.
+//
+// The outer half is byblos.EncodeJBIG2Generic's "b.Width <= 0 || b.Height <= 0",
+// and while it stands, no caller can reach this one with a zero dimension. That
+// is the argument for calling this check dead, and it is wrong for a reason the
+// pair makes obvious: DELETE EITHER HALF ALONE and the other still refuses, so
+// neither half can be tested through the public API and BOTH are free to be
+// deleted one at a time by two people who each checked that the suite was green.
+// Delete both and EncodeJBIG2Generic returns 71 bytes and a nil error for a 16x0
+// bitmap -- a JBIG2 stream declaring a page with no rows, which every decoder
+// including this one then refuses. A writer that emits an unreadable stream and
+// calls it success is the silent accept this package's doc treats as worse than
+// an error.
+//
+// EmbeddedStream is reachable directly from inside the package, so unlike the
+// dead policy documented in generic_decode.go and parseSegments this check CAN
+// be made to fail, which is the whole test for whether it should be pinned.
+func TestEmbeddedStreamRejectsAZeroDimension(t *testing.T) {
+	for name, b := range map[string]*Bitmap{
+		"zero-height": {W: 16, H: 0, Stride: 2, Pix: []byte{}},
+		"zero-width":  {W: 0, H: 4, Stride: 2, Pix: make([]byte, 8)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := EmbeddedStream(b)
+			if err == nil {
+				t.Fatalf("EmbeddedStream() on a %dx%d bitmap wrote %d bytes with err = nil; "+
+					"a page with a zero dimension has no raster to carry and no decoder "+
+					"accepts one back", b.W, b.H, len(got))
+			}
+		})
+	}
+}
