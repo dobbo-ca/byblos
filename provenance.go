@@ -14,7 +14,7 @@ import (
 // Version is the Byblos semver recorded in every Provenance. It exists for
 // humans and bug reports; upgrade decisions are driven by Capabilities, not by
 // comparing versions (design spec section 6).
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Provenance is the record Byblos writes into a processed PDF, as JSON under a
 // custom Info-dictionary key. The PDF is authoritative; any mirror of these
