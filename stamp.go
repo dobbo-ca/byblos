@@ -174,11 +174,14 @@ func StampTextLayer(w io.Writer, r io.ReadSeeker, tl TextLayer) error {
 // StampTextLayerContext is StampTextLayer, cancellable at each page boundary
 // and at each word within a page (byb-xyn).
 //
-// CANCELLATION LATENCY: one word's preparation, since the check sits inside
-// the inner loop and not only the page loop -- but the final d.Write is a
-// single uninterruptible pdfcpu round trip, and on a document whose pages
-// carry few words that write dominates the call. A cancelled call writes
-// nothing to w. See context.go.
+// CANCELLATION LATENCY: ONE PDFCPU PASS. The checks sit at the top of the page
+// loop and the top of the word loop, so the stamping itself is interrupted
+// between words -- but the per-page tail after that loop (AddFontResource and
+// AppendContent) runs unchecked, and the Open before and the d.Write after are
+// whole uninterruptible pdfcpu passes. Measured over 120 pages carrying one
+// word each, the longest stretch between two context checks was 22% of the
+// call; on a document with fewer, longer pages the write dominates further.
+// A cancelled call writes nothing to w. See context.go.
 func StampTextLayerContext(ctx context.Context, w io.Writer, r io.ReadSeeker, tl TextLayer) error {
 	if err := checkContext(ctx); err != nil {
 		return err

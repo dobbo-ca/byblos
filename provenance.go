@@ -379,7 +379,23 @@ func RecordExtraction(r io.ReadSeeker) (Provenance, error) {
 // bounded by byb-riy's decoder budget and not by this context. The initial
 // ReadProvenance and pdfdoc.Open are single uninterruptible pdfcpu passes; a
 // context cancelled during those is not noticed until the page loop is
-// reached. See context.go.
+// reached.
+//
+// WHAT ONE PAGE COSTS, measured, because this is the number a caller has to
+// budget for and the reassuring one is misleading:
+//
+//	ordinary 300-dpi JPEG scans, 120 pages:  12 ms   (3.2% of the call)
+//	hostile JBIG2 admitted by byb-riy:        seconds per page
+//
+// The second number is the contract. byb-riy's budget
+// admits a page of 67,092,481 pixels, and decoding one costs seconds, so
+// "cancellation stops this within a page" is only a useful promise to a caller
+// who has budgeted SECONDS for that page -- not the milliseconds an ordinary
+// document suggests. A kleio worker whose SQS visibility timeout is shorter
+// than that will still be redelivered onto the same document, which is the
+// exact failure this bead exists to prevent, so the timeout has to be set
+// against the hostile number. See TestCancellationLatencyOnAHostilePage and
+// context.go.
 func RecordExtractionContext(ctx context.Context, r io.ReadSeeker) (Provenance, error) {
 	if err := checkContext(ctx); err != nil {
 		return Provenance{}, err

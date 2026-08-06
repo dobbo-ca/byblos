@@ -35,19 +35,58 @@ package byblos
 // Capabilities, UpgradeCandidates -- do no document-scale work at all.
 //
 // WHAT CANCELLATION MEANS, AND WHAT IT DOES NOT. byblos checks ctx at every
-// loop boundary it controls. It cannot check inside pdfcpu, which is not
-// context-aware and will not become so, so CANCELLATION LATENCY EQUALS THE
-// LONGEST UNINTERRUPTIBLE UNIT OF WORK -- and for several of these primitives
-// that unit is a whole pdfcpu round trip, not a page. This is the part that
-// would otherwise ship as a comfortable fiction, so each primitive's doc
-// comment states its MEASURED worst case rather than claiming "we check
-// between pages". See TestCancellationLatency for the measurements and
-// docs/superpowers/specs for the table.
+// PAGE- AND DOCUMENT-LEVEL boundary it controls. It does NOT check inside a
+// page: pdfcpu is not context-aware and will not become so, and byblos' own
+// content walk (internal/content.Walk) drives a per-operator loop that takes
+// no context either. So CANCELLATION LATENCY EQUALS THE LONGEST
+// UNINTERRUPTIBLE UNIT OF WORK, and that unit is one page at best -- for four
+// of the nine it is a whole pdfcpu round trip. This is the part that would
+// otherwise ship as a comfortable fiction, so each primitive's doc comment
+// states its MEASURED worst case rather than claiming "we check between
+// pages". Pushing a check down into content.Walk is byb-fem.
 //
-// A cancelled call writes nothing. Every primitive here that takes an
-// io.Writer builds its output completely before touching it, so cancellation
-// can never leave a truncated document behind -- one that would open cleanly
-// and be wrong. TestCancelledCallWritesNothing pins that.
+// WHAT WAS MEASURED, and it is less flattering than "nine cancellable
+// primitives" sounds. Each entry point was run under a context that records
+// where its boundaries fall, over a 120-page document of 300-dpi scans; the
+// figure is the longest stretch of work between two consecutive checks, as a
+// fraction of the whole call:
+//
+//	RecordExtraction     3%    one page, and the page loop is the whole call
+//	StampTextLayer      22%
+//	Optimize            35%    4 checks, no per-page boundary by default
+//	ReplaceImages       46%
+//	ExtractPageRaster   55%    2 checks, however long the document
+//	Inspect             69%    pdfdoc.Open dominates the page loop
+//	BuildPDF            94%    pdfbuild.Write dominates the page loop
+//	ReadProvenance     100%    1 check
+//	WriteProvenance    100%    1 check
+//
+// So RECORDEXTRACTION IS THE ONE THAT WORKS. It is also the one that matters,
+// being the most expensive entry point and the one kleio would run per
+// document. For the rest, the context lets a caller decline to START the work
+// and bounds an inner loop that is not where the time goes; a caller must
+// still budget for a whole pdfcpu pass. Five of the nine have a per-page
+// boundary and four do not, and TestCancellationLatency pins that split by
+// CHECK COUNT rather than by elapsed time -- deleting a loop check changes the
+// count exactly, whereas timing assertions on this proved flaky twice.
+//
+// AND THE PAGE ITSELF IS NOT SMALL. RecordExtraction's per-page unit is ~12 ms
+// over ordinary scans but SECONDS over a JBIG2 page that byb-riy's budget still
+// admits, because one such page decodes 67 million pixels. A caller sizing a
+// deadline or an SQS visibility timeout must use the hostile number: sized
+// against the ordinary one, a single hostile document still holds a worker past
+// its timeout and is redelivered onto the same file, which is the failure this
+// convention exists to prevent. See TestCancellationLatencyOnAHostilePage.
+//
+// A cancelled call writes nothing -- but NOT because the output is buffered.
+// Only Optimize builds its result in memory first; StampTextLayer,
+// ReplaceImages, BuildPDF and WriteProvenance all stream straight into the
+// caller's io.Writer. What makes truncation impossible is that no context
+// check runs once a write has begun: every check sits strictly before the
+// write. That is a real constraint on future edits, not an accident --
+// ADDING a check around one of those writes would make truncation possible,
+// and a truncated PDF opens cleanly and is wrong. TestCancelledCallWritesNothing
+// pins the property; this paragraph is why it holds.
 
 import "context"
 

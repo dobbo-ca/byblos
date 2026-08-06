@@ -60,12 +60,13 @@ func BuildPDF(w io.Writer, pages []BuildPage) error {
 
 // BuildPDFContext is BuildPDF, cancellable at each page boundary (byb-xyn).
 //
-// CANCELLATION LATENCY: one page's box resolution during the page loop, which
-// is cheap -- but the pdfbuild.Write that follows it is a single
-// uninterruptible pass over every page's encoded bytes, and that is where this
-// primitive spends its time. A context cancelled once the write has begun is
-// not noticed until the document is fully written. A cancelled call writes
-// nothing to w. See context.go.
+// CANCELLATION LATENCY: EFFECTIVELY THE WHOLE CALL. The page loop is checked,
+// but it only resolves each page's box -- arithmetic -- while the
+// pdfbuild.Write that follows is a single uninterruptible pass over every
+// page's encoded bytes, and that is where all the time goes. Measured over 120
+// pages, the longest stretch between two context checks was 94% of the call.
+// The per-page boundary here is real but nearly worthless; budget for the
+// whole write. A cancelled call writes nothing to w. See context.go.
 func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error {
 	if err := checkContext(ctx); err != nil {
 		return err

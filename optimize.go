@@ -114,12 +114,14 @@ func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 // JPEG recompression pass (byb-xyn).
 //
 // CANCELLATION LATENCY: A WHOLE PDFCPU ROUND TRIP, and on the default options
-// that is essentially the whole call. Optimize's work is three pdfcpu passes --
-// pdfdoc.Optimize, WriteProvenance, and optionally Linearize -- none of which
-// is interruptible, and with RecompressJPEG false there is no byblos-owned loop
-// between them at all. With RecompressJPEG true the recompression pass adds
-// per-page and per-image boundaries that ARE checked, so a context cancelled
-// during recompression is honoured within one image's re-encode.
+// that is essentially the whole call. Optimize's work is four pdfcpu passes --
+// pdfdoc.Optimize, ReadProvenance, WriteProvenance, and optionally Linearize --
+// none of which is interruptible. What makes the default path cancellable at
+// all is that the checks sit BETWEEN those passes, so the latency is one pass
+// and not the whole call; with RecompressJPEG false there is no finer boundary
+// than that. With RecompressJPEG true the recompression pass adds per-page and
+// per-image boundaries that ARE checked, so a context cancelled during
+// recompression is honoured within one image's re-encode.
 //
 // A caller that needs Optimize to stop promptly does not have that option
 // today; it must budget for the document's full rewrite. A cancelled call

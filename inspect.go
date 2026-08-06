@@ -83,9 +83,14 @@ func Inspect(r io.ReadSeeker) ([]PageInfo, error) {
 
 // InspectContext is Inspect, cancellable at each page boundary (byb-xyn).
 //
-// CANCELLATION LATENCY: one page's walk, once pdfcpu has opened the document.
-// The open is not interruptible, so a context cancelled while pdfcpu is still
-// parsing is not noticed until that parse finishes. See context.go.
+// CANCELLATION LATENCY: MOST OF THE CALL, despite the per-page check, and the
+// per-page check is not the reason. pdfdoc.Open runs before the loop and is a
+// single uninterruptible pdfcpu parse of the whole document; the walk that
+// follows is comparatively cheap. Measured over 120 pages of 300-dpi scans,
+// the longest stretch between two context checks was 69% of the call, and all
+// of it was the open. So the loop check bounds the WALK by one page, which is
+// worth having, but it does not bound the CALL: a caller must still budget for
+// a full pdfcpu parse. See context.go.
 func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
