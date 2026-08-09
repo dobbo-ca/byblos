@@ -11,3 +11,7 @@ testdata/corpus/
 
 # Local credentials for tools/sample (never commit)
 .env
+
+# Reproducible from `make fontmeasure`, plus any third-party open font dropped
+# in for arm (a) of the byb-8b9.6 measurement.
+tools/fontmeasure/faces/

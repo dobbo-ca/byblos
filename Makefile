@@ -1,4 +1,4 @@
-.PHONY: build test lint corpus oracle glyphless jbig2-goldens
+.PHONY: build test lint corpus oracle glyphless jbig2-goldens fontmeasure
 
 build:
 	CGO_ENABLED=0 go build ./...
@@ -31,6 +31,17 @@ oracle: corpus
 # stamps with. Manual step, never run in CI. Commit the result.
 glyphless:
 	CGO_ENABLED=0 go run internal/glyphless/gen.go
+
+# Builds the four synthetic box fonts the byb-8b9.6 measurement compares
+# against a real face. Output goes to tools/fontmeasure/faces/, which is
+# gitignored: these are reproducible from this target, unlike the oracle and
+# glyphless assets above. Manual step, never run in CI.
+fontmeasure:
+	mkdir -p tools/fontmeasure/faces
+	CGO_ENABLED=0 go run tools/fontmeasure/boxfont.go -style=filled -family="Byblos Box" -out=tools/fontmeasure/faces/box-filled.ttf
+	CGO_ENABLED=0 go run tools/fontmeasure/boxfont.go -style=hollow -family="Byblos Box Hollow" -out=tools/fontmeasure/faces/box-hollow.ttf
+	CGO_ENABLED=0 go run tools/fontmeasure/boxfont.go -style=filled -inset=0.324 -family="Byblos Box Narrow" -out=tools/fontmeasure/faces/box-narrow.ttf
+	CGO_ENABLED=0 go run tools/fontmeasure/boxfont.go -style=filled -top=230 -family="Byblos Box Short" -out=tools/fontmeasure/faces/box-short.ttf
 
 # Regenerates the committed JBIG2 encoder goldens. Requires jbig2dec, which
 # verifies each stream round-trips losslessly before the golden is written.
