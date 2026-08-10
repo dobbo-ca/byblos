@@ -333,6 +333,37 @@ func grayPixels(w, h, seed int) []byte {
 
 // --- the documents ----------------------------------------------------------
 
+// noMediaBox is a one-page document that declares no /MediaBox ANYWHERE: not on
+// the page, not on the /Pages node, nowhere in the inheritance chain.
+//
+// ISO 32000-1 7.7.3.3 makes /MediaBox a required inheritable page attribute, so
+// this document is malformed. It is also real: byb-8ly measured 9 of 4,840
+// govdocs1 files exactly like it -- all PDF 1.0, none using object streams,
+// with the string "MediaBox" absent from the file's bytes altogether. Byblos
+// refused all 9 while poppler read every one and reported 612x792, which is not
+// a measurement of the document but the universal reader default.
+//
+// The raster is page-covering at that default size, so a reader that defaults
+// as poppler does sees a page-covering scan.
+// NoMediaBox is exported and deliberately NOT in All(): every write-path test
+// iterates the corpus, and pdfcpu refuses to WRITE a page dict with no
+// /MediaBox, so registering it would fail 12 optimize and linearize tests that
+// have nothing to do with byb-8ly. Read-path tests reach for it by name.
+func NoMediaBox() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	// No /MediaBox on the page, and none on the /Pages node to inherit.
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, img, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n",
+		PageWidthPt, PageHeightPt)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 3))
+	return w.finish(cat)
+}
+
 func bornDigital() []byte {
 	w := newWriter()
 	cat, pages, page, cont, font := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
@@ -744,14 +775,19 @@ func mixed() []byte {
 	return w.finish(cat)
 }
 
-// mixedPageTwoUnreadable is mixed() with page 2's /MediaBox removed and no
-// /MediaBox on /Pages to inherit it from. The document opens cleanly --
-// pdfdoc.Open runs no validator -- but pdfdoc.Doc.Page(2) then fails with "no
-// dictionary or no MediaBox", while Page(1) still succeeds because page 1
-// carries its own explicit /MediaBox. It exists so a caller walking every page
-// can hit a genuine per-page read failure on a page after the first, as
-// opposed to malformed()'s failure inside pdfdoc.Open itself before any page
-// is ever reached.
+// mixedPageTwoUnreadable is mixed() with page 2's content stream declared
+// /FlateDecode and filled with bytes that are not flate. The document opens
+// cleanly -- pdfdoc.Open runs no validator -- and Page(2) resolves, but
+// decoding its content fails, so a caller walking every page hits a genuine
+// per-page read failure on a page after the first, as opposed to malformed()'s
+// failure inside pdfdoc.Open itself before any page is ever reached.
+//
+// IT USED TO WORK BY REMOVING PAGE 2'S /MediaBox, and byb-8ly took that
+// mechanism away: byblos now defaults a missing /MediaBox to US Letter rather
+// than refusing the page, because 9 of 4,840 govdocs1 documents declare none
+// and poppler reads every one. The MixedPageTwoUnreadable comment below had
+// already recorded that poppler defaults rather than errors here -- so this
+// fixture was built on the one behaviour that turned out to be the defect.
 func mixedPageTwoUnreadable() []byte {
 	w := newWriter()
 	cat, pages := w.reserve(), w.reserve()
@@ -764,10 +800,12 @@ func mixedPageTwoUnreadable() []byte {
 		pages, PageWidthPt, PageHeightPt, font, c1))
 	w.fillStream(c1, "", []byte(bornDigitalContent))
 	w.fill(font, helveticaFont)
-	w.fill(p2, fmt.Sprintf("<< /Type /Page /Parent %d 0 R"+
+	w.fill(p2, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
 		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
-		pages, img, c2))
-	w.fillStream(c2, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+		pages, PageWidthPt, PageHeightPt, img, c2))
+	// Declared flate, and not flate. fillRawStream writes the payload through
+	// untouched, which fillStream would not.
+	w.fillRawStream(c2, "/Filter /FlateDecode", []byte("not a flate stream at all"))
 	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
 	return w.finish(cat)
 }
