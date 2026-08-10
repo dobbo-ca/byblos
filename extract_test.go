@@ -824,6 +824,16 @@ func TestClassifyPaintOcclusion(t *testing.T) {
 			"1 w 10 10 592 772 re S\n" + fullPageDo,
 			"", ""},
 
+		// byb-7aq. The stroke arms the clip with its OWN path, and ISO 32000-1
+		// 8.5.4 does not let that clip touch the operator that armed it. Judging
+		// the stroke by its own W would clip away exactly the 10pt of spread that
+		// falls outside the raster -- the spread being the whole reason the case
+		// above it exists -- and extract a page carrying a visible band of ink
+		// the raster does not.
+		{"a stroke that sets the clip with its own path",
+			"q 20 w 100 100 400 600 re W S Q\nq 400 0 0 600 100 100 cm /Im0 Do Q\n",
+			"", "vector-paint"},
+
 		// W sets the clip from the current path and n ends it without painting.
 		// Clipping alone has never counted as paint; this pins that it still does
 		// not now that paths are tracked rather than only counted.
@@ -967,6 +977,139 @@ func TestClassifyOnTheMeasuredWashPage(t *testing.T) {
 	}
 }
 
+// byb-7aq. byb-b1.12 narrowed Placement.Box to the visible rectangle and
+// deliberately left Paint.Box at the path's own unclipped extent (Walk's doc
+// comment). paintsHidden then compares the two, which is a comparison between a
+// clipped rectangle and an unclipped one, and a wash drawn oversized and clipped
+// back to the page looks like paint escaping the raster.
+//
+// This is govdocs1/050667.pdf page 1, its whole content stream, with /Im1
+// renamed to the /Im0 the test env serves. The two W n clips bound BOTH the
+// wash and the raster to [0 0.06 612 792]; the wash's own path is
+// [0 0.06 612 792.06], 0.06pt taller than the clip that removes the overhang.
+// Measured: extracted at 5fbf37d, diverted "vector-paint" at 28774c5.
+//
+// govdocs1/050104.pdf p2 and govdocs1/350795.pdf p1 are the same shape at
+// nine points rather than a twentieth of one, and 11 pages of
+// govdocs1/150338.pdf are the same shape over a JPX raster -- which is why
+// those 11 stopped reporting "unsupported-codec-jpx": classify runs at
+// extract.go:334 and RawImage only at :341, so a page this arm diverts never
+// reaches the codec at all.
+func TestClassifyWashClippedToTheRasterIsHidden(t *testing.T) {
+	const src = "q\n" +
+		"1 i \n" +
+		"0 792 612 -792 re\n" +
+		"W n\n" +
+		"0 792.06 612 -792 re\n" +
+		"W n\n" +
+		"0 0 0 0 k\n" +
+		"/GS2 gs\n" +
+		"0 0.059998 612 792 re\n" +
+		"f\n" +
+		"Q\n" +
+		"q\n" +
+		"1 i \n" +
+		"-6.007 799.2 627.007 -808.2 re\n" +
+		"W* n\n" +
+		"0 792 612 -792 re\n" +
+		"W n\n" +
+		"0 792.06 612 -792 re\n" +
+		"W n\n" +
+		"/GS1 gs\n" +
+		"q\n" +
+		"627.814514 0 0 808.76709 -6.267024 -9.32312 cm\n" +
+		"/Im0 Do\n" +
+		"Q\n" +
+		"Q\n"
+	_, got := classify(pdfdocRect(0, 0, 612, 792), walkPage(t, src, ""), plainFacts)
+	if got == "vector-paint" {
+		t.Fatal("classify() = \"vector-paint\"; the same clip bounds the wash and the raster, so the wash's visible ink is exactly the raster's box (byb-7aq)")
+	}
+	if got != "" {
+		t.Errorf("classify() = %q; want the page to extract", got)
+	}
+}
+
+// byb-7aq widened which placements can hide a path, so these pin the boundary
+// of the widening: what it lets through, and what it must not.
+//
+// Every case is a full-page wash painted first, the shape byb-b1.5 measured,
+// with the images above it varied.
+func TestClassifyPaintOcclusionAcrossPlacements(t *testing.T) {
+	page := pdfdocRect(0, 0, 612, 792)
+	const wash = "1 1 1 scn 0 0 612 792 re f\n"
+	const coverIm0 = "q 612 0 0 792 0 0 cm /Im0 Do Q\n"
+	const coverIm1 = "q 612 0 0 792 0 0 cm /Im1 Do Q\n"
+
+	plain := pdfdoc.ImageInfo{BPC: 8}
+	masked := pdfdoc.ImageInfo{BPC: 8, SMask: true}
+
+	for _, tc := range []struct {
+		name, src string
+		info      map[int]pdfdoc.ImageInfo
+		want      string
+	}{
+		// The reason this page diverts moves from "vector-paint" to
+		// "transparent-overlay", because the wash really is hidden -- by /Im0 --
+		// and the overlay really is what stops the page reducing to one raster.
+		// Both are diverts, so no page changes hands; the counter key does, and
+		// classify's doc comment says not to move one silently.
+		{"a wash hidden by an opaque layer under a transparent top",
+			wash + coverIm0 + coverIm1,
+			map[int]pdfdoc.ImageInfo{1: plain, 2: masked}, "transparent-overlay"},
+
+		// The skip in inkHidden is "keep looking", not "give up": a transparent
+		// image hides nothing, and the opaque one here is too small to hide the
+		// wash, so the page still reports the paint.
+		{"a transparent cover and an opaque one that is too small",
+			wash + coverIm0 + "q 100 0 0 100 100 100 cm /Im1 Do Q\n",
+			map[int]pdfdoc.ImageInfo{1: masked, 2: plain}, "vector-paint"},
+
+		// Painting order still governs. Two opaque page-covering images cannot
+		// hide a path painted after both of them.
+		{"a fill painted after every image",
+			coverIm0 + coverIm1 + "1 1 1 scn 0 0 100 100 re f\n",
+			map[int]pdfdoc.ImageInfo{1: plain, 2: plain}, "vector-paint"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, got := classify(page, walkPage(t, tc.src, ""), facts(tc.info)); got != tc.want {
+				t.Errorf("classify() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// byb-7aq, the second shape. Here no clip is in force when the wash is painted,
+// so intersecting the paint with its own clip changes nothing: what hides the
+// wash is an opaque page-covering image painted AFTER it. paintsHidden only ever
+// tested the TOP placement, so it never saw that image.
+//
+// This is govdocs1/050101.pdf page 49 at its measured geometry, with the form
+// that carries the top raster flattened to the placement it produces. The wash
+// covers [0 0 1024 768]; /Im0 covers the identical rectangle; the top placement
+// is clipped to [-58 0.573425 1080.94 768] and so falls 0.573pt short at the
+// bottom. Measured: extracted at 5fbf37d, diverted "vector-paint" at 28774c5.
+//
+// classify already calls that same wash rectangle contained when an IMAGE paints
+// it -- the under-layer loop at extract.go:652 accepts /Im0 under the top
+// placement on coverTolerancePt. Only the paint arm rejected it.
+func TestClassifyWashHiddenByAnEarlierOpaqueImage(t *testing.T) {
+	const src = "q /Cs1 cs 1 sc 0 768 1024 -768 re f Q\n" +
+		"q 0 0 1024 768 re W n\n" +
+		"q 1024 0 0 768 0 0 cm /Im0 Do Q\n" +
+		"Q\n" +
+		"q -58 0.573425 1138.94 767.427 re W n\n" +
+		"q 1228.8 0 0 985.9 -103.44 -104.6 cm /Im1 Do Q\n" +
+		"Q\n"
+	_, got := classify(pdfdocRect(0, 0, 1024, 768), walkPage(t, src, ""), plainFacts)
+	if got == "vector-paint" {
+		t.Fatal("classify() = \"vector-paint\"; the wash is covered by /Im0, an opaque page-covering image painted after it (byb-7aq)")
+	}
+	if got != "" {
+		t.Errorf("classify() = %q; want the page to extract", got)
+	}
+}
+
 // pageEnv is the resource tree the classify tests walk against: /Im0 is an
 // image, /Fm0 a form carrying the supplied content at scope 1, /GS1 an opaque
 // graphics state and /GS0 a transparent one.
@@ -976,6 +1119,9 @@ func (e pageEnv) XObject(scope int, name string) (content.XObject, bool) {
 	switch name {
 	case "Im0":
 		return content.XObject{Image: true, ID: 1}, true
+	// A second image, for the cases that need two placements in one stream.
+	case "Im1":
+		return content.XObject{Image: true, ID: 2}, true
 	case "Fm0":
 		if e.form == "" {
 			return content.XObject{}, false

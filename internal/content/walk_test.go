@@ -1005,14 +1005,13 @@ func TestWalkDisjointClipReportsAZeroAreaBoxNotAnInvertedOne(t *testing.T) {
 	boxEq(t, s.Images[0].Box, 500, 500, 500, 500)
 }
 
-// A clip must NOT narrow Paint.Box. Walk's doc comment is explicit that an
-// oversized Paint.Box is the conservative direction -- it makes a raster less
-// likely to be judged as containing (and hence hiding) the paint, so a
-// clipped-away path errs toward diverting the page rather than silently
-// dropping ink from consideration. Applying the new clip tracking to paints
-// too would narrow Paint.Box and move divert decisions the unsafe way, so
-// this pins the opposite: a path painted inside a tight clip still reports
-// its own full, unclipped device-space box.
+// A clip must NOT narrow Paint.Box. The record stays literal: Box is where the
+// path went, Clip is what was cutting it, and the two are kept apart so a
+// caller can ask for either. byb-7aq changed the reason this holds but not the
+// rule -- the old reason was that an oversized Paint.Box "errs toward
+// diverting", which stopped being true once byb-b1.12 narrowed Placement.Box
+// and left this one alone. See TestWalkRecordsTheClipInForceOnAPaint and
+// TestPaintInk.
 func TestWalkClipDoesNotNarrowPaintBoxes(t *testing.T) {
 	src := "0 0 10 10 re W n 0 0 500 500 re f"
 	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
@@ -1023,6 +1022,199 @@ func TestWalkClipDoesNotNarrowPaintBoxes(t *testing.T) {
 		t.Fatalf("Paints = %+v; want one", s.Paints)
 	}
 	boxEq(t, s.Paints[0].Box, 0, 0, 500, 500)
+}
+
+// The other half of that pair: Box is unnarrowed, and the clip that would have
+// narrowed it is recorded beside it. Without this, a consumer comparing a path
+// against a placement compares an unclipped rectangle against a clipped one,
+// which is exactly what byb-7aq's four regressed pages were.
+func TestWalkRecordsTheClipInForceOnAPaint(t *testing.T) {
+	src := "0 0 10 10 re W n 0 0 500 500 re f"
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
+	}
+	if len(s.Paints) != 1 {
+		t.Fatalf("Paints = %+v; want one", s.Paints)
+	}
+	if s.Paints[0].Clip == nil {
+		t.Fatal("Paints[0].Clip = nil; want the 0 0 10 10 clip that was in force")
+	}
+	boxEq(t, *s.Paints[0].Clip, 0, 0, 10, 10)
+}
+
+// A path painted with nothing clipping it reports no clip, which is a different
+// fact from a clip that happens to cover everything. Ink leaves such a path
+// alone rather than intersecting it with a rectangle nobody wrote.
+func TestWalkRecordsNoClipWhenNonePlaced(t *testing.T) {
+	s, err := Walk(context.Background(), []byte("0 0 500 500 re f"), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
+	}
+	if len(s.Paints) != 1 {
+		t.Fatalf("Paints = %+v; want one", s.Paints)
+	}
+	if s.Paints[0].Clip != nil {
+		t.Errorf("Paints[0].Clip = %+v; want nil", *s.Paints[0].Clip)
+	}
+}
+
+// ISO 32000-1 8.5.4: W/W* set the clip from the current path, and the new clip
+// takes effect only AFTER the painting operator that terminates that path. So a
+// path that paints and clips in one go is not clipped by its own W, and
+// Paint.Clip must record the clip that was in force when the operator was
+// issued, not the one it installs.
+//
+// The distinction is invisible on a fill -- the new clip is the old one
+// intersected with the very path being filled, so the ink is the same either
+// way -- and decisive on a stroke, because recordPaint spreads a stroke's box
+// by half the pen while the clip comes from the un-spread path. Getting this
+// backwards would shave the spread off and call a straddling stroke contained.
+func TestWalkAPathIsNotClippedByItsOwnW(t *testing.T) {
+	// A 20pt pen down the rectangle's own edge: the ink runs from 90 to 110 on
+	// each side, while the path -- and so the clip it arms -- is 100 to 500.
+	src := "20 w 100 100 400 600 re W S"
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
+	}
+	if len(s.Paints) != 1 {
+		t.Fatalf("Paints = %+v; want one", s.Paints)
+	}
+	if c := s.Paints[0].Clip; c != nil {
+		t.Errorf("Paints[0].Clip = %+v; want nil, the clip in force when S was issued", *c)
+	}
+	boxEq(t, s.Paints[0].Box, 90, 90, 510, 710)
+	ink, marks := s.Paints[0].Ink()
+	if !marks {
+		t.Fatal("Ink() marks = false; a 20pt stroke marks the page")
+	}
+	boxEq(t, ink, 90, 90, 510, 710)
+}
+
+// The clip a painting operator arms still applies to everything AFTER it, which
+// is the other half of 8.5.4 and the reason the pending flag exists at all.
+func TestWalkAPathsOwnWClipsWhatFollows(t *testing.T) {
+	src := "0 0 100 100 re W S\n200 200 300 300 re f"
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
+	}
+	if len(s.Paints) != 2 {
+		t.Fatalf("Paints = %+v; want two", s.Paints)
+	}
+	if s.Paints[1].Clip == nil {
+		t.Fatal("Paints[1].Clip = nil; the first operator's W clips what follows it")
+	}
+	boxEq(t, *s.Paints[1].Clip, 0, 0, 100, 100)
+	if _, marks := s.Paints[1].Ink(); marks {
+		t.Error("Ink() marks = true; the second fill is clipped entirely away")
+	}
+}
+
+// A form's /BBox reaches Paint.Clip the same way it reaches Placement.Clip, and
+// this is the case that made the field necessary rather than merely tidy:
+// govdocs1/050104.pdf p2 clips its wash with the page's own clip and its raster
+// with a form /BBox nested two deep, so the two differ by a fraction of a point
+// and the wash is judged against a rectangle it was never bounded by.
+func TestWalkRecordsAFormBBoxAsThePaintsClip(t *testing.T) {
+	env := mapEnv{
+		{"Fm0": {
+			Content: []byte("0 0 500 500 re f"),
+			Matrix:  Identity,
+			Scope:   1,
+			BBox:    &Box{LLX: 10, LLY: 10, URX: 100, URY: 100},
+		}},
+		{},
+	}
+	s, err := Walk(context.Background(), []byte("/Fm0 Do"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
+	}
+	if len(s.Paints) != 1 {
+		t.Fatalf("Paints = %+v; want one", s.Paints)
+	}
+	if s.Paints[0].Clip == nil {
+		t.Fatal("Paints[0].Clip = nil; the form's /BBox clips what is painted inside it")
+	}
+	boxEq(t, *s.Paints[0].Clip, 10, 10, 100, 100)
+	boxEq(t, s.Paints[0].Box, 0, 0, 500, 500)
+	ink, marks := s.Paints[0].Ink()
+	if !marks {
+		t.Fatal("Ink() marks = false; the fill covers the whole /BBox")
+	}
+	boxEq(t, ink, 10, 10, 100, 100)
+}
+
+func TestPaintInk(t *testing.T) {
+	clip := &Box{LLX: 0, LLY: 0, URX: 10, URY: 10}
+	for _, tc := range []struct {
+		name  string
+		paint Paint
+		want  Box
+		marks bool
+	}{
+		// The byb-7aq shape: a wash drawn past the page edge and clipped back to
+		// it. What it can mark is the clip, not the path.
+		{"a fill clipped back to the page",
+			Paint{Op: "f", Box: Box{LLX: -9, LLY: -9, URX: 500, URY: 500}, Clip: clip},
+			Box{LLX: 0, LLY: 0, URX: 10, URY: 10}, true},
+
+		{"an unclipped fill is its own box",
+			Paint{Op: "f", Box: Box{LLX: 1, LLY: 2, URX: 3, URY: 4}},
+			Box{LLX: 1, LLY: 2, URX: 3, URY: 4}, true},
+
+		// intersectBox clamps a disjoint pair to a degenerate box rather than
+		// inverting it, so a path clipped entirely away bounds no area and marks
+		// nothing.
+		{"a fill clipped entirely away",
+			Paint{Op: "f", Box: Box{LLX: 100, LLY: 100, URX: 200, URY: 200}, Clip: clip},
+			Box{LLX: 100, LLY: 100, URX: 100, URY: 100}, false},
+
+		// govdocs1/050104.pdf p2 opens with this exact operator sequence,
+		// `0 842 m 0 842 l f` -- a fill of a path with no extent at all.
+		{"a fill of a path with no extent",
+			Paint{Op: "f", Box: Box{LLX: 0, LLY: 842, URX: 0, URY: 842}},
+			Box{LLX: 0, LLY: 842, URX: 0, URY: 842}, false},
+
+		// The exception. recordPaint has already spread a stroke by half the line
+		// width, so a zero-area stroke box means a zero-width pen, and ISO
+		// 32000-1 8.4.3.2 makes that a hairline -- the thinnest line the device
+		// can render, which marks. Calling it invisible would extract a page
+		// carrying a line the raster does not.
+		{"a zero-width stroke is a hairline, not nothing",
+			Paint{Op: "S", Box: Box{LLX: 0, LLY: 5, URX: 500, URY: 5}},
+			Box{LLX: 0, LLY: 5, URX: 500, URY: 5}, true},
+
+		// A clip disjoint from the path removes the path, and the hairline
+		// exception does not reach that far: there is no line left to draw.
+		{"a stroke clipped entirely away",
+			Paint{Op: "S", Box: Box{LLX: 699, LLY: 699, URX: 1501, URY: 1501}, Clip: clip},
+			Box{LLX: 699, LLY: 699, URX: 699, URY: 699}, false},
+
+		// The hairline again, this time under a clip that contains it. The box is
+		// degenerate and the clip is not disjoint from it, which is the only
+		// combination the exception is for.
+		{"a zero-width stroke inside its clip still marks",
+			Paint{Op: "S", Box: Box{LLX: 0, LLY: 5, URX: 500, URY: 5}, Clip: clip},
+			Box{LLX: 0, LLY: 5, URX: 10, URY: 5}, true},
+
+		// Half the pen falls outside the clip: what is left still marks, and the
+		// ink reported is the part the clip lets through.
+		{"a stroke the clip only partly removes",
+			Paint{Op: "S", Box: Box{LLX: -5, LLY: -5, URX: 5, URY: 5}, Clip: clip},
+			Box{LLX: 0, LLY: 0, URX: 5, URY: 5}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, marks := tc.paint.Ink()
+			if got != tc.want {
+				t.Errorf("Ink() box = %+v; want %+v", got, tc.want)
+			}
+			if marks != tc.marks {
+				t.Errorf("Ink() marks = %v; want %v", marks, tc.marks)
+			}
+		})
+	}
 }
 
 // --- byb-b1.12: Form /BBox narrows a placement's Box ------------------------

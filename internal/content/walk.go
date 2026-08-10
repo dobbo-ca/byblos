@@ -136,6 +136,52 @@ type Paint struct {
 	Fill   Color
 	Stroke Color
 	Index  int // painting order across the page, shared with Placement.Index
+	// Clip is the clip in effect at the moment of painting, in device space, or
+	// nil when nothing clipped this path. It is the same running intersection
+	// Placement.Clip records, captured at the path's own moment rather than the
+	// raster's -- the two differ whenever a Form /BBox trims one and not the
+	// other. Box is deliberately NOT narrowed by it; see Ink.
+	Clip *Box
+}
+
+// Ink is the part of the path that can deposit marks: Box intersected with the
+// clip that was in force, and whether anything is left.
+//
+// Box and Clip are kept apart so this question is asked once, by the caller that
+// needs it, rather than baked into the record. byb-7aq is why the question
+// exists: byb-b1.12 narrowed Placement.Box to the visible rectangle and left
+// Paint.Box unnarrowed, so a consumer comparing the two compared a clipped
+// rectangle against an unclipped one. Four govdocs1 pages stopped extracting on
+// that mismatch alone, each a full-bleed wash drawn oversized and then clipped
+// back to the page by the very clip that also bounds the raster.
+//
+// Two separate things bound no ink, and they are not the same question.
+//
+// A clip DISJOINT from the path removes the path entirely, whatever operator
+// painted it. Nothing is left to mark, so a stroke gets no exception here.
+//
+// A path that bounds no area on its OWN is a degenerate fill -- `0 842 m 0 842
+// l f`, which govdocs1/050104.pdf p2 opens with -- and marks nothing either.
+// The exception is a stroke: recordPaint has already spread a stroke's box by
+// half the line width, so a stroked path is zero-area only when the pen is zero
+// wide, and ISO 32000-1 8.4.3.2 makes THAT the thinnest line the device can
+// render -- a hairline, which marks. Reporting it as no ink would extract a
+// page carrying a visible line the raster does not.
+//
+// Testing disjointness against Box rather than against the intersection is what
+// keeps the two apart: intersectBox clamps a disjoint pair to a degenerate box,
+// so by the time it has run, "clipped away" and "a hairline" look identical.
+func (p Paint) Ink() (Box, bool) {
+	box := p.Box
+	if p.Clip == nil {
+		return box, strokingOps[p.Op] || (box.URX > box.LLX && box.URY > box.LLY)
+	}
+	c := *p.Clip
+	if c.URX <= box.LLX || c.LLX >= box.URX || c.URY <= box.LLY || c.LLY >= box.URY {
+		return intersectBox(c, box), false
+	}
+	ink := intersectBox(c, box)
+	return ink, strokingOps[p.Op] || (ink.URX > ink.LLX && ink.URY > ink.LLY)
 }
 
 // Scan is what a content-stream walk observed, including everything reached
@@ -185,12 +231,20 @@ const (
 // oversized image, or a page that clips a placement to a corner, now reports
 // the visible box rather than the raster's own oversized placement.
 //
-// The Paint half is deliberately UNCHANGED: a clip never narrows Paint.Box.
-// An oversized Paint.Box is one a raster is less likely to contain, so a
-// clipped-away path errs toward diverting a page rather than extracting one —
-// the conservative direction for what reads it (paintsHidden, extract.go).
-// Narrowing it too would move that decision the unsafe way. See
-// TestWalkClipDoesNotNarrowPaintBoxes.
+// Paint.Box is still never narrowed by a clip, and TestWalkClipDoesNotNarrowPaintBoxes
+// still pins that. What byb-b1.12 got wrong was leaving the clip UNRECORDED for
+// a path while recording it for a placement: a consumer then had a clipped
+// rectangle on one side of its comparison and an unclipped one on the other,
+// and byb-7aq measured what that costs — four govdocs1 pages that had extracted
+// stopped, every one of them a full-bleed wash drawn oversized and clipped back
+// to the page by the same clip that bounds the raster.
+//
+// "Errs toward diverting" was the argument for the gap, and it does not survive
+// contact with the pages: diverting a page whose only vector mark is invisible
+// is not conservative, it is wrong, and it costs an archive the page. So
+// Paint.Clip now records the clip in force, and Paint.Ink composes the two.
+// The record stays literal — where the path went, and what was cutting it — and
+// the visibility question is answered where it is asked.
 //
 // Known simplification, still open after byb-b1.12: a text clipping mode (4
 // Tr through 7 Tr, ISO 32000-1 9.3.6/table 106) adds glyph outlines to the
@@ -439,11 +493,27 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 			// from the path before recordPaint resets it -- and, deliberately,
 			// never narrows the Paint this same operator records (see Walk's
 			// doc comment).
+			//
+			// That last clause is why the gstate is copied. Paint.Clip records
+			// the clip in force when the operator was ISSUED, and a path that
+			// paints and clips in one operator is not clipped by its own W: the
+			// copy is taken before the line below installs it. Reordering
+			// instead is not open, because recordPaint resets the path that
+			// intersectClipPath still needs.
+			//
+			// The difference is only visible on a stroke, and there it is the
+			// whole ballgame. recordPaint spreads a stroke's box by half the
+			// pen, while the clip comes from the UN-spread path, so clipping the
+			// paint by its own W would shave exactly that spread off --
+			// `20 w 100 100 400 600 re W S` would report a 10pt band of ink as
+			// landing inside a raster it actually straddles. See
+			// TestWalkAPathIsNotClippedByItsOwnW.
+			painted := gs
 			if pendingClip {
 				gs.clip = intersectClipPath(gs.clip, path)
 				pendingClip = false
 			}
-			recordPaint(s, &path, gs, op)
+			recordPaint(s, &path, painted, op)
 		case "sh":
 			s.ShadingOps++
 		}
@@ -477,6 +547,7 @@ func recordPaint(s *Scan, path *pathBox, gs gstate, op string) {
 	s.order++
 	s.Paints = append(s.Paints, Paint{
 		Op: op, Box: box, Fill: gs.fill, Stroke: gs.stroke, Index: s.order,
+		Clip: gs.clip,
 	})
 }
 
