@@ -34,8 +34,8 @@ import (
 // TestCorpusCountClaimsMatchTheCorpus (root package, designspec_pin_test.go)
 // then fail until every quoted figure in the tree agrees.
 const (
-	Count         = 35
-	ReadableCount = 34
+	Count         = 36
+	ReadableCount = 35
 )
 
 // Geometry shared by every generated document. US Letter at 72 points/inch.
@@ -168,6 +168,8 @@ func All() []Doc {
 			scanPlaced(cmOperands(NaturalDPIPlacement), 0)},
 		{"scan-stamped", "natural-DPI raster plus a /Stamp with an appearance stream in the uncovered strip: must extract, and report the stamp it cannot include",
 			stampedScan()},
+		{"scan-bilevel", "page-covering raster declared /BitsPerComponent 1, stored uncompressed so it extracts: the corpus's only bitonal image that reaches ExtractPageRaster (byb-xcx)",
+			scanBilevel()},
 		{"scan-reversed-cropbox", "page-covering image on a /CropBox whose corners are named UR-then-LL: must NOT record an inverted page_box",
 			scanReversedCropBox()},
 		{"scan-mirrored", "page-covering image placed with a vertical mirror: must divert",
@@ -366,6 +368,53 @@ func scanPlaced(cm string, rotate int) []byte {
 	w.fillStream(cont, "", []byte(fmt.Sprintf("q %s cm /Im0 Do Q\n", cm)))
 	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
 	return w.finish(cat)
+}
+
+// scanBilevel is scan(0) with the raster declared /BitsPerComponent 1 and
+// stored uncompressed, so it extracts rather than diverting.
+//
+// It exists because byb-xcx could not otherwise be tested end to end. Before
+// this document the corpus had exactly one bitonal image -- jbig2() -- and that
+// one diverts as an undecodable codec, so every raster reaching
+// ExtractPageRaster was 8 bpc and no test could tell a dropped bit depth from a
+// correct one. A unit test on the predicate alone would not cover the seam this
+// bead is about, which is the extraction path carrying the fact.
+//
+// Uncompressed on purpose: a real bitonal codec (CCITT, JBIG2) diverts as
+// unsupported-codec whatever the declared depth is, which is the same masking
+// problem mrcInsetBase's comment describes.
+func scanBilevel() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img, fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d"+
+		" /ColorSpace /DeviceGray /BitsPerComponent 1", ScanImageW, ScanImageH),
+		bilevelPixels(ScanImageW, ScanImageH))
+	return w.finish(cat)
+}
+
+// bilevelPixels returns a 1-bit-per-component raster of horizontal bars. Rows
+// are padded to a byte boundary (ISO 32000-1 section 8.9.5.1) and a set bit in
+// DeviceGray is white, as whitePixels records. Bars rather than all-white so
+// the oracle's pixel hash has something to compare.
+func bilevelPixels(w, h int) []byte {
+	stride := (w + 7) / 8
+	out := make([]byte, stride*h)
+	for y := 0; y < h; y++ {
+		v := byte(0xFF)
+		if y%8 < 4 {
+			v = 0x00
+		}
+		for x := 0; x < stride; x++ {
+			out[y*stride+x] = v
+		}
+	}
+	return out
 }
 
 // scanReversedCropBox is scan(0) with an explicit /CropBox whose corners are

@@ -20,7 +20,7 @@ func wantNames() []string {
 		"dup-raster", "jbig2", "stacked", "stacked-in-form",
 		"stacked-smask", "stacked-alpha", "mrc", "mrc-inset-base",
 		"indirect-kids", "malformed", "scan-reversed-cropbox",
-		"blank-page", "booklet",
+		"blank-page", "booklet", "scan-bilevel",
 	}
 }
 

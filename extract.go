@@ -169,6 +169,26 @@ type PageRaster struct {
 	// Rendering the appearance streams into the raster would be a renderer,
 	// which design spec section 2 puts out of scope.
 	DroppedAnnots int
+
+	// Bitonal reports that the source XObject DECLARED one bit per component,
+	// or was an image mask. It is the same predicate Inspect surfaces as
+	// ImageRef.Bitonal, carried to where the pixels are.
+	//
+	// Image is an *image.RGBA either way: decoding widens the samples, and
+	// Bitonal is the only surviving record of what they were widened from.
+	// Callers feeding DownsampleDeclaredBPC map true to declaredBPC 1.
+	//
+	// It is a DECLARATION, never a measurement. Do not replace it with a pixel
+	// test: an 8-bpc source whose pixels happen to be pure black and white --
+	// a bitonal TIFF widened to 8 bpc, common -- is indistinguishable from a
+	// genuine 1-bpc source by pixel data alone, but Ghostscript keys
+	// /MonoImageDownsampleType off the declared depth and downsamples it
+	// bicubically. byb-plj measured a first attempt at that sniff 13 dB under
+	// byblos's own oracle.
+	//
+	// Bitonal is chosen over an int BPC because an /ImageMask carries no
+	// /BitsPerComponent at all and would have to report 0; see byb-xcx.
+	Bitonal bool
 }
 
 // CoversPage reports whether the raster fills the page box. When it is false
@@ -394,6 +414,17 @@ func extractPage(d pdfdoc.Doc, page int) (*PageRaster, PageProvenance, error) {
 		Image:  img,
 		Bounds: boxRect(placement.Box),
 		Page:   rectOf(p.CropBox),
+	}
+	// The declared depth, from the same dictionary fact classify already took
+	// and inspect.go turns into ImageRef.Bitonal. Keep the two predicates
+	// identical: a page's PageRaster.Bitonal and its ImageRef.Bitonal must
+	// never disagree.
+	//
+	// A miss leaves it false. That is the safe direction: false routes a
+	// caller to the contone resampler, which is what happened before this
+	// field existed, whereas a wrongly-true would subsample a contone scan.
+	if info, ok := d.ImageInfo(placement.ID); ok {
+		out.Bitonal = info.BPC == 1 || info.ImageMask
 	}
 	// Only on the success path. A divert has already told the caller it is
 	// getting no raster, and 97% of a real archive diverts, so reading and
