@@ -411,7 +411,20 @@ func inlineDataLen(dict []byte) (int64, bool) {
 	if comps <= 0 || bpc <= 0 {
 		return 0, false
 	}
+	// Bound each product before taking it. /W, /H and /BPC come out of the file
+	// and nothing obliges them to be sensible, so a per-field limit is not
+	// enough: 2e9 by 2e9 at 8 bits and 3 components passes every field check and
+	// still multiplies out past int64. A wrapped length is worse than no length,
+	// because it reads as an offset. maxInlineSamples is far above any content
+	// stream that fits in memory and far below where int64 stops counting.
+	const maxInlineSamples = 1 << 40
+	if int64(w) > maxInlineSamples/(int64(bpc)*int64(comps)) {
+		return 0, false
+	}
 	row := (int64(w)*int64(bpc)*int64(comps) + 7) / 8
+	if row > maxInlineSamples/int64(h) {
+		return 0, false
+	}
 	return row * int64(h), true
 }
 
