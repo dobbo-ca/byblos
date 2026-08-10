@@ -2,6 +2,8 @@ package byblos
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image"
 	"testing"
 
@@ -256,12 +258,23 @@ func TestInspectBlankPageDoesNotFailTheDocument(t *testing.T) {
 	}
 }
 
-// A content stream that did not decode is not a blank page, and Inspect must
-// still refuse it. Byblos is deliberately less permissive than poppler here —
-// poppler renders nothing for the page and moves on — because reporting a
-// damaged page as empty is a silent wrong answer, which is the failure mode
-// byb-cqs's fix must not introduce while removing a loud one.
-func TestInspectCorruptContentStreamIsStillAnError(t *testing.T) {
+// A content stream that did not decode is not a blank page. Byblos used to
+// refuse the whole document over one, because reporting a damaged page as empty
+// is a silent wrong answer and byb-cqs's fix must not introduce one while
+// removing a loud one.
+//
+// byb-3jq keeps that intent and puts it where poppler puts it. Poppler's
+// Error.h calls BOTH of its syntax categories "PDF syntax error which can be
+// worked around", separated only by whether the output is "probably correct" or
+// "probably incorrect" — a syntax problem never removes a page. So the page
+// survives here too, carrying a SeverityError diagnostic that says its numbers
+// are not to be trusted. The wrong answer stops being SILENT, which was the
+// concern, rather than stopping being reported.
+//
+// pdfdoc is unchanged and still refuses the page: see
+// TestPageWithACorruptContentStreamIsStillAnError. The tolerance is Inspect's
+// alone, because Inspect is the only caller whose job survives a missing page.
+func TestInspectRecordsACorruptContentStreamInsteadOfRefusingTheDocument(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		data []byte
@@ -270,10 +283,112 @@ func TestInspectCorruptContentStreamIsStillAnError(t *testing.T) {
 		{"array of streams", corpus.CorruptContentStreamInArray()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := Inspect(bytes.NewReader(tc.data)); err == nil {
-				t.Fatal("Inspect(corrupt content stream): want an error, got nil")
+			pages, err := Inspect(bytes.NewReader(tc.data))
+			if err != nil {
+				t.Fatalf("Inspect refused a whole document over one page: %v", err)
+			}
+			if len(pages) != 2 {
+				t.Fatalf("got %d pages, want 2", len(pages))
+			}
+			// Page 1 is the ordinary scan and must come back untouched. This is
+			// the whole point: it is what the old behaviour threw away.
+			if n := len(pages[0].Diagnostics); n != 0 {
+				t.Errorf("page 1 carries %d diagnostics; want none: %+v", n, pages[0].Diagnostics)
+			}
+			if n := len(pages[0].Images); n != 1 {
+				t.Errorf("page 1 has %d images; want the page-covering scan", n)
+			}
+			d := pages[1].Diagnostics
+			if len(d) != 1 {
+				t.Fatalf("page 2 carries %d diagnostics; want exactly one: %+v", len(d), d)
+			}
+			if d[0].Severity != SeverityError {
+				t.Errorf("page 2 severity = %v; want SeverityError, which is the half that "+
+					"says the page's numbers are probably wrong", d[0].Severity)
+			}
+			if d[0].Message == "" {
+				t.Error("page 2 diagnostic has no message; the reason must survive")
 			}
 		})
+	}
+}
+
+// The page still has to be REPORTED, in its right place, so a caller indexing
+// by Index or ranging in order does not silently shift every page after the
+// damaged one.
+func TestInspectKeepsAnUnparseablePageInItsPlace(t *testing.T) {
+	pages, err := Inspect(bytes.NewReader(corpus.MixedPageTwoUnreadable()))
+	if err != nil {
+		t.Fatalf("Inspect refused the document: %v", err)
+	}
+	if len(pages) != 2 {
+		t.Fatalf("got %d pages, want 2", len(pages))
+	}
+	for i, p := range pages {
+		if p.Index != i+1 {
+			t.Errorf("pages[%d].Index = %d; want %d", i, p.Index, i+1)
+		}
+	}
+	if len(pages[1].Diagnostics) == 0 {
+		t.Error("page 2 is the unreadable one and carries no diagnostic")
+	}
+}
+
+// The half of byb-3jq that the diagnostic alone does not prove: a page that
+// fails PARTWAY keeps what it read. Poppler paints those bytes -- 182
+// characters on 050734 page 8, out of a stream that stops after 1,156 -- and
+// byblos threw them away, so a half-readable page was indexed as nothing.
+//
+// The assertion is an exact character count, not "more than zero", because
+// "more than zero" would also pass if the walk kept going past the damage.
+func TestInspectKeepsWhatItReadBeforeAPageFailed(t *testing.T) {
+	pages, err := Inspect(bytes.NewReader(corpus.PageTwoStopsMidStream()))
+	if err != nil {
+		t.Fatalf("Inspect refused the document: %v", err)
+	}
+	if len(pages) != 2 {
+		t.Fatalf("got %d pages, want 2", len(pages))
+	}
+	bad := pages[1]
+	if len(bad.Diagnostics) != 1 || bad.Diagnostics[0].Severity != SeverityError {
+		t.Fatalf("page 2 diagnostics = %+v; want one SeverityError", bad.Diagnostics)
+	}
+	if bad.TextChars != corpus.TruncatedContentStreamChars {
+		t.Errorf("page 2 TextChars = %d; want %d, the two Tj operands that precede the "+
+			"unterminated string. Zero means the partial walk was discarded.",
+			bad.TextChars, corpus.TruncatedContentStreamChars)
+	}
+	// The page box survives too: it comes from the page dictionary, which is
+	// intact, not from the content stream.
+	if bad.Bounds.Dx() != corpus.PageWidthPt || bad.Bounds.Dy() != corpus.PageHeightPt {
+		t.Errorf("page 2 Bounds = %v; want the declared %dx%d page box",
+			bad.Bounds, corpus.PageWidthPt, corpus.PageHeightPt)
+	}
+}
+
+// Cancellation is not a defect in the document. Burying it as a per-page
+// diagnostic would hand back a document that was never read, with every
+// uninspected page reported as damaged.
+//
+// This has to cancel INSIDE a page walk, which is why it does not lean on
+// context_test.go. TestContextVariantsRefuseAnAlreadyCancelledContext trips the
+// entry guard, and TestInterruptibleCallsStopAtTheirNextCheck fires at check 2,
+// which is the page loop's own guard -- both return before content.Walk is
+// reached, so both stay green with the guard in the error branch deleted.
+// Measured: that mutation reddens neither.
+func TestInspectDoesNotTurnACancelledWalkIntoADiagnostic(t *testing.T) {
+	// Far enough in to be inside the first page's walk rather than at the entry
+	// guard or the loop's per-page check.
+	cc := &cancelAtCheck{Context: context.Background(), after: 8}
+	pages, err := InspectContext(cc, bytes.NewReader(corpusDoc(t, "scan")))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("InspectContext cancelled at check %d returned err = %v and %d pages; "+
+			"want context.Canceled. A cancelled walk was recorded as a page defect.",
+			cc.after+1, err, len(pages))
+	}
+	if cc.checks <= cc.after {
+		t.Fatalf("only %d context checks were made, so the cancellation at check %d "+
+			"never happened and this test proved nothing", cc.checks, cc.after+1)
 	}
 }
 

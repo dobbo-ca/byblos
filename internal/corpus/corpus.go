@@ -818,6 +818,55 @@ func mixedPageTwoUnreadable() []byte {
 // point of the fixture, not a bug to reconcile against the oracle.
 func MixedPageTwoUnreadable() []byte { return mixedPageTwoUnreadable() }
 
+// TruncatedContentStreamText is page 2's content in PageTwoStopsMidStream: two
+// legal text-showing operators, then a literal string that is never closed.
+//
+// The two Tj operands are 5 and 6 bytes, so a walk that gets as far as the
+// damage has counted exactly TruncatedContentStreamChars, and one that throws
+// its work away on the error counts zero. That difference is the whole point of
+// the fixture.
+const TruncatedContentStreamText = "BT /F1 12 Tf 72 720 Td (hello) Tj 0 -14 Td (world!) Tj ET\n" +
+	"BT /F1 12 Tf 72 690 Td (never closed"
+
+// TruncatedContentStreamChars is what a walk of TruncatedContentStreamText
+// counts before the unterminated string: len("hello") + len("world!").
+const TruncatedContentStreamChars = 11
+
+// PageTwoStopsMidStream is a two-page document whose second page decodes
+// perfectly and then fails to LEX partway through, which is a different failure
+// from mixedPageTwoUnreadable's: there the stream never decodes at all and the
+// page yields nothing, and here the page yields real content up to the damage.
+//
+// That is the case poppler handles by painting what it reached -- on
+// 050734.pdf page 8 it renders 182 characters out of a content stream that
+// stops after 1,156 bytes -- and the case byblos discarded entirely before
+// byb-3jq.
+//
+// Exported directly rather than through All(), like MixedPageTwoUnreadable: a
+// document that exists to be half-broken has no business in the sweeps that
+// compare every corpus document against poppler page for page.
+func PageTwoStopsMidStream() []byte { return pageTwoStopsMidStream() }
+
+func pageTwoStopsMidStream() []byte {
+	w := newWriter()
+	cat, pages := w.reserve(), w.reserve()
+	p1, c1, font := w.reserve(), w.reserve(), w.reserve()
+	p2, c2 := w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R %d 0 R] /Count 2 >>", p1, p2))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, font, c1))
+	w.fillStream(c1, "", []byte(bornDigitalContent))
+	w.fill(font, helveticaFont)
+	w.fill(p2, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, font, c2))
+	// A real flate stream, so pdfdoc decodes it and hands the lexer every byte.
+	w.fillStream(c2, "", []byte(TruncatedContentStreamText))
+	return w.finish(cat)
+}
+
 // dupRaster gives two pages the same raster bytes as two distinct objects.
 // pdfcpu deduplicates byte-identical image XObjects in its optimize pass, so
 // an extraction path that asks pdfcpu "which image objects are on page 2?"

@@ -211,15 +211,20 @@ const (
 // This is an internal package, so ctx is a plain first parameter and no
 // exported signature moved; the ADD NEVER CHANGE constraint on the v0.1.0
 // surface does not reach here.
+// THE SCAN IS ALWAYS RETURNED, error or not. A content stream that stops
+// half-way still describes the part of the page it reached, and that partial
+// answer is what poppler paints for such a page -- on 050734 page 8 it is 182
+// characters and 1,260 inked pixels, out of the 1,156 bytes that decode before
+// the stream is damaged. Discarding it made a readable half-page indexed as
+// nothing (byb-3jq). A caller that cannot use a partial page checks the error,
+// which is unchanged.
 func Walk(ctx context.Context, src []byte, scope int, env Env) (*Scan, error) {
 	s := &Scan{}
 	// ISO 32000-1 section 8.4.1's initial graphics state, for the parts tracked
 	// here. The line width matters: a stroke that never sets one still spreads
 	// half a point either side of its path, not nothing.
-	if err := walk(ctx, src, scope, env, gstate{ctm: Identity, opaque: true, lineWidth: 1}, 0, s); err != nil {
-		return nil, err
-	}
-	return s, nil
+	err := walk(ctx, src, scope, env, gstate{ctm: Identity, opaque: true, lineWidth: 1}, 0, s)
+	return s, err
 }
 
 // gstate is the part of the PDF graphics state a walk tracks. q and Q save and
