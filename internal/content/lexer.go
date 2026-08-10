@@ -303,16 +303,38 @@ func (l *Lexer) hexString() (Token, error) {
 	return Token{}, fmt.Errorf("content: unterminated hex string at offset %d", start)
 }
 
-// inlineImage consumes BI ... ID <binary> EI as a single token. The dictionary
-// and sample data are not decoded: the walker only needs to know that an inline
-// image is present. The payload is skipped verbatim because it may contain any
-// byte sequence, including text that looks like operators.
+// inlineImage consumes BI ... ID <binary> EI as a single token. The sample data
+// is not decoded: the walker only needs to know that an inline image is
+// present. The payload is skipped verbatim because it may contain any byte
+// sequence, including text that looks like operators.
+//
+// The end of the payload is a computed offset whenever the dictionary
+// determines one, and a delimiter search only when it does not. ISO 32000-1
+// 8.9.7 puts EI after the sample data but requires no whitespace in between,
+// so searching for a whitespace-preceded EI both misses real terminators and
+// stops at false ones inside the samples. Four govdocs1 documents (050142,
+// 050289, 900366, 900581) hold 19 unfiltered inline images between them; the
+// computed length lands on EI for all 19, and only one of the 19 has a
+// whitespace byte before it. On 050289 page 25 the search ran past two images
+// and reported three as one, with no error at all -- see byb-8ly.
 func (l *Lexer) inlineImage(start int) (Token, error) {
+	dict := l.pos
 	if !l.seekKeyword("ID") {
 		return Token{}, fmt.Errorf("content: inline image at offset %d has no ID", start)
 	}
+	id := l.pos - 2
 	if l.pos < len(l.src) && isWhite(l.src[l.pos]) {
 		l.pos++ // exactly one whitespace byte separates ID from the samples
+	}
+	if n, ok := inlineDataLen(l.src[dict:id]); ok {
+		// EI must sit exactly at the computed end. Anything else means the
+		// dictionary and the payload disagree, and the search is the better
+		// guess; it is what every such document got before this path existed.
+		if end := int64(l.pos) + n; end+2 <= int64(len(l.src)) &&
+			l.src[end] == 'E' && l.src[end+1] == 'I' {
+			l.pos = int(end) + 2
+			return Token{Kind: KindInlineImage}, nil
+		}
 	}
 	for l.pos+1 < len(l.src) {
 		if l.src[l.pos] == 'E' && l.src[l.pos+1] == 'I' &&
@@ -325,6 +347,118 @@ func (l *Lexer) inlineImage(start int) (Token, error) {
 	}
 	l.pos = len(l.src)
 	return Token{}, fmt.Errorf("content: inline image at offset %d has no EI", start)
+}
+
+// inlineDataLen returns the number of sample bytes an unfiltered inline image
+// holds, given the bytes of its dictionary (everything between BI and ID). The
+// second result is false whenever the length is not determined: a filtered
+// image, a colour space whose component count the dictionary does not state, or
+// any missing dimension. A false result is not an error; the caller searches
+// for EI instead.
+//
+// Keys use the abbreviations of ISO 32000-1 Table 93 and the full names alike,
+// because both appear in real files.
+func inlineDataLen(dict []byte) (int64, bool) {
+	var w, h, bpc, comps int
+	var mask, filtered bool
+
+	lx := NewLexer(dict)
+	for {
+		tok, err := lx.Next()
+		if err != nil {
+			break // a dictionary this lexer cannot read is one it cannot measure
+		}
+		if tok.Kind != KindName {
+			continue
+		}
+		key := string(tok.Text)
+		val, err := lx.Next()
+		if err != nil {
+			break
+		}
+		switch key {
+		case "W", "Width":
+			w, _ = inlineInt(val)
+		case "H", "Height":
+			h, _ = inlineInt(val)
+		case "BPC", "BitsPerComponent":
+			bpc, _ = inlineInt(val)
+		case "IM", "ImageMask":
+			mask = val.Kind == KindKeyword && string(val.Text) == "true"
+		case "F", "Filter":
+			filtered = true
+		case "CS", "ColorSpace":
+			if val.Kind == KindArrayOpen {
+				// The family is the first element; the rest of the array holds
+				// a base space and a lookup table this does not need.
+				if fam, ferr := lx.Next(); ferr == nil {
+					comps, _ = inlineComponents(fam)
+					skipArray(lx)
+				}
+				continue
+			}
+			comps, _ = inlineComponents(val)
+		}
+	}
+
+	if filtered || w <= 0 || h <= 0 {
+		return 0, false
+	}
+	if mask {
+		// An image mask is one bit per sample and declares no colour space.
+		comps, bpc = 1, 1
+	}
+	if comps <= 0 || bpc <= 0 {
+		return 0, false
+	}
+	row := (int64(w)*int64(bpc)*int64(comps) + 7) / 8
+	return row * int64(h), true
+}
+
+// inlineComponents returns the number of colour components a colour space name
+// carries. Only the spaces whose component count is fixed by the name appear
+// here: /ICCBased takes its count from a stream, and a name from the page's
+// resources is not resolvable from the dictionary alone.
+func inlineComponents(t Token) (int, bool) {
+	if t.Kind != KindName {
+		return 0, false
+	}
+	switch string(t.Text) {
+	case "G", "DeviceGray", "CalGray":
+		return 1, true
+	case "RGB", "DeviceRGB", "CalRGB", "Lab":
+		return 3, true
+	case "CMYK", "DeviceCMYK":
+		return 4, true
+	case "I", "Indexed":
+		return 1, true // one index per sample, whatever the base space is
+	}
+	return 0, false
+}
+
+// inlineInt reads a dimension. Anything negative or absurd is rejected rather
+// than converted, so that a hostile /W cannot produce a nonsense offset.
+func inlineInt(t Token) (int, bool) {
+	if t.Kind != KindNumber || t.Num < 0 || t.Num > 1<<31 {
+		return 0, false
+	}
+	return int(t.Num), true
+}
+
+// skipArray consumes tokens through the close of an array already opened.
+func skipArray(lx *Lexer) {
+	for depth := 1; depth > 0; {
+		tok, err := lx.Next()
+		if err != nil {
+			return
+		}
+		switch tok.Kind {
+		case KindArrayOpen:
+			depth++
+		case KindArrayClose:
+			depth--
+		}
+	}
 }
 
 // seekKeyword advances past the next standalone occurrence of kw.
