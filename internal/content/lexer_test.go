@@ -280,6 +280,85 @@ func TestLexerInlineImageWithFilterFallsBackToScanningForEI(t *testing.T) {
 	}
 }
 
+// A filter can still fix the end of the data even though it hides the length.
+// ASCII85 and ASCIIHex both carry an end-of-data marker, and neither marker's
+// bytes belong to its own alphabet, so the first occurrence is the real one.
+// This is the shape of 250028.pdf page 53: fourteen images, every one
+// /F [/A85 /Fl], and the scan stopped on an "EI" 81 bytes into the ASCII85 of
+// the first image, which is why that page was reported as a stray ')'.
+func TestLexerInlineImageEndsAtTheFilterEODMarker(t *testing.T) {
+	// Each payload plants a whitespace-preceded EI, and a bare EOD-looking byte
+	// for the other filter, ahead of the real marker.
+	for _, tc := range []struct{ name, src string }{
+		{"ascii85 in an array, as 250028 writes it",
+			"q BI /W 8 /H 4 /BPC 8 /CS /RGB /F [/A85 /Fl] ID 9jqo^ EI Blbd> z!!~> EI Q"},
+		{"ascii85 as a bare name",
+			"q BI /W 8 /H 4 /BPC 8 /CS /RGB /F /A85 ID 9jqo^ EI Blbd> z!!~> EI Q"},
+		{"ascii85 spelled in full",
+			"q BI /W 8 /H 4 /BPC 8 /CS /RGB /F /ASCII85Decode ID 9jqo^ EI Blbd> z!!~> EI Q"},
+		{"asciihex",
+			"q BI /W 8 /H 4 /BPC 8 /CS /RGB /F /AHx ID 4142 EI 4344> EI Q"},
+		{"asciihex spelled in full",
+			"q BI /W 8 /H 4 /BPC 8 /CS /RGB /F /ASCIIHexDecode ID 4142 EI 4344> EI Q"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lex(t, tc.src)
+			if len(got) != 3 {
+				t.Fatalf("got %d tokens, want 3: %+v", len(got), got)
+			}
+			if got[1].Kind != KindInlineImage {
+				t.Errorf("token 1 kind = %v; want KindInlineImage", got[1].Kind)
+			}
+			if got[2].Kind != KindKeyword || string(got[2].Text) != "Q" {
+				t.Errorf("token 2 = {%v %q}; want keyword Q", got[2].Kind, got[2].Text)
+			}
+		})
+	}
+}
+
+// Two ASCII85 images in a row must stay two. The first payload holds no
+// whitespace-preceded EI at all, so a scan runs into the second image.
+func TestLexerAdjacentFilteredInlineImagesAreNotMerged(t *testing.T) {
+	src := "BI /W 4 /H 2 /CS /G /F /A85 ID 9jqo^Blbd~>EI " +
+		"BI /W 4 /H 2 /CS /G /F /A85 ID F*)HD~> EI Q"
+	got := lex(t, src)
+	var inline int
+	for _, tok := range got {
+		if tok.Kind == KindInlineImage {
+			inline++
+		}
+	}
+	if inline != 2 {
+		t.Fatalf("got %d inline images, want 2 (tokens: %+v)", inline, got)
+	}
+}
+
+// The marker fixes the end only if EI is actually there. A file that carries
+// the marker's bytes inside its data gets the search, exactly as before.
+func TestLexerInlineImageFallsBackWhenTheEODMarkerIsNotFollowedByEI(t *testing.T) {
+	src := "BI /W 4 /H 2 /CS /G /F /AHx ID 4142>4344 EI Q"
+	got := lex(t, src)
+	if len(got) != 2 || got[0].Kind != KindInlineImage {
+		t.Fatalf("got %d tokens %+v; want [inline image, Q]", len(got), got)
+	}
+}
+
+// A filter with no end-of-data marker leaves the scan as the only option. The
+// outermost filter is the one that decides, and it is the first array entry.
+func TestLexerInlineImageWithAFilterThatHasNoEODStillScans(t *testing.T) {
+	for _, tc := range []struct{ name, src string }{
+		{"flate alone", "BI /W 4 /H 2 /CS /G /F /Fl ID \x01\x02~>\x03 EI Q"},
+		{"flate outermost", "BI /W 4 /H 2 /CS /G /F [/Fl /A85] ID \x01\x02~>\x03 EI Q"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lex(t, tc.src)
+			if len(got) != 2 || got[0].Kind != KindInlineImage {
+				t.Fatalf("got %d tokens %+v; want [inline image, Q]", len(got), got)
+			}
+		})
+	}
+}
+
 func TestLexerErrors(t *testing.T) {
 	for _, tc := range []struct{ name, src string }{
 		{"unterminated literal string", "(abc"},
