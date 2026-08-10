@@ -236,6 +236,34 @@ func TestLexerInlineImageComputesLengthPerColourSpace(t *testing.T) {
 	}
 }
 
+// /W and /H come out of the file, so their product is not bounded by anything
+// the file has to honour. Bounding each one on its own is not enough: 2e9 by
+// 2e9 at 8 bits and 3 components multiplies out past int64, wraps negative,
+// passes a bounds check written as an upper limit, and indexes the source
+// backwards. content.Walk has no recover(), so that panic reaches whoever
+// called Inspect.
+func TestLexerInlineImageDoesNotOverflowOnHugeDimensions(t *testing.T) {
+	for _, tc := range []struct{ name, dict string }{
+		// row x height overflows: the row fits, the page does not.
+		{"rows overflow int64", "/W 2000000000 /H 2000000000 /BPC 8 /CS /RGB"},
+		// width x depth x components overflows before a row is even taken.
+		{"one row overflows int64", "/W 2000000000 /H 2 /BPC 2000000000 /CS /CMYK"},
+		// Representable, merely far longer than the stream: the length is
+		// computed fine and the scan takes over because EI cannot be there.
+		{"length exceeds the stream", "/W 1000000 /H 1000000 /BPC 8 /CS /G"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lex(t, "BI "+tc.dict+" ID xx EI Q")
+			if len(got) != 2 {
+				t.Fatalf("got %d tokens, want 2: %+v", len(got), got)
+			}
+			if got[0].Kind != KindInlineImage {
+				t.Errorf("token 0 kind = %v; want KindInlineImage", got[0].Kind)
+			}
+		})
+	}
+}
+
 // A filtered image holds encoded bytes, so /W, /H and /BPC say nothing about
 // how many there are and the delimiter scan stays as the fallback. The encoded
 // data here carries a literal "EI" exactly where the unfiltered length would
@@ -294,6 +322,7 @@ func FuzzLexer(f *testing.F) {
 	f.Add("q 612 0 0 792 0 0 cm /Im0 Do Q")
 	f.Add("BT (a) Tj ET")
 	f.Add("BI /W 1 ID \x00 EI")
+	f.Add("BI /W 2000000000 /H 2000000000 /BPC 8 /CS /RGB ID xx EI Q")
 	f.Add("<< /A [1 2] >> BDC")
 	f.Fuzz(func(t *testing.T, s string) {
 		l := NewLexer([]byte(s))
