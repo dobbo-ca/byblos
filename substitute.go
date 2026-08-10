@@ -58,6 +58,16 @@ import (
 //     caller was buying -- Optimize's "never larger than input" rule is
 //     Optimize's, and applying it here would silently discard, for instance, a
 //     bitonal re-encode a caller asked for on purpose.
+//   - It does not resample, and that is where byb-05w's obligation lands.
+//     Under option P this seam takes bytes an encoder already produced, so
+//     Byblos never chooses between the contone and the bilevel kernel --
+//     whoever called Downsample did. Reaching for Downsample on a source the
+//     PDF declares /BitsPerComponent 1 silently reintroduces byb-plj, because
+//     Downsample is DownsampleDeclaredBPC(img, 8, ...) and Catmull-Rom blends a
+//     bilevel scan into grey levels it cannot hold. Pass the declaration
+//     instead: 1 for a bitonal source or an /ImageMask. Both routes into this
+//     library carry it -- ImageRef.Bitonal from Inspect, keyed by the same
+//     ObjNr substituted on here, and PageRaster.Bitonal from ExtractPageRaster.
 //   - It writes no provenance, the same as StampTextLayer and BuildPDF. Under
 //     option P it CANNOT: the Applied vocabulary names the capability that ran
 //     ("downsample-150", "jbig2-generic"), and the same call substitutes bytes
