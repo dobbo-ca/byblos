@@ -435,6 +435,23 @@ func pdffontsCount(path string) (int, bool) {
 	return n, true
 }
 
+// pdffontsVersion reads the banner. CombinedOutput because every poppler tool
+// prints -v to STDERR, so Output() would return an empty string -- the same
+// trap testdata/oracle/gen.go records.
+func pdffontsVersion() string {
+	bin, err := exec.LookPath("pdffonts")
+	if err != nil {
+		return "absent"
+	}
+	out, _ := exec.Command(bin, "-v").CombinedOutput()
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(l, "pdffonts version") {
+			return strings.TrimSpace(strings.TrimPrefix(l, "pdffonts version"))
+		}
+	}
+	return "unknown"
+}
+
 func emit(enc *json.Encoder, row fileRow) {
 	if enc != nil {
 		_ = enc.Encode(row)
@@ -482,6 +499,14 @@ func report(s summary, cmp bool) {
 			fmt.Println("pdffonts differential: pdffonts not on PATH or read nothing")
 			return
 		}
+		// Stamp the tool, as testdata/oracle/gen.go does. The gap is a
+		// diagnostic, not an invariant: it is a comparison against a
+		// third-party binary, so its exact value moves with that binary's
+		// version. Measured with poppler 26.06.0 the gap is +2.50% on dc --
+		// section 4.1's figure exactly -- and +5.35% on govdocs1 against the
+		// 5.39% recorded there, a difference of 16 font rows in 48,582
+		// (0.03%). What clause (c) actually pins is the DIRECTION.
+		fmt.Printf("%-64s %8s\n", "pdffonts version", pdffontsVersion())
 		fmt.Printf("%-64s %8d\n", "pdffonts total, whole corpus", s.PdfFontsSum)
 		fmt.Printf("%-64s %8d\n", "census total, whole corpus", s.CensusOnCmp)
 		if s.PdfFontsSum > 0 {
