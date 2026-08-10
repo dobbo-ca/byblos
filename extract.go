@@ -530,11 +530,12 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 	// fill colour before the first Do. Only paint the raster does not hide
 	// diverts a page.
 	//
-	// The candidate is the top placement, for the reason given below where top
-	// is taken. Testing here rather than after the geometry checks keeps the
-	// reported reason the most informative one: a page carrying visible vector
-	// content says so, whatever else is also wrong with it.
-	case !paintsHidden(s.Images[len(s.Images)-1], s.Paints, imageInfo):
+	// Every placement is a candidate cover, not just the top one: a path is
+	// hidden by anything opaque painted over it (byb-7aq). Testing here rather
+	// than after the geometry checks keeps the reported reason the most
+	// informative one: a page carrying visible vector content says so, whatever
+	// else is also wrong with it.
+	case !paintsHidden(s.Images, s.Paints, imageInfo):
 		return 0, "vector-paint"
 	case s.ShadingOps > 0:
 		return 0, "shading"
@@ -778,40 +779,84 @@ func contains(outer, inner content.Box) bool {
 // adds for a 2-point pen.
 const paintTolerancePt = 1e-3
 
-// paintsHidden reports whether the raster hides every path-painting operator on
-// the page: the raster is an opaque cover, and each path was painted before it
-// and landed inside its placement box.
+// paintsHidden reports whether the page's rasters hide every path-painting
+// operator on it: each path's visible ink landed inside an opaque placement
+// painted after it.
 //
 // This is a graphics-state test, not a renderer (design spec section 2). It
 // asks only what the content stream and the image dictionaries prove — the
-// order operators were issued in, where their paths landed, and whether the
-// raster is see-through — and never what any pixel ends up being.
+// order operators were issued in, where their paths landed, what was clipping
+// them, and whether a raster is see-through — and never what any pixel ends up
+// being.
 //
 // The opacity check is what makes dropping a wash safe. A stencil /ImageMask
 // paints only through its 1 bits, so a wash beneath one stays visible: of the
 // 126 pages byb-b1.5 measured, 27 fill the PowerPoint slide colour rather than
 // white, and on those the wash is the page background. opaqueCover rejects a
-// mask, an /SMask, a /Mask and a lowered /ca or /CA alike, so none of them
-// reaches the geometry test.
-func paintsHidden(raster content.Placement, paints []content.Paint, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
-	if len(paints) == 0 {
-		return true
-	}
-	if !opaqueCover(raster, imageInfo) {
-		return false
-	}
+// mask, an /SMask, a /Mask and a lowered /ca or /CA alike, so none of them can
+// hide anything.
+//
+// byb-7aq changed the two halves of the question this asks, because byb-b1.12
+// regressed four govdocs1 pages that used to extract and each half accounts for
+// part of them.
+//
+// The PATH side is Paint.Ink rather than Paint.Box: a path is judged on the
+// part of it the clip lets through. byb-b1.12 narrowed Placement.Box to the
+// visible rectangle and left Paint.Box unnarrowed, so this compared a clipped
+// rectangle against an unclipped one. On 050667 p1 and 350795 p1 the SAME two
+// clip paths bound the wash and the raster, and the wash then failed a test the
+// raster defines — by 0.06 of a point on the first and by nine points on the
+// second.
+//
+// The RASTER side is every placement rather than only the top one. A path is
+// hidden by anything opaque painted over it, and byb-b1.12 made that
+// distinguishable: on 050101 p49 the wash is unclipped and covers [0 0 1024 768],
+// /Im1 covers the identical rectangle and is painted after it, and only then is
+// the top raster placed under a clip that falls 0.573pt short at the foot of the
+// page. classify already calls that wash rectangle contained when an IMAGE
+// paints it — the under-layer loop above accepts /Im1 beneath the top placement
+// — so testing the top placement alone was the odd rule out.
+//
+// Widening it costs nothing in safety. An opaque raster over a path hides that
+// path whether or not it is the raster this page would extract, and whether the
+// page extracts at all is still the layered-stack question the arms below
+// decide.
+//
+// It does move one counter, and classify's doc comment asks that such a move be
+// deliberate rather than quiet. A page whose wash is hidden by an opaque layer
+// UNDER a transparent top layer used to report "vector-paint" and now reports
+// "transparent-overlay". The page diverted before and diverts now; what changed
+// is that the reason names the layer that actually stops the page reducing to
+// one raster, instead of a wash that was never visible. See
+// TestClassifyPaintOcclusionAcrossPlacements.
+func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
 	for _, p := range paints {
-		if p.Index > raster.Index {
-			return false
+		ink, marks := p.Ink()
+		if !marks {
+			continue
 		}
-		if p.Box.LLX < raster.Box.LLX-paintTolerancePt ||
-			p.Box.LLY < raster.Box.LLY-paintTolerancePt ||
-			p.Box.URX > raster.Box.URX+paintTolerancePt ||
-			p.Box.URY > raster.Box.URY+paintTolerancePt {
+		if !inkHidden(ink, p.Index, imgs, imageInfo) {
 			return false
 		}
 	}
 	return true
+}
+
+// inkHidden reports whether some opaque placement painted after this ink
+// contains it. order is the ink's position in the shared painting order.
+func inkHidden(ink content.Box, order int, imgs []content.Placement, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
+	for _, img := range imgs {
+		if img.Index < order || !opaqueCover(img, imageInfo) {
+			continue
+		}
+		if ink.LLX >= img.Box.LLX-paintTolerancePt &&
+			ink.LLY >= img.Box.LLY-paintTolerancePt &&
+			ink.URX <= img.Box.URX+paintTolerancePt &&
+			ink.URY <= img.Box.URY+paintTolerancePt {
+			return true
+		}
+	}
+	return false
 }
 
 // covers reports whether box contains the page box, within tolerance. An image
