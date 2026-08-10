@@ -356,6 +356,19 @@ func scanFile(path, root string, s *summary, enc *json.Encoder, cmp bool) {
 		// the totals still look plausible.
 		s.Unreadable++
 		row.ReadErr = err.Error()
+		// pdffonts still runs here, and it must. A file the census could not
+		// read is exactly where poppler's count matters most -- dc's four
+		// /PageLayout files carry 26 fonts between them, and leaving them out
+		// of the denominator reports the gap as +3.01% instead of the +2.50%
+		// section 4.1 states. The differential is census-vs-poppler over the
+		// WHOLE corpus, not over the subset the census happened to manage.
+		if cmp {
+			if n, ok := pdffontsCount(path); ok {
+				row.PdfFonts = n
+				s.PdfFontsSum += n
+				s.CmpFiles++
+			}
+		}
 		emit(enc, row)
 		return
 	}
@@ -469,8 +482,8 @@ func report(s summary, cmp bool) {
 			fmt.Println("pdffonts differential: pdffonts not on PATH or read nothing")
 			return
 		}
-		fmt.Printf("%-64s %8d\n", "pdffonts total, over files it could read", s.PdfFontsSum)
-		fmt.Printf("%-64s %8d\n", "census total, over those same files", s.CensusOnCmp)
+		fmt.Printf("%-64s %8d\n", "pdffonts total, whole corpus", s.PdfFontsSum)
+		fmt.Printf("%-64s %8d\n", "census total, whole corpus", s.CensusOnCmp)
 		if s.PdfFontsSum > 0 {
 			gap := 100 * float64(s.CensusOnCmp-s.PdfFontsSum) / float64(s.PdfFontsSum)
 			fmt.Printf("%-64s %+7.2f%%\n", "census minus pdffonts (expected POSITIVE)", gap)
