@@ -361,7 +361,7 @@ func TestStampedWordBoundsRoundTripThroughBBox(t *testing.T) {
 
 // --- (e): the whole corpus ---------------------------------------------------
 
-// Stamps each of the 35 corpus documents with one word on page 1. "malformed"
+// Stamps each of the 36 corpus documents with one word on page 1. "malformed"
 // must fail -- pdfdoc.Open cannot parse it (see internal/pdfdoc's own
 // TestEveryCorpusDocumentSurvivesAWriteRoundTrip for the same split) -- every
 // other document must succeed, and where pdftotext is available its output
