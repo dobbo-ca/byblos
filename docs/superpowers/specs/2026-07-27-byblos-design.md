@@ -216,10 +216,33 @@ type ImageRef struct {
 }
 
 type PageInfo struct {
-    Index     int
-    Bounds    image.Rectangle // page box, in points
-    Images    []ImageRef
-    TextChars int             // feeds Kleio's born-digital signal
+    Index       int
+    Bounds      image.Rectangle // page box, in points
+    Images      []ImageRef
+    TextChars   int             // feeds Kleio's born-digital signal
+    Diagnostics []Diagnostic    // empty for almost every page
+}
+
+// Severity mirrors poppler's ErrorCategory. Both of poppler's syntax
+// categories are "a PDF syntax error which can be worked around", separated
+// only by whether the output is probably correct or probably incorrect: a
+// syntax problem never removes a page and never ends a document.
+type Severity uint8
+
+const (
+    SeverityWarning Severity = iota // worked around; the page's numbers are probably right
+    SeverityError                   // worked around; the page's numbers are probably WRONG, and wrong low
+)
+
+func (s Severity) String() string
+
+// Diagnostic is one problem Byblos worked around while reading a page. A page
+// whose content stream stops early reports fewer images and less text than it
+// holds, so a scan can look like an empty born-digital page; SeverityError is
+// what tells a caller not to read those numbers at face value.
+type Diagnostic struct {
+    Severity Severity
+    Message  string
 }
 
 func Inspect(r io.ReadSeeker) ([]PageInfo, error)

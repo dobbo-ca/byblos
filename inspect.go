@@ -67,11 +67,62 @@ type ImageRef struct {
 // text reached through Form XObjects. It is a born-digital signal, not a text
 // extractor: it counts stored code units, not Unicode code points, and it does
 // not decode fonts. Byblos never recognizes text (design spec section 3).
+//
+// Diagnostics holds what byblos had to work around on this page, and is empty
+// for the overwhelming majority of pages. A page carrying one was still read.
 type PageInfo struct {
-	Index     int
-	Bounds    image.Rectangle
-	Images    []ImageRef
-	TextChars int
+	Index       int
+	Bounds      image.Rectangle
+	Images      []ImageRef
+	TextChars   int
+	Diagnostics []Diagnostic
+}
+
+// Severity says how much of a PageInfo to believe when byblos had to work
+// around something on the page.
+//
+// It is poppler's distinction, taken from its Error.h: errSyntaxWarning is "PDF
+// syntax error which can be worked around; output will probably be correct",
+// and errSyntaxError is the same sentence ending "output will probably be
+// incorrect". Note what BOTH halves say -- a syntax problem is always worked
+// around. Neither category removes a page, and neither ends a document.
+type Severity uint8
+
+const (
+	// SeverityWarning: byblos worked around the problem and the page's numbers
+	// are probably right.
+	SeverityWarning Severity = iota
+	// SeverityError: byblos worked around the problem and the page's numbers
+	// are probably WRONG, and wrong LOW. A content stream that stops early
+	// paints fewer images and shows less text than the page really holds, so a
+	// scanned page can look like an empty born-digital one -- which is the
+	// exact classification byblos exists to get right. A caller must not read
+	// TextChars or Images off such a page without accounting for this.
+	SeverityError
+)
+
+func (s Severity) String() string {
+	if s == SeverityError {
+		return "error"
+	}
+	return "warning"
+}
+
+// Diagnostic is one problem byblos worked around while reading a page.
+//
+// byb-3jq: byblos used to refuse the WHOLE document for any of these. Measured
+// over govdocs1 that cost 176 readable pages to 7 bad ones, 135 of them in one
+// document over three pages. Poppler reads all four of those documents and
+// reports the problem on stderr rather than withholding the file, which is the
+// behaviour this mirrors.
+//
+// Message is the underlying error's text. Poppler's callback also carries a
+// machine-readable byte offset (Goffset pos); byblos's offsets are inside the
+// message text for now, because the lexer formats them rather than returning a
+// typed error.
+type Diagnostic struct {
+	Severity Severity
+	Message  string
 }
 
 // Inspect reports what every page of r contains. It does not render anything.
@@ -106,7 +157,21 @@ func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
 		}
 		pi, _, err := inspectPage(ctx, d, n)
 		if err != nil {
-			return nil, err
+			// Cancellation is not a defect in the document. Reporting it as a
+			// page diagnostic would hand back a document that was never read.
+			if cerr := checkContext(ctx); cerr != nil {
+				return nil, cerr
+			}
+			// Everything else is a page byblos worked around. inspectPage
+			// returns whatever it did establish, which is nothing at all only
+			// when the page dictionary itself would not resolve.
+			if pi == nil {
+				pi = &PageInfo{Index: n}
+			}
+			pi.Diagnostics = append(pi.Diagnostics, Diagnostic{
+				Severity: SeverityError,
+				Message:  err.Error(),
+			})
 		}
 		out = append(out, *pi)
 	}
@@ -115,20 +180,29 @@ func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
 
 // inspectPage returns the page's PageInfo alongside the raw walk, which
 // ExtractPageRaster needs for classification.
+//
+// On a walk failure it returns BOTH the error and what the walk established
+// before it, because a content stream that stops early still describes the part
+// of the page it reached -- that is what poppler paints for these pages, and
+// what byblos threw away before byb-3jq. Callers that cannot use a partial page
+// simply check the error first, which every one of them does; only
+// InspectContext looks at the PageInfo as well.
+//
+// A page whose dictionary will not resolve is different: nothing is known about
+// it, not even a page box, so that returns a nil PageInfo.
 func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.Scan, error) {
 	p, err := d.Page(n)
 	if err != nil {
 		return nil, nil, err
 	}
-	s, err := content.Walk(ctx, p.Content, p.Scope, d)
-	if err != nil {
-		return nil, nil, fmt.Errorf("byblos: page %d: %w", n, err)
+	s, walkErr := content.Walk(ctx, p.Content, p.Scope, d)
+	pi := &PageInfo{Index: n, Bounds: rectOf(p.CropBox)}
+	if s == nil {
+		// Defensive: Walk returns its partial scan even on failure. A nil one
+		// would mean a page with no numbers at all rather than a panic.
+		s = &content.Scan{}
 	}
-	pi := &PageInfo{
-		Index:     n,
-		Bounds:    rectOf(p.CropBox),
-		TextChars: s.TextChars,
-	}
+	pi.TextChars = s.TextChars
 	for _, pl := range s.Images {
 		ref := ImageRef{Bounds: boxRect(pl.Box), Placement: [6]float64(pl.CTM)}
 		if info, ok := d.ImageInfo(pl.ID); ok {
@@ -139,6 +213,9 @@ func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.
 			ref.ObjNr = info.ObjNr
 		}
 		pi.Images = append(pi.Images, ref)
+	}
+	if walkErr != nil {
+		return pi, s, fmt.Errorf("byblos: page %d: %w", n, walkErr)
 	}
 	return pi, s, nil
 }
