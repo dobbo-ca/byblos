@@ -62,14 +62,20 @@ func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error) {
 // values 1 bpc cannot store. Kleio's ladder pins /Subsample (compress.go) and
 // gets what it asked for.
 //
-// Callers already hold the declaration. Inspect surfaces it as
-// ImageRef.Bitonal, "1 bit per component, or an image mask", keyed by the same
-// ImageRef.ObjNr that ReplaceImages substitutes on; internally it is
-// pdfdoc.ImageInfo.BPC, the same predicate extract.go's mrcLayers branches on.
-// What does NOT hold it is the decoded raster: pdfcpu renders a 1-bpc
-// DeviceGray image to PNG and image.Decode returns *image.RGBA, so
-// ExtractPageRaster hands back an 8-bit-per-channel image with two distinct
-// values in it and no way to ask how deep it used to be.
+// Callers already hold the declaration, by either route into this library.
+// Inspect surfaces it as ImageRef.Bitonal, "1 bit per component, or an image
+// mask", keyed by the same ImageRef.ObjNr that ReplaceImages substitutes on;
+// ExtractPageRaster surfaces it as PageRaster.Bitonal, where the pixels are.
+// Internally both are pdfdoc.ImageInfo.BPC, the same predicate extract.go's
+// mrcLayers branches on, and TestBitonalAgreesBetweenInspectAndExtract pins
+// that the two routes never disagree — a caller that extracts a page, resamples
+// it, and substitutes the result by object number crosses from one to the other.
+//
+// The PIXELS still cannot say, and that has not changed: pdfcpu renders a 1-bpc
+// DeviceGray image to PNG and image.Decode returns *image.RGBA, so the raster
+// is 8 bits per channel with two distinct values in it. PageRaster.Bitonal is
+// the only surviving record of what those samples were widened from, which is
+// why it is a field beside the image rather than something recoverable from it.
 func DownsampleDeclaredBPC(img image.Image, declaredBPC int, srcDPI, dstDPI float64) (image.Image, error) {
 	// The /BitsPerComponent values an image XObject may declare, the same set
 	// internal/pdfdoc/write.go accepts. 0 is pdfdoc.ImageInfo.BPC's "no such
