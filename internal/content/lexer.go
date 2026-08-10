@@ -11,6 +11,7 @@
 package content
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strconv"
@@ -326,7 +327,8 @@ func (l *Lexer) inlineImage(start int) (Token, error) {
 	if l.pos < len(l.src) && isWhite(l.src[l.pos]) {
 		l.pos++ // exactly one whitespace byte separates ID from the samples
 	}
-	if n, ok := inlineDataLen(l.src[dict:id]); ok {
+	hdr := parseInlineDict(l.src[dict:id])
+	if n, ok := hdr.dataLen(); ok {
 		// EI must sit exactly at the computed end. Anything else means the
 		// dictionary and the payload disagree, and the search is the better
 		// guess; it is what every such document got before this path existed.
@@ -334,6 +336,20 @@ func (l *Lexer) inlineImage(start int) (Token, error) {
 			l.src[end] == 'E' && l.src[end+1] == 'I' {
 			l.pos = int(end) + 2
 			return Token{Kind: KindInlineImage}, nil
+		}
+	}
+	if len(hdr.eod) > 0 {
+		// Same contract as the computed length: the marker fixes the end, and
+		// EI has to be there, or the search takes over.
+		if i := bytes.Index(l.src[l.pos:], hdr.eod); i >= 0 {
+			end := l.pos + i + len(hdr.eod)
+			for end < len(l.src) && isWhite(l.src[end]) {
+				end++
+			}
+			if end+2 <= len(l.src) && l.src[end] == 'E' && l.src[end+1] == 'I' {
+				l.pos = end + 2
+				return Token{Kind: KindInlineImage}, nil
+			}
 		}
 	}
 	for l.pos+1 < len(l.src) {
@@ -349,24 +365,27 @@ func (l *Lexer) inlineImage(start int) (Token, error) {
 	return Token{}, fmt.Errorf("content: inline image at offset %d has no EI", start)
 }
 
-// inlineDataLen returns the number of sample bytes an unfiltered inline image
-// holds, given the bytes of its dictionary (everything between BI and ID). The
-// second result is false whenever the length is not determined: a filtered
-// image, a colour space whose component count the dictionary does not state, or
-// any missing dimension. A false result is not an error; the caller searches
-// for EI instead.
-//
-// Keys use the abbreviations of ISO 32000-1 Table 93 and the full names alike,
-// because both appear in real files.
-func inlineDataLen(dict []byte) (int64, bool) {
-	var w, h, bpc, comps int
-	var mask, filtered bool
+// inlineHeader is what a BI ... ID dictionary states about the sample data that
+// follows it. Keys use the abbreviations of ISO 32000-1 Table 93 and the full
+// names alike, because both appear in real files.
+type inlineHeader struct {
+	w, h, bpc, comps int
+	mask, filtered   bool
+	// eod is the end-of-data marker of the outermost filter, empty unless that
+	// filter has one.
+	eod []byte
+}
 
+// parseInlineDict reads the bytes between BI and ID. It reports what it could
+// read and never fails: a dictionary this lexer cannot finish is simply one
+// that determines less, and every caller has a fallback.
+func parseInlineDict(dict []byte) inlineHeader {
+	var h inlineHeader
 	lx := NewLexer(dict)
 	for {
 		tok, err := lx.Next()
 		if err != nil {
-			break // a dictionary this lexer cannot read is one it cannot measure
+			break
 		}
 		if tok.Kind != KindName {
 			continue
@@ -378,33 +397,69 @@ func inlineDataLen(dict []byte) (int64, bool) {
 		}
 		switch key {
 		case "W", "Width":
-			w, _ = inlineInt(val)
+			h.w, _ = inlineInt(val)
 		case "H", "Height":
-			h, _ = inlineInt(val)
+			h.h, _ = inlineInt(val)
 		case "BPC", "BitsPerComponent":
-			bpc, _ = inlineInt(val)
+			h.bpc, _ = inlineInt(val)
 		case "IM", "ImageMask":
-			mask = val.Kind == KindKeyword && string(val.Text) == "true"
+			h.mask = val.Kind == KindKeyword && string(val.Text) == "true"
 		case "F", "Filter":
-			filtered = true
+			h.filtered = true
+			// The outermost filter is the one whose bytes are on the wire, and
+			// in an array that is the first entry.
+			h.eod = inlineFilterEOD(firstOfArrayOrSelf(lx, val))
 		case "CS", "ColorSpace":
-			if val.Kind == KindArrayOpen {
-				// The family is the first element; the rest of the array holds
-				// a base space and a lookup table this does not need.
-				if fam, ferr := lx.Next(); ferr == nil {
-					comps, _ = inlineComponents(fam)
-					skipArray(lx)
-				}
-				continue
-			}
-			comps, _ = inlineComponents(val)
+			// The family is the first element; the rest of the array holds a
+			// base space and a lookup table this does not need.
+			h.comps, _ = inlineComponents(firstOfArrayOrSelf(lx, val))
 		}
 	}
+	return h
+}
 
-	if filtered || w <= 0 || h <= 0 {
+// firstOfArrayOrSelf returns val, or the first element of the array val opens,
+// consuming the rest of that array either way.
+func firstOfArrayOrSelf(lx *Lexer, val Token) Token {
+	if val.Kind != KindArrayOpen {
+		return val
+	}
+	first, err := lx.Next()
+	if err != nil {
+		return Token{}
+	}
+	skipArray(lx)
+	return first
+}
+
+// inlineFilterEOD returns the end-of-data marker of a filter that has one.
+// ASCII85 ends at "~>" and ASCIIHex at ">", and neither marker's bytes belong
+// to its own alphabet, so the first occurrence after ID is the real end. Every
+// other filter ends only where its own decoder says so, which this lexer does
+// not run; those return nil and the caller searches for EI.
+func inlineFilterEOD(t Token) []byte {
+	if t.Kind != KindName {
+		return nil
+	}
+	switch string(t.Text) {
+	case "A85", "ASCII85Decode":
+		return []byte("~>")
+	case "AHx", "ASCIIHexDecode":
+		return []byte(">")
+	}
+	return nil
+}
+
+// dataLen returns the number of sample bytes an unfiltered inline image holds.
+// The second result is false whenever the length is not determined: a filtered
+// image, a colour space whose component count the dictionary does not state, or
+// any missing dimension. A false result is not an error.
+func (h inlineHeader) dataLen() (int64, bool) {
+	w, bpc, comps := h.w, h.bpc, h.comps
+	if h.filtered || w <= 0 || h.h <= 0 {
 		return 0, false
 	}
-	if mask {
+	if h.mask {
 		// An image mask is one bit per sample and declares no colour space.
 		comps, bpc = 1, 1
 	}
@@ -422,10 +477,10 @@ func inlineDataLen(dict []byte) (int64, bool) {
 		return 0, false
 	}
 	row := (int64(w)*int64(bpc)*int64(comps) + 7) / 8
-	if row > maxInlineSamples/int64(h) {
+	if row > maxInlineSamples/int64(h.h) {
 		return 0, false
 	}
-	return row * int64(h), true
+	return row * int64(h.h), true
 }
 
 // inlineComponents returns the number of colour components a colour space name
