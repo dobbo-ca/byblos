@@ -172,7 +172,7 @@ func readBoth(path string) (*model.Context, error) {
 	// only the per-file denominator goes wrong.
 	//
 	// A zero from a file the expanding read HANDLED is a real zero and is kept.
-	if !expanded && best != nil && bestN == 0 {
+	if !expanded && best != nil && bestN == 0 && hasObjectStreams(best) {
 		if firstErr == nil {
 			firstErr = fmt.Errorf("no read succeeded")
 		}
@@ -186,6 +186,27 @@ func readBoth(path string) (*model.Context, error) {
 		return nil, firstErr
 	}
 	return best, nil
+}
+
+// hasObjectStreams reports whether the file stores objects inside an ObjStm.
+//
+// It is the missing half of clause (b), and leaving it out over-flags. A zero
+// from the non-expanding read is only untrustworthy when there is somewhere for
+// font dicts to hide. Measured, with poppler as the independent check:
+//
+//	dc's four /PageLayout files  ObjStm present, pdffonts 5/9/8/4 -> unreadable
+//	govdocs1 350939.pdf          NO ObjStm,      pdffonts 0       -> a real zero
+//
+// Without this condition 350939.pdf is reported unreadable, which is the same
+// error as defect 2 pointing the other way: a file byblos read correctly, filed
+// as one it could not read.
+// It reads pdfcpu's own record rather than inferring one. Walking the xref for
+// a /Type /ObjStm dict does NOT work: the non-expanding read never materialises
+// those objects, so the scan finds nothing and the condition is always false.
+// ReadContext sets UsingObjectStreams while parsing the xref, which is the fact
+// itself rather than a proxy for it.
+func hasObjectStreams(ctx *model.Context) bool {
+	return ctx != nil && ctx.Read != nil && ctx.Read.UsingObjectStreams
 }
 
 // usable rejects a read that returned no error and no document.
