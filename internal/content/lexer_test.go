@@ -155,6 +155,103 @@ func TestLexerInlineImageIsOneToken(t *testing.T) {
 	}
 }
 
+// samples returns n bytes that contain no "EI" and end in a non-whitespace byte,
+// so that a scan for a whitespace-preceded EI cannot terminate inside them.
+func samples(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte('A' + i%16) // 0x41..0x50, no 'E' followed by 'I'
+	}
+	return string(b)
+}
+
+// ISO 32000-1 8.9.7 puts EI after the sample data. It does not require a
+// whitespace byte in between, and four govdocs1 documents (050142, 050289,
+// 900366, 900581) are written without one. For an unfiltered image the sample
+// count is fully determined by /W, /H, /BPC and the /CS component count, so the
+// end of the data is a computed offset rather than a delimiter to search for.
+func TestLexerInlineImageEndsAtComputedLengthWithNoWhitespaceBeforeEI(t *testing.T) {
+	// 4 wide, 2 high, 8 bits, 1 component = 8 sample bytes.
+	src := "q\nBI\n/W 4 /H 2 /BPC 8 /CS /G\nID " + samples(8) + "EI\nQ"
+	got := lex(t, src)
+	if len(got) != 3 {
+		t.Fatalf("got %d tokens, want 3: %+v", len(got), got)
+	}
+	if got[1].Kind != KindInlineImage {
+		t.Errorf("token 1 kind = %v; want KindInlineImage", got[1].Kind)
+	}
+	if got[2].Kind != KindKeyword || string(got[2].Text) != "Q" {
+		t.Errorf("token 2 = {%v %q}; want keyword Q", got[2].Kind, got[2].Text)
+	}
+}
+
+// The shape measured on 050289.pdf page 25: the first image's data ends without
+// whitespace, so a scan runs past its EI and stops at a LATER image's EI. Three
+// images were reported as one, with no error, and the walk resumed in the wrong
+// place. An under-count is worse than a refusal because nothing announces it.
+func TestLexerInlineImagesAreNotMergedAtALaterImagesEI(t *testing.T) {
+	// First image ends on a sample byte; the second ends on a space, which is
+	// the only whitespace-preceded EI in the stream.
+	src := "BI /W 8 /H 2 /BPC 8 /CS /G ID " + samples(16) + "EI " +
+		"BI /W 4 /H 2 /BPC 8 /CS /G ID " + samples(7) + " EI Q"
+	got := lex(t, src)
+	var inline int
+	for _, tok := range got {
+		if tok.Kind == KindInlineImage {
+			inline++
+		}
+	}
+	if inline != 2 {
+		t.Fatalf("got %d inline images, want 2 (tokens: %+v)", inline, got)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d tokens, want 3: %+v", len(got), got)
+	}
+}
+
+// The component count of the colour space is a multiplier on the sample length,
+// so a wrong one puts EI at the wrong offset. Each case here supplies exactly
+// the bytes its dictionary implies and no whitespace-preceded EI anywhere, so a
+// wrong count cannot be rescued by the fallback scan: it becomes an error.
+func TestLexerInlineImageComputesLengthPerColourSpace(t *testing.T) {
+	for _, tc := range []struct {
+		name, dict string
+		bytes      int
+	}{
+		{"gray", "/W 4 /H 2 /BPC 8 /CS /G", 8},
+		{"rgb", "/W 4 /H 2 /BPC 8 /CS /RGB", 24},
+		{"cmyk", "/W 4 /H 2 /BPC 8 /CS /CMYK", 32},
+		{"device names in full", "/W 4 /H 2 /BPC 8 /CS /DeviceRGB", 24},
+		{"indexed is one sample per pixel", "/W 5 /H 2 /BPC 4 /CS [/I /RGB 3 <AABBCC>]", 6},
+		{"sub-byte rows pad to a byte", "/W 3 /H 4 /BPC 4 /CS /G", 8},
+		{"image mask is one bit per sample", "/W 9 /H 2 /IM true", 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "BI " + tc.dict + " ID " + samples(tc.bytes) + "EI Q"
+			got := lex(t, src)
+			if len(got) != 2 || got[0].Kind != KindInlineImage {
+				t.Fatalf("got %d tokens %+v; want [inline image, Q]", len(got), got)
+			}
+		})
+	}
+}
+
+// A filtered image holds encoded bytes, so /W, /H and /BPC say nothing about
+// how many there are and the delimiter scan stays as the fallback. The encoded
+// data here carries a literal "EI" exactly where the unfiltered length would
+// have put the terminator: ignoring /F ends the image early and leaves the
+// lexer reading sample bytes as operators.
+func TestLexerInlineImageWithFilterFallsBackToScanningForEI(t *testing.T) {
+	src := "BI /W 4 /H 2 /BPC 8 /CS /G /F /AHx ID 41424344EI4546> EI Q"
+	got := lex(t, src)
+	if len(got) != 2 {
+		t.Fatalf("got %d tokens, want 2: %+v", len(got), got)
+	}
+	if got[0].Kind != KindInlineImage {
+		t.Errorf("token 0 kind = %v; want KindInlineImage", got[0].Kind)
+	}
+}
+
 func TestLexerErrors(t *testing.T) {
 	for _, tc := range []struct{ name, src string }{
 		{"unterminated literal string", "(abc"},
