@@ -104,7 +104,7 @@ func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
 		if err := checkContext(ctx); err != nil {
 			return nil, err
 		}
-		pi, _, err := inspectPage(d, n)
+		pi, _, err := inspectPage(ctx, d, n)
 		if err != nil {
 			return nil, err
 		}
@@ -115,12 +115,12 @@ func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
 
 // inspectPage returns the page's PageInfo alongside the raw walk, which
 // ExtractPageRaster needs for classification.
-func inspectPage(d pdfdoc.Doc, n int) (*PageInfo, *content.Scan, error) {
+func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.Scan, error) {
 	p, err := d.Page(n)
 	if err != nil {
 		return nil, nil, err
 	}
-	s, err := content.Walk(p.Content, p.Scope, d)
+	s, err := content.Walk(ctx, p.Content, p.Scope, d)
 	if err != nil {
 		return nil, nil, fmt.Errorf("byblos: page %d: %w", n, err)
 	}

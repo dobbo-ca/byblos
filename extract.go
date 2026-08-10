@@ -269,15 +269,18 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 // weakest guarantee of the nine and the honest statement of it matters more
 // than the check does. Extracting one page is open, walk, classify, decode,
 // and none of those is interrupted: pdfcpu is not context-aware, and byblos'
-// own content walk (internal/content.Walk) drives a per-operator loop that
-// takes no context either -- on a content stream with millions of operators
-// that walk IS the call, and it will not stop. So once extraction has begun
-// the context is not consulted again. A caller that needs a tighter bound
-// than "one page" cannot get it here and must budget for one page's worst
-// case, which is bounded by byb-riy's resource budget rather than by this
-// context. Threading a check into content.Walk is byb-fem. Measured over a
-// 120-page document, the longest stretch between two context checks was 55%
-// of the call -- and there are only ever two checks, however long the document.
+// own content walk (internal/content.Walk) DOES check now, since byb-fem: it
+// consults ctx at every token, so a content stream with millions of operators
+// costs one token rather than the whole walk. Before that bead the walk was
+// 95.4% of this call on such a stream and would not stop at all.
+//
+// What stays uninterruptible is pdfcpu. A caller needing a tighter bound than
+// "one page" must still budget for one page's worst case in the DECODE, which
+// is bounded by byb-riy's resource budget rather than by this context.
+// Measured over a 120-page document of ordinary scans, the longest stretch
+// between two context checks was 55% of the call; that figure predates
+// byb-fem and is unchanged by it, because on those documents the walk was
+// never the dominant unit.
 //
 // The checks are placed to keep a cancelled call OUT of the extraction
 // telemetry: a call abandoned because the caller's deadline expired is not a
@@ -304,7 +307,7 @@ func ExtractPageRasterContext(ctx context.Context, r io.ReadSeeker, page int) (*
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	pr, _, err := extractPage(d, page)
+	pr, _, err := extractPage(ctx, d, page)
 	return pr, err
 }
 
@@ -314,7 +317,7 @@ func ExtractPageRasterContext(ctx context.Context, r io.ReadSeeker, page int) (*
 // ExtractPageRaster reports -- and it is the only scope where the UNROUNDED
 // floats exist: PageRaster.Bounds/.Page have already been through round()
 // (inspect.go:92-100), and 568.3708 is not 568.
-func extractPage(d pdfdoc.Doc, page int) (*PageRaster, PageProvenance, error) {
+func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, PageProvenance, error) {
 	countAttempt()
 
 	p, err := d.Page(page)
@@ -322,7 +325,7 @@ func extractPage(d pdfdoc.Doc, page int) (*PageRaster, PageProvenance, error) {
 		countFailure()
 		return nil, PageProvenance{}, err
 	}
-	_, scan, err := inspectPage(d, page)
+	_, scan, err := inspectPage(ctx, d, page)
 	if err != nil {
 		countFailure()
 		return nil, PageProvenance{}, err

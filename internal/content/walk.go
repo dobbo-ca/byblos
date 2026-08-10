@@ -1,6 +1,7 @@
 package content
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -200,12 +201,22 @@ const (
 // Walk reports the placement underneath as unclipped by it. This overstates
 // what is visible, the same safe-but-inaccurate direction as every other gap
 // named here.
-func Walk(src []byte, scope int, env Env) (*Scan, error) {
+// ctx is checked at the operator loop boundary, which is byb-fem. Before that
+// bead Walk took no context, so a single page carrying a multi-million-operator
+// content stream was uninterruptible for the whole walk: measured on a 396 KB
+// single-page PDF the walk was 95.4% of an ExtractPageRasterContext call, and
+// InspectContext -- which byb-xyn classes interruptible -- ignored a cancel for
+// 665 ms and then returned nil. "Interruptible" meant "between pages".
+//
+// This is an internal package, so ctx is a plain first parameter and no
+// exported signature moved; the ADD NEVER CHANGE constraint on the v0.1.0
+// surface does not reach here.
+func Walk(ctx context.Context, src []byte, scope int, env Env) (*Scan, error) {
 	s := &Scan{}
 	// ISO 32000-1 section 8.4.1's initial graphics state, for the parts tracked
 	// here. The line width matters: a stroke that never sets one still spreads
 	// half a point either side of its path, not nothing.
-	if err := walk(src, scope, env, gstate{ctm: Identity, opaque: true, lineWidth: 1}, 0, s); err != nil {
+	if err := walk(ctx, src, scope, env, gstate{ctm: Identity, opaque: true, lineWidth: 1}, 0, s); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -275,7 +286,7 @@ func (p *pathBox) reset() { *p = pathBox{} }
 // understand is the safe direction.
 func inksGlyphs(tr int) bool { return tr != 3 && tr != 7 }
 
-func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
+func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 	if depth > maxFormDepth {
 		return fmt.Errorf("content: form XObject nesting deeper than %d", maxFormDepth)
 	}
@@ -290,6 +301,13 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 	// current-path state rather than something q/Q ever needs to save.
 	var pendingClip bool
 	for {
+		// byb-fem's boundary. Per token rather than per painting operator: the
+		// pathological stream this bounds is pathological in TOKENS, and a
+		// stream of four million operands with no operator would otherwise be
+		// as uninterruptible as before.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		tok, err := l.Next()
 		if err != nil {
 			// End of stream is the normal exit. Match the sentinel, never the
@@ -386,7 +404,7 @@ func walk(src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
 			path.reset()
 
 		case "Do":
-			if err := doXObject(ops, scope, env, gs, depth, s); err != nil {
+			if err := doXObject(ctx, ops, scope, env, gs, depth, s); err != nil {
 				return err
 			}
 		case "Tj", "'", "\"":
@@ -487,7 +505,7 @@ func addRect(p *pathBox, nums []float64, m Matrix) {
 	p.add(m.Apply(x, y+h))
 }
 
-func doXObject(ops []Token, scope int, env Env, gs gstate, depth int, s *Scan) error {
+func doXObject(ctx context.Context, ops []Token, scope int, env Env, gs gstate, depth int, s *Scan) error {
 	if len(ops) == 0 || ops[len(ops)-1].Kind != KindName {
 		return nil
 	}
@@ -521,7 +539,7 @@ func doXObject(ops []Token, scope int, env Env, gs gstate, depth int, s *Scan) e
 		}
 		gs.clip = &dev
 	}
-	return walk(xo.Content, xo.Scope, env, gs, depth+1, s)
+	return walk(ctx, xo.Content, xo.Scope, env, gs, depth+1, s)
 }
 
 // intersectClipPath folds a just-closed clip path into clip, in device space

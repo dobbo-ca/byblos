@@ -1,6 +1,7 @@
 package pdfdoc
 
 import (
+	"context"
 	"bytes"
 	"errors"
 	"image"
@@ -356,7 +357,7 @@ func TestExtGStateOpaque(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Page(1) error = %v", err)
 	}
-	if s, err := content.Walk(sp.Content, sp.Scope, scan); err != nil {
+	if s, err := content.Walk(context.Background(), sp.Content, sp.Scope, scan); err != nil {
 		t.Fatalf("Walk() error = %v", err)
 	} else if len(s.Images) != 1 || !s.Images[0].Opaque {
 		t.Errorf("Images = %+v; want one opaque placement", s.Images)

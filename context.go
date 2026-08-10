@@ -35,15 +35,23 @@ package byblos
 // Capabilities, UpgradeCandidates -- do no document-scale work at all.
 //
 // WHAT CANCELLATION MEANS, AND WHAT IT DOES NOT. byblos checks ctx at every
-// PAGE- AND DOCUMENT-LEVEL boundary it controls. It does NOT check inside a
-// page: pdfcpu is not context-aware and will not become so, and byblos' own
-// content walk (internal/content.Walk) drives a per-operator loop that takes
-// no context either. So CANCELLATION LATENCY EQUALS THE LONGEST
-// UNINTERRUPTIBLE UNIT OF WORK, and that unit is one page at best -- for four
-// of the nine it is a whole pdfcpu round trip. This is the part that would
-// otherwise ship as a comfortable fiction, so each primitive's doc comment
-// states its MEASURED worst case rather than claiming "we check between
-// pages". Pushing a check down into content.Walk is byb-fem.
+// PAGE- AND DOCUMENT-LEVEL boundary it controls, and SINCE byb-fem at every
+// token of byblos' own content walk (internal/content.Walk) as well. What it
+// still cannot check inside is pdfcpu, which is not context-aware and will not
+// become so. So CANCELLATION LATENCY EQUALS THE LONGEST UNINTERRUPTIBLE UNIT
+// OF WORK, and for four of the nine that unit is a whole pdfcpu round trip.
+// This is the part that would otherwise ship as a comfortable fiction, so each
+// primitive's doc comment states its MEASURED worst case rather than claiming
+// "we check between pages".
+//
+// byb-fem removed the SECOND uninterruptible unit. Before it, one page with a
+// multi-million-operator content stream was uninterruptible for the whole walk
+// however long that took -- measured at 95.4% of an ExtractPageRasterContext
+// call, with InspectContext ignoring a cancel for 665 ms and then returning
+// nil. "Interruptible" meant "between pages". The walk now checks per token,
+// so a pathological page costs one token rather than the whole stream. The
+// table below is unchanged: it was measured on ordinary documents, where the
+// walk was never the dominant unit.
 //
 // WHAT WAS MEASURED, and it is less flattering than "nine cancellable
 // primitives" sounds. Each entry point was run under a context that records

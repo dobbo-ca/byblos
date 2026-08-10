@@ -1,6 +1,7 @@
 package content
 
 import (
+	"context"
 	"math"
 	"strings"
 	"testing"
@@ -61,9 +62,9 @@ func TestMatrixUnitSquareBoxHandlesNegativeScale(t *testing.T) {
 }
 
 func TestWalkSingleImagePlacement(t *testing.T) {
-	s, err := Walk([]byte("q 612 0 0 792 0 0 cm /Im0 Do Q"), 0, imageEnv(7))
+	s, err := Walk(context.Background(), []byte("q 612 0 0 792 0 0 cm /Im0 Do Q"), 0, imageEnv(7))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want exactly one", s.Images)
@@ -75,9 +76,9 @@ func TestWalkSingleImagePlacement(t *testing.T) {
 }
 
 func TestWalkNestedCTM(t *testing.T) {
-	s, err := Walk([]byte("q 2 0 0 2 10 10 cm q 1 0 0 1 5 5 cm /Im0 Do Q Q"), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte("q 2 0 0 2 10 10 cm q 1 0 0 1 5 5 cm /Im0 Do Q Q"), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want exactly one", s.Images)
@@ -88,9 +89,9 @@ func TestWalkNestedCTM(t *testing.T) {
 
 func TestWalkQRestoresTheCTM(t *testing.T) {
 	src := "q 10 0 0 10 0 0 cm /Im0 Do Q /Im0 Do"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 2 {
 		t.Fatalf("Images = %+v; want two", s.Images)
@@ -101,9 +102,9 @@ func TestWalkQRestoresTheCTM(t *testing.T) {
 
 // An unbalanced Q must not panic or corrupt the CTM stack.
 func TestWalkUnbalancedRestore(t *testing.T) {
-	s, err := Walk([]byte("Q Q q 5 0 0 5 0 0 cm /Im0 Do Q Q Q"), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte("Q Q q 5 0 0 5 0 0 cm /Im0 Do Q Q Q"), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -113,9 +114,9 @@ func TestWalkUnbalancedRestore(t *testing.T) {
 
 func TestWalkCountsShownCharacters(t *testing.T) {
 	src := "BT /F1 12 Tf (Hello) Tj [ (wor) -120 (ld) ] TJ ET"
-	s, err := Walk([]byte(src), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextChars != 10 {
 		t.Errorf("TextChars = %d; want 10", s.TextChars)
@@ -128,9 +129,9 @@ func TestWalkCountsShownCharacters(t *testing.T) {
 // The quote operators show text too, and the double-quote form takes two
 // numeric operands before the string.
 func TestWalkCountsQuoteOperators(t *testing.T) {
-	s, err := Walk([]byte("BT (ab) ' 1 2 (cde) \" ET"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("BT (ab) ' 1 2 (cde) \" ET"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextChars != 5 || s.TextOps != 2 {
 		t.Errorf("TextChars = %d, TextOps = %d; want 5, 2", s.TextChars, s.TextOps)
@@ -142,9 +143,9 @@ func TestWalkRecursesIntoFormXObjects(t *testing.T) {
 		{"Fm0": {Content: []byte("q 100 0 0 100 0 0 cm /Im0 Do Q"), Matrix: Matrix{2, 0, 0, 2, 0, 0}, Scope: 1}},
 		{"Im0": {Image: true, ID: 42}},
 	}
-	s, err := Walk([]byte("q 0.5 0 0 0.5 0 0 cm /Fm0 Do Q"), 0, env)
+	s, err := Walk(context.Background(), []byte("q 0.5 0 0 0.5 0 0 cm /Fm0 Do Q"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 || s.Images[0].ID != 42 {
 		t.Fatalf("Images = %+v; want one placement of ID 42", s.Images)
@@ -163,9 +164,9 @@ func TestWalkSeesTextInsideAForm(t *testing.T) {
 		},
 		{},
 	}
-	s, err := Walk([]byte("q 612 0 0 792 0 0 cm /Im0 Do Q q /Fm0 Do Q"), 0, env)
+	s, err := Walk(context.Background(), []byte("q 612 0 0 792 0 0 cm /Im0 Do Q q /Fm0 Do Q"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Errorf("Images = %+v; want one", s.Images)
@@ -188,9 +189,9 @@ func TestWalkImagesAreInPaintOrder(t *testing.T) {
 		},
 		{"ImB": {Image: true, ID: 2}},
 	}
-	s, err := Walk([]byte("/ImA Do /Fm0 Do /ImC Do"), 0, env)
+	s, err := Walk(context.Background(), []byte("/ImA Do /Fm0 Do /ImC Do"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	var got []int
 	for _, pl := range s.Images {
@@ -206,9 +207,9 @@ func TestWalkImagesAreInPaintOrder(t *testing.T) {
 // placement here is opaque again.
 func TestWalkRecordsGraphicsStateOpacity(t *testing.T) {
 	env := gsEnv{mapEnv{{"Im0": {Image: true, ID: 1}}}, map[string]bool{"GSa": true}}
-	s, err := Walk([]byte("q /GSa gs /Im0 Do Q /Im0 Do"), 0, env)
+	s, err := Walk(context.Background(), []byte("q /GSa gs /Im0 Do Q /Im0 Do"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 2 {
 		t.Fatalf("Images = %+v; want two", s.Images)
@@ -227,9 +228,9 @@ func TestWalkCarriesOpacityIntoForms(t *testing.T) {
 		{"Fm0": {Content: []byte("/Im0 Do"), Matrix: Identity, Scope: 1}},
 		{"Im0": {Image: true, ID: 1}},
 	}, map[string]bool{"GSa": true}}
-	s, err := Walk([]byte("q /GSa gs /Fm0 Do Q"), 0, env)
+	s, err := Walk(context.Background(), []byte("q /GSa gs /Fm0 Do Q"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -244,9 +245,9 @@ func TestWalkCarriesOpacityIntoForms(t *testing.T) {
 // every scan pipeline ships a layer like it.
 func TestWalkDoesNotCountInvisibleTextAsInked(t *testing.T) {
 	src := "BT\n3 Tr /F10 1 Tf\n11.4 0 0 12 119 703.2 Tm (References)Tj\nET"
-	s, err := Walk([]byte(src), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextOps != 1 {
 		t.Errorf("TextOps = %d; want 1 (the operator is still there)", s.TextOps)
@@ -257,9 +258,9 @@ func TestWalkDoesNotCountInvisibleTextAsInked(t *testing.T) {
 }
 
 func TestWalkCountsVisibleTextAsInked(t *testing.T) {
-	s, err := Walk([]byte("BT /F1 12 Tf (Hello) Tj [ (wor) -120 (ld) ] TJ ET"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("BT /F1 12 Tf (Hello) Tj [ (wor) -120 (ld) ] TJ ET"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.InkedTextOps != 2 {
 		t.Errorf("InkedTextOps = %d; want 2 (mode 0 fills glyphs)", s.InkedTextOps)
@@ -280,9 +281,9 @@ func TestWalkInkPerRenderingMode(t *testing.T) {
 		{"9", 1}, {"-1", 1},
 	} {
 		t.Run("Tr "+tc.mode, func(t *testing.T) {
-			s, err := Walk([]byte("BT "+tc.mode+" Tr (x) Tj ET"), 0, mapEnv{{}})
+			s, err := Walk(context.Background(), []byte("BT "+tc.mode+" Tr (x) Tj ET"), 0, mapEnv{{}})
 			if err != nil {
-				t.Fatalf("Walk() error = %v", err)
+				t.Fatalf("Walk(context.Background(), ) error = %v", err)
 			}
 			if s.InkedTextOps != tc.inked {
 				t.Errorf("InkedTextOps = %d; want %d", s.InkedTextOps, tc.inked)
@@ -296,17 +297,17 @@ func TestWalkInkPerRenderingMode(t *testing.T) {
 // mentions would see {3, 0} here and call the text visible; only the mode in
 // force at each showing operator answers the question.
 func TestWalkRenderingModeIsPerOperatorNotPerPage(t *testing.T) {
-	s, err := Walk([]byte("BT 3 Tr (hidden) Tj 0 Tr ET"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("BT 3 Tr (hidden) Tj 0 Tr ET"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextOps != 1 || s.InkedTextOps != 0 {
 		t.Errorf("TextOps = %d, InkedTextOps = %d; want 1, 0", s.TextOps, s.InkedTextOps)
 	}
 
-	s, err = Walk([]byte("BT 3 Tr (hidden) Tj 0 Tr (shown) Tj ET"), 0, mapEnv{{}})
+	s, err = Walk(context.Background(), []byte("BT 3 Tr (hidden) Tj 0 Tr (shown) Tj ET"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextOps != 2 || s.InkedTextOps != 1 {
 		t.Errorf("TextOps = %d, InkedTextOps = %d; want 2, 1", s.TextOps, s.InkedTextOps)
@@ -316,9 +317,9 @@ func TestWalkRenderingModeIsPerOperatorNotPerPage(t *testing.T) {
 // Tr belongs to the text state, which is part of the graphics state, so Q
 // restores it (ISO 32000-1 section 8.4.2 and table 104).
 func TestWalkRestoresRenderingModeOnQ(t *testing.T) {
-	s, err := Walk([]byte("q 3 Tr BT (a) Tj ET Q BT (b) Tj ET"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("q 3 Tr BT (a) Tj ET Q BT (b) Tj ET"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextOps != 2 || s.InkedTextOps != 1 {
 		t.Errorf("TextOps = %d, InkedTextOps = %d; want 2, 1", s.TextOps, s.InkedTextOps)
@@ -328,9 +329,9 @@ func TestWalkRestoresRenderingModeOnQ(t *testing.T) {
 // BT/ET resets the text matrix, not the text state. A mode set in one text
 // object is still in force in the next.
 func TestWalkRenderingModeSurvivesBTET(t *testing.T) {
-	s, err := Walk([]byte("BT 3 Tr ET BT (a) Tj ET"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("BT 3 Tr ET BT (a) Tj ET"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.InkedTextOps != 0 {
 		t.Errorf("InkedTextOps = %d; want 0 (ET does not reset Tr)", s.InkedTextOps)
@@ -345,9 +346,9 @@ func TestWalkSeesRenderingModeInsideAForm(t *testing.T) {
 		{"Fm0": {Content: []byte("BT 3 Tr (References) Tj ET"), Matrix: Identity, Scope: 1}},
 		{},
 	}
-	s, err := Walk([]byte("q /Fm0 Do Q"), 0, env)
+	s, err := Walk(context.Background(), []byte("q /Fm0 Do Q"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextOps != 1 || s.InkedTextOps != 0 {
 		t.Errorf("TextOps = %d, InkedTextOps = %d; want 1, 0", s.TextOps, s.InkedTextOps)
@@ -361,9 +362,9 @@ func TestWalkFormInheritsRenderingMode(t *testing.T) {
 		{"Fm0": {Content: []byte("BT (References) Tj ET"), Matrix: Identity, Scope: 1}},
 		{},
 	}
-	s, err := Walk([]byte("q 3 Tr /Fm0 Do Q"), 0, env)
+	s, err := Walk(context.Background(), []byte("q 3 Tr /Fm0 Do Q"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextOps != 1 || s.InkedTextOps != 0 {
 		t.Errorf("TextOps = %d, InkedTextOps = %d; want 1, 0", s.TextOps, s.InkedTextOps)
@@ -377,9 +378,9 @@ func TestWalkFormRenderingModeDoesNotLeak(t *testing.T) {
 		{"Fm0": {Content: []byte("BT 3 Tr (hidden) Tj ET"), Matrix: Identity, Scope: 1}},
 		{},
 	}
-	s, err := Walk([]byte("q /Fm0 Do Q BT (shown) Tj ET"), 0, env)
+	s, err := Walk(context.Background(), []byte("q /Fm0 Do Q BT (shown) Tj ET"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextOps != 2 || s.InkedTextOps != 1 {
 		t.Errorf("TextOps = %d, InkedTextOps = %d; want 2, 1", s.TextOps, s.InkedTextOps)
@@ -388,9 +389,9 @@ func TestWalkFormRenderingModeDoesNotLeak(t *testing.T) {
 
 // The quote operators show text too and must be scored the same way.
 func TestWalkQuoteOperatorsRespectRenderingMode(t *testing.T) {
-	s, err := Walk([]byte("BT 3 Tr (ab) ' 1 2 (cde) \" ET"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("BT 3 Tr (ab) ' 1 2 (cde) \" ET"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.TextOps != 2 || s.InkedTextOps != 0 {
 		t.Errorf("TextOps = %d, InkedTextOps = %d; want 2, 0", s.TextOps, s.InkedTextOps)
@@ -399,9 +400,9 @@ func TestWalkQuoteOperatorsRespectRenderingMode(t *testing.T) {
 
 func TestWalkRejectsUnboundedFormRecursion(t *testing.T) {
 	env := mapEnv{{"Fm0": {Content: []byte("/Fm0 Do"), Matrix: Identity, Scope: 0}}}
-	_, err := Walk([]byte("/Fm0 Do"), 0, env)
+	_, err := Walk(context.Background(), []byte("/Fm0 Do"), 0, env)
 	if err == nil {
-		t.Fatal("Walk() on a self-referencing form: want an error, got nil")
+		t.Fatal("Walk(context.Background(), ) on a self-referencing form: want an error, got nil")
 	}
 	if !strings.Contains(err.Error(), "nesting") {
 		t.Errorf("error = %v; want it to mention nesting", err)
@@ -422,9 +423,9 @@ func TestWalkCountsPaintingOperators(t *testing.T) {
 		{"construction alone is not painting", "0 0 m 10 10 l 20 20 l h", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := Walk([]byte(tc.src), 0, mapEnv{{}})
+			s, err := Walk(context.Background(), []byte(tc.src), 0, mapEnv{{}})
 			if err != nil {
-				t.Fatalf("Walk() error = %v", err)
+				t.Fatalf("Walk(context.Background(), ) error = %v", err)
 			}
 			if len(s.Paints) != tc.want {
 				t.Errorf("Paints = %+v; want %d", s.Paints, tc.want)
@@ -436,9 +437,9 @@ func TestWalkCountsPaintingOperators(t *testing.T) {
 // A paint operator with no current path marks nothing. Recording it would give
 // it the empty box, which a containment test would then have to reason about.
 func TestWalkIgnoresAPaintWithNoPath(t *testing.T) {
-	s, err := Walk([]byte("f S B n"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("f S B n"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 0 {
 		t.Errorf("Paints = %+v; want none", s.Paints)
@@ -462,9 +463,9 @@ func TestWalkRecordsThePathBoxInDeviceSpace(t *testing.T) {
 		{"two subpaths", "0 0 10 10 re 100 100 10 10 re f", 0, 0, 110, 110},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := Walk([]byte(tc.src), 0, mapEnv{{}})
+			s, err := Walk(context.Background(), []byte(tc.src), 0, mapEnv{{}})
 			if err != nil {
-				t.Fatalf("Walk() error = %v", err)
+				t.Fatalf("Walk(context.Background(), ) error = %v", err)
 			}
 			if len(s.Paints) != 1 {
 				t.Fatalf("Paints = %+v; want exactly one", s.Paints)
@@ -477,9 +478,9 @@ func TestWalkRecordsThePathBoxInDeviceSpace(t *testing.T) {
 // The path is reset by the operator that paints or discards it, so a second
 // paint reports only its own path.
 func TestWalkResetsThePathAfterPainting(t *testing.T) {
-	s, err := Walk([]byte("0 0 10 10 re f 100 100 10 10 re f"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("0 0 10 10 re f 100 100 10 10 re f"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 2 {
 		t.Fatalf("Paints = %+v; want two", s.Paints)
@@ -490,9 +491,9 @@ func TestWalkResetsThePathAfterPainting(t *testing.T) {
 
 // n discards the path without painting it, and must clear it too.
 func TestWalkResetsThePathAfterNoOp(t *testing.T) {
-	s, err := Walk([]byte("0 0 500 500 re n 10 10 10 10 re f"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("0 0 500 500 re n 10 10 10 10 re f"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 1 {
 		t.Fatalf("Paints = %+v; want one", s.Paints)
@@ -503,9 +504,9 @@ func TestWalkResetsThePathAfterNoOp(t *testing.T) {
 // Stroked ink spreads half the line width to either side of the path, in device
 // space, so the CTM scales the spread along with everything else.
 func TestWalkInflatesAStrokeByHalfItsLineWidth(t *testing.T) {
-	s, err := Walk([]byte("10 w 100 100 200 200 re S"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("10 w 100 100 200 200 re S"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 1 {
 		t.Fatalf("Paints = %+v; want one", s.Paints)
@@ -513,16 +514,16 @@ func TestWalkInflatesAStrokeByHalfItsLineWidth(t *testing.T) {
 	boxEq(t, s.Paints[0].Box, 95, 95, 305, 305)
 
 	// Under a 2x CTM the same 10-point pen is 20 device points wide.
-	s, err = Walk([]byte("q 2 0 0 2 0 0 cm 10 w 100 100 200 200 re S Q"), 0, mapEnv{{}})
+	s, err = Walk(context.Background(), []byte("q 2 0 0 2 0 0 cm 10 w 100 100 200 200 re S Q"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	boxEq(t, s.Paints[0].Box, 190, 190, 610, 610)
 
 	// A fill is not inflated: ink stops at the path.
-	s, err = Walk([]byte("10 w 100 100 200 200 re f"), 0, mapEnv{{}})
+	s, err = Walk(context.Background(), []byte("10 w 100 100 200 200 re f"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	boxEq(t, s.Paints[0].Box, 100, 100, 300, 300)
 }
@@ -530,9 +531,9 @@ func TestWalkInflatesAStrokeByHalfItsLineWidth(t *testing.T) {
 // The default line width is 1.0 (ISO 32000-1 section 8.4.3.2), not zero, so a
 // stroke that never sets one still spreads half a point.
 func TestWalkStrokeUsesTheDefaultLineWidth(t *testing.T) {
-	s, err := Walk([]byte("100 100 200 200 re S"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("100 100 200 200 re S"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 1 {
 		t.Fatalf("Paints = %+v; want one", s.Paints)
@@ -544,9 +545,9 @@ func TestWalkStrokeUsesTheDefaultLineWidth(t *testing.T) {
 // overlay is entirely this number.
 func TestWalkOrdersPaintsAgainstPlacements(t *testing.T) {
 	src := "0 0 10 10 re f q 612 0 0 792 0 0 cm /Im0 Do Q 20 20 10 10 re f"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 2 || len(s.Images) != 1 {
 		t.Fatalf("Paints = %+v, Images = %+v; want two paints and one image", s.Paints, s.Images)
@@ -567,9 +568,9 @@ func TestWalkOrdersPaintsInsideAForm(t *testing.T) {
 		},
 		{},
 	}
-	s, err := Walk([]byte("/Fm0 Do q 612 0 0 792 0 0 cm /Im0 Do Q"), 0, env)
+	s, err := Walk(context.Background(), []byte("/Fm0 Do q 612 0 0 792 0 0 cm /Im0 Do Q"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 1 || len(s.Images) != 1 {
 		t.Fatalf("Paints = %+v, Images = %+v; want one of each", s.Paints, s.Images)
@@ -586,9 +587,9 @@ func TestWalkOrdersPaintsInsideAForm(t *testing.T) {
 // not read this yet; see the note on Color.
 func TestWalkRecordsTheColourAPaintWasIssuedWith(t *testing.T) {
 	src := "/Cs6 cs 1 1 1 scn 0 0 0 RG 4 w 0 0 10 10 re B 0.5 g 0 0 10 10 re f"
-	s, err := Walk([]byte(src), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 2 {
 		t.Fatalf("Paints = %+v; want two", s.Paints)
@@ -608,9 +609,9 @@ func TestWalkRecordsTheColourAPaintWasIssuedWith(t *testing.T) {
 // width is the one that changes a box, so it is the one asserted on.
 func TestWalkQRestoresLineWidthAndColour(t *testing.T) {
 	src := "2 w 0 g q 40 w 1 0 0 rg Q 100 100 200 200 re S"
-	s, err := Walk([]byte(src), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 1 {
 		t.Fatalf("Paints = %+v; want one", s.Paints)
@@ -622,9 +623,9 @@ func TestWalkQRestoresLineWidthAndColour(t *testing.T) {
 }
 
 func TestWalkCountsShadingAndInlineImages(t *testing.T) {
-	s, err := Walk([]byte("/Sh0 sh BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("/Sh0 sh BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if s.ShadingOps != 1 {
 		t.Errorf("ShadingOps = %d; want 1", s.ShadingOps)
@@ -635,9 +636,9 @@ func TestWalkCountsShadingAndInlineImages(t *testing.T) {
 }
 
 func TestWalkRecordsUnresolvedXObjectNames(t *testing.T) {
-	s, err := Walk([]byte("/Missing Do"), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte("/Missing Do"), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Unresolved) != 1 || s.Unresolved[0] != "Missing" {
 		t.Errorf("Unresolved = %v; want [Missing]", s.Unresolved)
@@ -645,8 +646,8 @@ func TestWalkRecordsUnresolvedXObjectNames(t *testing.T) {
 }
 
 func TestWalkPropagatesLexerErrors(t *testing.T) {
-	if _, err := Walk([]byte("(unterminated"), 0, mapEnv{{}}); err == nil {
-		t.Fatal("Walk() on an unterminated string: want an error, got nil")
+	if _, err := Walk(context.Background(), []byte("(unterminated"), 0, mapEnv{{}}); err == nil {
+		t.Fatal("Walk(context.Background(), ) on an unterminated string: want an error, got nil")
 	}
 }
 
@@ -663,9 +664,9 @@ func TestWalkPropagatesLexerErrors(t *testing.T) {
 // the clip and the placement's own (unclipped) box.
 func TestWalkClipPathNarrowsThePlacementBox(t *testing.T) {
 	src := "q 0 0 100 100 re W n 612 0 0 792 0 0 cm /Im0 Do Q"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -679,9 +680,9 @@ func TestWalkClipPathNarrowsThePlacementBox(t *testing.T) {
 // must narrow a placement exactly like W does.
 func TestWalkEvenOddClipNarrowsThePlacementBox(t *testing.T) {
 	src := "q 0 0 100 100 re W* n 612 0 0 792 0 0 cm /Im0 Do Q"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -694,9 +695,9 @@ func TestWalkEvenOddClipNarrowsThePlacementBox(t *testing.T) {
 // the matching Q.
 func TestWalkQRestoresTheClip(t *testing.T) {
 	src := "q 0 0 50 50 re W n Q q 200 0 0 200 0 0 cm /Im0 Do Q"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -712,9 +713,9 @@ func TestWalkQRestoresTheClip(t *testing.T) {
 // q/Q, not outside it.
 func TestWalkQSavesTheOuterClipAcrossANestedPair(t *testing.T) {
 	src := "0 0 100 100 re W n q Q 200 0 0 200 0 0 cm /Im0 Do"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -738,9 +739,9 @@ func TestWalkClipInsideAFormDoesNotCorruptTheOuterClip(t *testing.T) {
 	// Outer clip 0,0,200,200; the form's own inner clip (0,0,50,50) must not
 	// retroactively narrow that outer clip once control returns to the page.
 	src := "0 0 200 200 re W n q /Fm0 Do Q 300 0 0 300 0 0 cm /Im0 Do"
-	s, err := Walk([]byte(src), 0, env)
+	s, err := Walk(context.Background(), []byte(src), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -755,9 +756,9 @@ func TestWalkClipInsideAFormDoesNotCorruptTheOuterClip(t *testing.T) {
 // gs.clip).
 func TestWalkClipDoesNotRetroactivelyCorruptAnAlreadyRecordedPlacement(t *testing.T) {
 	src := "0 0 200 200 re W n q 300 0 0 300 0 0 cm /Im0 Do Q 0 0 50 50 re W n 300 0 0 300 0 0 cm /Im0 Do"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 2 {
 		t.Fatalf("Images = %+v; want two", s.Images)
@@ -790,9 +791,9 @@ func TestWalkFormBBoxWithSwappedCornersIsNotCollapsed(t *testing.T) {
 		},
 		{"Im0": {Image: true, ID: 1}},
 	}
-	s, err := Walk([]byte("/Fm0 Do"), 0, env)
+	s, err := Walk(context.Background(), []byte("/Fm0 Do"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -811,9 +812,9 @@ func TestWalkFormBBoxWithARotatedMatrixIsNotCollapsed(t *testing.T) {
 		},
 		{"Im0": {Image: true, ID: 1}},
 	}
-	s, err := Walk([]byte("/Fm0 Do"), 0, env)
+	s, err := Walk(context.Background(), []byte("/Fm0 Do"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -835,9 +836,9 @@ func TestWalkClipOperatorWithNoCurrentPathDoesNotClipToNothing(t *testing.T) {
 		{"W immediately after n already cleared the path", "0 0 50 50 re n W n 300 0 0 300 0 0 cm /Im0 Do"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := Walk([]byte(tc.src), 0, imageEnv(1))
+			s, err := Walk(context.Background(), []byte(tc.src), 0, imageEnv(1))
 			if err != nil {
-				t.Fatalf("Walk() error = %v", err)
+				t.Fatalf("Walk(context.Background(), ) error = %v", err)
 			}
 			if len(s.Images) != 1 {
 				t.Fatalf("Images = %+v; want one", s.Images)
@@ -859,9 +860,9 @@ func TestWalkFormBBoxIntersectsRatherThanReplacesTheRunningClip(t *testing.T) {
 			},
 			{"Im0": {Image: true, ID: 1}},
 		}
-		s, err := Walk([]byte("0 0 60 60 re W n /Fm0 Do"), 0, env)
+		s, err := Walk(context.Background(), []byte("0 0 60 60 re W n /Fm0 Do"), 0, env)
 		if err != nil {
-			t.Fatalf("Walk() error = %v", err)
+			t.Fatalf("Walk(context.Background(), ) error = %v", err)
 		}
 		if len(s.Images) != 1 {
 			t.Fatalf("Images = %+v; want one", s.Images)
@@ -879,9 +880,9 @@ func TestWalkFormBBoxIntersectsRatherThanReplacesTheRunningClip(t *testing.T) {
 			},
 			{"Im0": {Image: true, ID: 1}},
 		}
-		s, err := Walk([]byte("/Fm0 Do"), 0, env)
+		s, err := Walk(context.Background(), []byte("/Fm0 Do"), 0, env)
 		if err != nil {
-			t.Fatalf("Walk() error = %v", err)
+			t.Fatalf("Walk(context.Background(), ) error = %v", err)
 		}
 		if len(s.Images) != 1 {
 			t.Fatalf("Images = %+v; want one", s.Images)
@@ -896,9 +897,9 @@ func TestWalkFormBBoxIntersectsRatherThanReplacesTheRunningClip(t *testing.T) {
 // the newly constructed path").
 func TestWalkNestedClipsIntersect(t *testing.T) {
 	src := "0 0 100 100 re W n 20 20 60 60 re W n q 200 0 0 200 0 0 cm /Im0 Do Q"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -923,9 +924,9 @@ func TestWalkClipInsideAFormDoesNotLeak(t *testing.T) {
 		{},
 	}
 	src := "/Fm0 Do q 500 0 0 500 0 0 cm /Im0 Do Q"
-	s, err := Walk([]byte(src), 0, env)
+	s, err := Walk(context.Background(), []byte(src), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -944,9 +945,9 @@ func TestWalkClipInsideAFormDoesNotLeak(t *testing.T) {
 // pre-existing clipping paths") stays at 0,0,100,100 regardless.
 func TestWalkClipIsFixedInDeviceSpaceNotUserSpace(t *testing.T) {
 	src := "q 2 0 0 2 0 0 cm 0 0 50 50 re W n 150 0 0 150 0 0 cm /Im0 Do Q"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -963,9 +964,9 @@ func TestWalkClipIsFixedInDeviceSpaceNotUserSpace(t *testing.T) {
 // sets the clip from it, exactly as `re W n` would.
 func TestWalkClipTakesEffectAfterAnyPaintingOperatorNotJustN(t *testing.T) {
 	src := "0 0 50 50 re W f q 200 0 0 200 0 0 cm /Im0 Do Q"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -994,9 +995,9 @@ func TestWalkClipTakesEffectAfterAnyPaintingOperatorNotJustN(t *testing.T) {
 // result is the single point 500,500,500,500.
 func TestWalkDisjointClipReportsAZeroAreaBoxNotAnInvertedOne(t *testing.T) {
 	src := "0 0 10 10 re W n q 500 0 0 500 500 500 cm /Im0 Do Q"
-	s, err := Walk([]byte(src), 0, imageEnv(1))
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -1014,9 +1015,9 @@ func TestWalkDisjointClipReportsAZeroAreaBoxNotAnInvertedOne(t *testing.T) {
 // its own full, unclipped device-space box.
 func TestWalkClipDoesNotNarrowPaintBoxes(t *testing.T) {
 	src := "0 0 10 10 re W n 0 0 500 500 re f"
-	s, err := Walk([]byte(src), 0, mapEnv{{}})
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Paints) != 1 {
 		t.Fatalf("Paints = %+v; want one", s.Paints)
@@ -1057,9 +1058,9 @@ func TestWalkFormBBoxCropsThePlacement(t *testing.T) {
 		}},
 		{"Im0": {Image: true, ID: 1}},
 	}
-	s, err := Walk([]byte("/Fm0 Do"), 0, env)
+	s, err := Walk(context.Background(), []byte("/Fm0 Do"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -1089,9 +1090,9 @@ func TestWalkFormBBoxIsMappedThroughMatrixAndCTM(t *testing.T) {
 		}},
 		{"Im0": {Image: true, ID: 1}},
 	}
-	s, err := Walk([]byte("q 3 0 0 3 0 0 cm /Fm0 Do Q"), 0, env)
+	s, err := Walk(context.Background(), []byte("q 3 0 0 3 0 0 cm /Fm0 Do Q"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)
@@ -1116,9 +1117,9 @@ func TestWalkMissingFormBBoxDoesNotClip(t *testing.T) {
 		}},
 		{"Im0": {Image: true, ID: 1}},
 	}
-	s, err := Walk([]byte("/Fm0 Do"), 0, env)
+	s, err := Walk(context.Background(), []byte("/Fm0 Do"), 0, env)
 	if err != nil {
-		t.Fatalf("Walk() error = %v", err)
+		t.Fatalf("Walk(context.Background(), ) error = %v", err)
 	}
 	if len(s.Images) != 1 {
 		t.Fatalf("Images = %+v; want one", s.Images)

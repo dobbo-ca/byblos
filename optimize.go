@@ -299,7 +299,7 @@ func recompressJPEG(ctx context.Context, in []byte, quality int) ([]byte, map[in
 		if err := checkContext(ctx); err != nil {
 			return nil, nil, err
 		}
-		_, scan, err := inspectPage(d, i)
+		_, scan, err := inspectPage(ctx, d, i)
 		if err != nil {
 			return nil, nil, fmt.Errorf("byblos: optimize: recompress: page %d: %w", i, err)
 		}

@@ -1,6 +1,7 @@
 package byblos
 
 import (
+	"context"
 	"bytes"
 	"errors"
 	"fmt"
@@ -988,9 +989,9 @@ func (e pageEnv) ExtGStateOpaque(scope int, name string) bool { return name == "
 
 func walkPage(t *testing.T, src, form string) *content.Scan {
 	t.Helper()
-	s, err := content.Walk([]byte(src), 0, pageEnv{form: form})
+	s, err := content.Walk(context.Background(), []byte(src), 0, pageEnv{form: form})
 	if err != nil {
-		t.Fatalf("content.Walk() error = %v", err)
+		t.Fatalf("content.Walk(context.Background(), ) error = %v", err)
 	}
 	return s
 }
