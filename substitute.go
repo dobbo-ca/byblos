@@ -118,7 +118,7 @@ func ReplaceImagesContext(ctx context.Context, w io.Writer, r io.ReadSeeker, sub
 		if err := checkContext(ctx); err != nil {
 			return err
 		}
-		if _, _, err := inspectPage(d, n); err != nil {
+		if _, _, err := inspectPage(ctx, d, n); err != nil {
 			return fmt.Errorf("byblos: replace images: %w", err)
 		}
 	}

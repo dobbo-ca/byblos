@@ -25,6 +25,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -199,7 +200,7 @@ func scanPage(f io.ReadSeeker, d pdfdoc.Doc, rel string, n int, s *summary, enc 
 	// is the last placement, which is the candidate classify takes.
 	if p, perr := d.Page(n); perr == nil {
 		row.PageBox = [4]float64{p.CropBox.LLX, p.CropBox.LLY, p.CropBox.URX, p.CropBox.URY}
-		if sc, werr := content.Walk(p.Content, p.Scope, d); werr == nil && len(sc.Images) > 0 {
+		if sc, werr := content.Walk(context.Background(), p.Content, p.Scope, d); werr == nil && len(sc.Images) > 0 {
 			b := sc.Images[len(sc.Images)-1].Box
 			row.RasterBox = [4]float64{b.LLX, b.LLY, b.URX, b.URY}
 			row.BoxExact = true

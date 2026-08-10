@@ -428,7 +428,7 @@ func RecordExtractionContext(ctx context.Context, r io.ReadSeeker) (Provenance, 
 		if err := checkContext(ctx); err != nil {
 			return Provenance{}, err
 		}
-		_, rec, err := extractPage(d, n)
+		_, rec, err := extractPage(ctx, d, n)
 		if err != nil && rec.Diverted == "" {
 			return Provenance{}, fmt.Errorf("byblos: provenance: page %d: %w", n, err)
 		}
