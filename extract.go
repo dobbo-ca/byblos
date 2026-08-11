@@ -775,17 +775,57 @@ func contains(outer, inner content.Box) bool {
 		outer.URY >= inner.URY-coverTolerancePt
 }
 
-// paintTolerancePt is how far a path may stray outside the raster and still
+// paintTolerancePt is how far a STROKE may stray outside the raster and still
 // count as hidden by it. A thousandth of a point is a two-hundredth of a pixel
 // at 300 DPI, so it forgives arithmetic and nothing else.
 //
 // It is deliberately not coverTolerancePt. That one point is an allowance for
 // where a page's own edge is, on the reasoning that a raster falling a point
-// short still covers the page. Reusing it here would allow a point of ink to
-// fall outside the raster and still be called invisible, which is the opposite
-// direction — and it would exactly cancel the stroke spread that recordPaint
-// adds for a 2-point pen.
+// short still covers the page. Reusing it for a stroke would exactly cancel the
+// spread recordPaint adds for a 2-point pen, and a page carrying a visible band
+// of ink the raster does not would extract as if it were clean.
 const paintTolerancePt = 1e-3
+
+// paintFillTolerancePt is the same allowance for a FILL, and the stroke
+// argument above is the whole reason the two differ.
+//
+// A fill's Box is its path. Nothing inflates it, so there is no spread for a
+// tolerance to cancel and the objection that keeps paintTolerancePt at 1e-3
+// cannot arise. byb-e04 measured what the strict number was costing: of the 471
+// pages that divert "vector-paint" and would otherwise extract, the operator
+// that escapes is `f` or `f*` on every single one a tolerance can reach. Not one
+// is a stroke.
+//
+// One point is deliberately coverTolerancePt's value, for coverTolerancePt's
+// reason — it is the width of the disagreement two producers have about where a
+// page's edge is, and a wash laid on the page while the raster is laid on a form
+// /BBox trimmed a fraction of a point inside it is exactly that disagreement.
+// govdocs1/050104.pdf p2 is the case: its /Fm5 /BBox maps to a raster 0.28pt
+// inside the page on the left and 0.30pt on the right, and the wash covers the
+// page. The trim is real and byblos computes it correctly; a third of a point of
+// unpainted page is not content.
+//
+// POPPLER PICKED THIS NUMBER, not the distribution. Every one of the 191 pages
+// a 1pt fill tolerance releases was rendered at 72 and 300 DPI and the band
+// outside the returned raster counted: zero of them carry a mark. The first page
+// that does need 1.6831pt — govdocs1/600666.pdf p1, whose escaping wash is
+// DeviceRGB 0.0471 grey and paints a visibly dark border, which is why the
+// number is not raised to meet it. Going to 2pt would take that page and lose
+// its border.
+//
+// The sample would tolerate anything below 1.6831 and the number is 1.0 anyway.
+// Fitting a constant to the largest value one corpus happens to allow leaves
+// nothing to defend it with when the next corpus disagrees.
+//
+// IT MOVES ONE COUNTER, and classify's doc comment asks that such a move be
+// deliberate rather than quiet. Four pages — govdocs1/300512.pdf 16, 17, 18 and
+// 23, whose wash needs 0.0603pt — reported "vector-paint" and now report
+// "multiple-images". They diverted before and divert now; what changed is that
+// the reason names the layered stack that actually stops the page reducing to
+// one raster, instead of a wash that was never visible. They are the only four
+// reason changes in the 169,376-page sample. See
+// TestClassifyPaintOcclusionAcrossPlacements.
+const paintFillTolerancePt = 1.0
 
 // paintsHidden reports whether the page's rasters hide every path-painting
 // operator on it: each path's visible ink landed inside an opaque placement
@@ -843,7 +883,11 @@ func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo fu
 		if !marks {
 			continue
 		}
-		if !inkHidden(ink, p.Index, imgs, imageInfo) {
+		tol := paintFillTolerancePt
+		if p.Strokes() {
+			tol = paintTolerancePt
+		}
+		if !inkHidden(ink, p.Index, tol, imgs, imageInfo) {
 			return false
 		}
 	}
@@ -851,16 +895,18 @@ func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo fu
 }
 
 // inkHidden reports whether some opaque placement painted after this ink
-// contains it. order is the ink's position in the shared painting order.
-func inkHidden(ink content.Box, order int, imgs []content.Placement, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
+// contains it. order is the ink's position in the shared painting order, and tol
+// is how far the ink may stray outside a placement and still count as hidden —
+// paintFillTolerancePt or paintTolerancePt, which the caller picks by operator.
+func inkHidden(ink content.Box, order int, tol float64, imgs []content.Placement, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
 	for _, img := range imgs {
 		if img.Index < order || !opaqueCover(img, imageInfo) {
 			continue
 		}
-		if ink.LLX >= img.Box.LLX-paintTolerancePt &&
-			ink.LLY >= img.Box.LLY-paintTolerancePt &&
-			ink.URX <= img.Box.URX+paintTolerancePt &&
-			ink.URY <= img.Box.URY+paintTolerancePt {
+		if ink.LLX >= img.Box.LLX-tol &&
+			ink.LLY >= img.Box.LLY-tol &&
+			ink.URX <= img.Box.URX+tol &&
+			ink.URY <= img.Box.URY+tol {
 			return true
 		}
 	}

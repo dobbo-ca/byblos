@@ -171,6 +171,16 @@ type Paint struct {
 // Testing disjointness against Box rather than against the intersection is what
 // keeps the two apart: intersectBox clamps a disjoint pair to a degenerate box,
 // so by the time it has run, "clipped away" and "a hairline" look identical.
+// Strokes reports whether this operator lays ink along the path as well as, or
+// instead of, inside it.
+//
+// A caller needs this to tell a stroke's box from a fill's, because the two
+// carry different guarantees: recordPaint has already spread a stroke's box by
+// half the line width, so a stroke's Box includes ink the path itself does not
+// bound, while a fill's Box is the path. The operator vocabulary lives here,
+// with the walk that writes it, rather than being restated by every caller.
+func (p Paint) Strokes() bool { return strokingOps[p.Op] }
+
 func (p Paint) Ink() (Box, bool) {
 	box := p.Box
 	if p.Clip == nil {
