@@ -17,17 +17,16 @@ import (
 	"io"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 // WriteProperties adds properties to rs's Info dictionary and writes the
 // result to w, replacing any existing entries with the same keys.
 func WriteProperties(rs io.ReadSeeker, w io.Writer, properties map[string]string) error {
-	return api.AddProperties(rs, w, properties, model.NewDefaultConfiguration())
+	return api.AddProperties(rs, w, properties, defaultConfig())
 }
 
 // ReadProperties returns rs's Info-dictionary properties. A key WriteProperties
 // never wrote is simply absent from the result, not an error.
 func ReadProperties(rs io.ReadSeeker) (map[string]string, error) {
-	return api.Properties(rs, model.NewDefaultConfiguration())
+	return api.Properties(rs, defaultConfig())
 }

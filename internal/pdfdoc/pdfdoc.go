@@ -9,7 +9,11 @@
 //   - api.ReadAndValidate dereferences conf.Cmd with no nil check and pdfcpu's
 //     fault.Catch only recovers its own panic type, so passing a nil
 //     *model.Configuration kills the process rather than returning an error.
-//     Every call here passes model.NewDefaultConfiguration().
+//     Every call here passes defaultConfig().
+//   - model.NewDefaultConfiguration builds pdfcpu's package-level default
+//     LAZILY, on first use, and writes it with no synchronisation, so two
+//     goroutines opening documents at once race inside pdfcpu itself.
+//     defaultConfig forces that init exactly once; see its comment (byb-a5z).
 //   - ctx.PageCount is zero after ReadContext; ctx.EnsurePageCount() populates it.
 //   - types.StreamDict.Content is empty until Decode() is called.
 //   - model.Image.Width/Height/Bpc are zero unless ExtractImage is called with
@@ -37,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -44,6 +49,31 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
+
+var configOnce sync.Once
+
+// defaultConfig returns a FRESH pdfcpu configuration, having forced pdfcpu's
+// lazy global initialisation to happen exactly once.
+//
+// Two separate facts make this the shape it is, and getting either wrong
+// reintroduces a race (byb-a5z).
+//
+// First, the init is lazy and unsynchronised. model.NewDefaultConfiguration
+// reaches EnsureDefaultConfigAt -> ensureConfigFileAt -> parseConfigFile, which
+// WRITES a pdfcpu package-level variable on the first call in the process while
+// a concurrent caller READS it. Measured with -race against pdfcpu v0.13.0: 9
+// data races from 8 goroutines calling Open at once, and none once this
+// serialises the first call.
+//
+// Second, the configuration itself is NOT shareable. pdfcpu mutates the
+// *model.Configuration it is handed -- it carries per-operation state -- so
+// returning one cached instance would trade the init race for a worse one on
+// every field. Each caller still gets its own; only the global init is
+// serialised.
+func defaultConfig() *model.Configuration {
+	configOnce.Do(func() { _ = model.NewDefaultConfiguration() })
+	return model.NewDefaultConfiguration()
+}
 
 // ErrUnsupportedCodec reports an image stream whose compression filter pdfcpu
 // will not render. It exists so that pdfcpu's nil-reader return becomes an
@@ -208,7 +238,7 @@ func Open(rs io.ReadSeeker) (d Doc, err error) {
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: seek: %w", err)
 	}
-	ctx, err := api.ReadContext(rs, model.NewDefaultConfiguration())
+	ctx, err := api.ReadContext(rs, defaultConfig())
 	if err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: read: %w", err)
 	}

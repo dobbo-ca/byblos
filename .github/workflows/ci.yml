@@ -51,6 +51,22 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./... -v
+      - name: race-check the concurrent read path, ALONE
+        # It has to run on its own. The race it guards is in pdfcpu's lazy
+        # global config init, which fires on the first pdfdoc.Open in the
+        # process and never again, so in the whole-package run above some
+        # earlier test has already primed it and this test cannot reach the
+        # racing code. Measured (byb-a5z): 10 races alone against the unfixed
+        # tree, 0 races when run as part of `go test -race .`. Running it with
+        # the package would pass for the wrong reason.
+        #
+        # CGO_ENABLED=1 for this step only: -race needs cgo, and this job pins
+        # it to 0 everywhere else. That pin is the point of the job -- byblos
+        # ships cgo-free, which the cross-build step below asserts -- so the
+        # override stays scoped to the one command that cannot run without it.
+        env:
+          CGO_ENABLED: 1
+        run: go test -race -count=1 -run '^TestConcurrentInspectAndExtractAreRaceFree$' .
       - name: cross-build without cgo
         run: GOOS=linux GOARCH=arm64 go build ./...
       - name: assert only permitted dependencies

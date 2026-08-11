@@ -145,6 +145,13 @@ const mrcBaseAreaFrac = 0.90
 // contains. A caller that assumed Bounds was simply Image's own placement box
 // must not, now that a clipped page reports the narrower, honest rectangle
 // instead. ImageRef.Bounds carries the identical relationship to Placement.
+//
+// Bounds is never EMPTY beside a returned Image (byb-62t). A placement narrower
+// than a point on an axis is reported as the smallest integer rectangle that
+// contains it rather than collapsing to nothing, so an empty Bounds and returned
+// bytes cannot occur together. The cost is that such a Bounds overstates the
+// extent by up to a point per edge, which is one more reason not to derive a
+// scale or DPI from it.
 type PageRaster struct {
 	Image  image.Image
 	Bounds image.Rectangle // where the raster lands
@@ -561,19 +568,20 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 	// the record coherent: no bytes are returned that disagree with a
 	// geometry nobody measured a visible mark in.
 	//
-	// The test is on the ROUNDED rectangle (boxRect), not the float area: a
-	// sub-point-tall clip -- e.g. a 0.4pt-high sliver -- has positive float
-	// area but rounds to a zero-height Bounds, i.e. a non-empty raster against
-	// an empty raster_box. Bounds is what the caller sees (ImageRef.Bounds is
-	// boxRect(placement.Box)), so testing what the caller sees is what catches
-	// it.
+	// The test is on the FLOAT extent, and the distinction is the whole of
+	// byb-62t. It used to test the ROUNDED rectangle, on the reasoning that
+	// Bounds is what the caller sees, and it named a 0.4pt sliver as the case
+	// that justified it. That sliver is not invisible: poppler 26.06.0 inks 792
+	// pixels of `q .4 0 0 792 10 0 cm /Im0 Do Q` at 72 DPI and 9,900 at 300, a
+	// black stripe the height of the page, and pdfimages -list reports the image
+	// present at 720 ppi. Diverting it loses a page poppler renders, which is
+	// the trade byb-3jq settled against.
 	//
-	// This guard covers the CLIP-INDUCED half of that incoherence and only
-	// that half. A sub-point CTM with no clip anywhere -- `q .4 0 0 .4 10 10
-	// cm /Im0 Do Q` -- reaches the identical state (Bounds empty, full raster
-	// returned) and is not caught here. That is pre-existing, byte-identical
-	// on main@5fbf37d, and tracked separately; do not read this comment as
-	// claiming the state is unreachable.
+	// So the two questions are separated. "Can this deposit ink" is a float
+	// question and marks() answers it here; "what rectangle do I report" is a
+	// projection and boxRect answers it, widening a sub-point extent outward
+	// rather than collapsing it (inspect.go). Nothing downstream now depends on
+	// that collapse, which is what makes the widening safe.
 	//
 	// The condition is "a clip actually NARROWED this placement", not "a clip
 	// was in effect", and it is deliberately the same test the ClipBox
@@ -583,7 +591,7 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 	// nothing: under a bare Clip != nil test it would steal "flipped-placement"
 	// and "clipped-away" would name a cause that did not apply. placementReason
 	// below owns the zero-area causes a clip did not create.
-	if clipNarrowed(s.Images[top]) && boxRect(s.Images[top].Box).Empty() {
+	if clipNarrowed(s.Images[top]) && !marks(s.Images[top].Box) {
 		if top > 0 {
 			return 0, "multiple-images"
 		}
@@ -866,6 +874,23 @@ func covers(b content.Box, page pdfdoc.Rect) bool {
 }
 
 func area(b content.Box) float64 { return (b.URX - b.LLX) * (b.URY - b.LLY) }
+
+// marks reports whether a box has the extent to deposit ink at all: positive on
+// both axes. A raster squeezed to nothing on one axis paints nothing, however
+// wide it is on the other.
+//
+// content.Paint.Ink asks the identical question of a path
+// (internal/content/walk.go) and the two must not drift, because a placement and
+// a path bounding the same rectangle either both mark or both do not. Ink has
+// one exception this does not: a zero-width STROKE still marks, since ISO
+// 32000-1 8.4.3.2 makes a zero-width line the thinnest the device can render.
+// An image XObject has no such rule.
+//
+// Testing the extent per axis rather than area(b) > 0 is deliberate. It states
+// the claim exactly, it does not underflow on a box small on both axes, and it
+// is the answer that stays safe if a Box ever arrives inverted -- boxRect would
+// swap such a pair into a non-empty rectangle, and this would not.
+func marks(b content.Box) bool { return b.URX > b.LLX && b.URY > b.LLY }
 
 // divertClass maps a fine-grained classify (or codec) reason to the class
 // stored in PageProvenance.Diverted.
