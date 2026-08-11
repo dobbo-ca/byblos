@@ -27,7 +27,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -208,42 +207,19 @@ func adjudicate(row *adjRow, dpi, inset float64, tmp string) {
 	// (extract.go:231-233) -- so the box has to be carried through the same
 	// rotation before it can be compared against pixels. Mapping all four corners
 	// and taking the extent covers every quarter turn without a case per angle.
-	sc := dpi / 72
-	cw, ch := p.CropBox.URX-p.CropBox.LLX, p.CropBox.URY-p.CropBox.LLY
-	rot := ((p.Rotate % 360) + 360) % 360
-	disp := func(x, y float64) (float64, float64) {
-		u, v := x-p.CropBox.LLX, y-p.CropBox.LLY
-		switch rot {
-		case 90:
-			return v, u
-		case 180:
-			return cw - u, v
-		case 270:
-			return ch - v, cw - u
-		default:
-			return u, ch - v
-		}
-	}
-	wantW, wantH := cw, ch
-	if rot == 90 || rot == 270 {
-		wantW, wantH = ch, cw
-	}
-	// If this does not hold, the pixels and the box are in different frames and
-	// every count below is meaningless. It is the check that catches a rotation,
-	// a CropBox poppler disagrees about, or a wrong page being rendered.
-	if math.Abs(float64(im.w)-wantW*sc) > 2 || math.Abs(float64(im.h)-wantH*sc) > 2 {
-		row.note = fmt.Sprintf("frame-mismatch: render %dx%d want %.0fx%.0f rot=%d",
-			im.w, im.h, wantW*sc, wantH*sc, rot)
+	//
+	// pageFrame (stencil_wash_test.go) owns that mapping and the frame assertion
+	// it guards it with. byb-oxf factored it out of here rather than copying it:
+	// this is the one thing byb-e04's first reading got wrong -- three of four
+	// pages it called content-losing were a /Rotate artefact -- and a second copy
+	// free to drift from this one is that failure waiting to happen again.
+	fr, err := newPageFrame(p.CropBox, p.Rotate, im.w, im.h, dpi)
+	if err != nil {
+		row.note = err.Error()
 		return
 	}
-	x0, y0 := math.Inf(1), math.Inf(1)
-	x1, y1 := math.Inf(-1), math.Inf(-1)
-	for _, c := range [4][2]float64{{box.LLX, box.LLY}, {box.URX, box.LLY}, {box.LLX, box.URY}, {box.URX, box.URY}} {
-		dx, dy := disp(c[0], c[1])
-		x0, x1 = math.Min(x0, dx*sc), math.Max(x1, dx*sc)
-		y0, y1 = math.Min(y0, dy*sc), math.Max(y1, dy*sc)
-	}
-	row.rot = rot
+	x0, y0, x1, y1 := fr.pixelBox(box)
+	row.rot = fr.rot
 	row.minGrey = 255
 	for g := 0; g < 3; g++ {
 		gx0, gx1 := x0-float64(g), x1+float64(g)
