@@ -14,7 +14,6 @@ import (
 	"io"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 // Optimize runs pdfcpu's structural optimize pass over rs and writes the
@@ -23,7 +22,7 @@ import (
 // non-PDF rs is reported here rather than producing corrupt output.
 func Optimize(rs io.ReadSeeker, w io.Writer) (err error) {
 	defer catchPanic("optimize", &err)
-	if err := api.Optimize(rs, w, model.NewDefaultConfiguration()); err != nil {
+	if err := api.Optimize(rs, w, defaultConfig()); err != nil {
 		return fmt.Errorf("byblos/pdfdoc: optimize: %w", err)
 	}
 	return nil

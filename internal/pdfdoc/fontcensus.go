@@ -109,7 +109,7 @@ func readBothForFonts(path string) (*model.Context, error) {
 
 	if f, err := os.Open(path); err == nil {
 		defer f.Close()
-		if ctx, err := api.ReadContext(f, model.NewDefaultConfiguration()); err == nil {
+		if ctx, err := api.ReadContext(f, defaultConfig()); err == nil {
 			if err := usableForFonts(ctx); err != nil {
 				if firstErr == nil {
 					firstErr = err

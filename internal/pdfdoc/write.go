@@ -46,7 +46,6 @@ import (
 	"io"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
@@ -287,7 +286,7 @@ func (d *doc) Write(w io.Writer) (err error) {
 // that one function.
 func Validate(r io.ReadSeeker) (err error) {
 	defer catchPanic("validate", &err)
-	if err := api.Validate(r, model.NewDefaultConfiguration()); err != nil {
+	if err := api.Validate(r, defaultConfig()); err != nil {
 		return fmt.Errorf("byblos/pdfdoc: validate: %w", err)
 	}
 	return nil
