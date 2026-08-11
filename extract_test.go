@@ -868,6 +868,32 @@ func TestClassifyPaintOcclusion(t *testing.T) {
 		{"wash inside a form after the raster",
 			fullPageDo + "q 0.5 0 0 0.5 0 0 cm /Fm0 Do Q\n",
 			"1 1 1 scn 0 0 1200 1500 re f\n", "vector-paint"},
+
+		// byb-e04. A fill gets paintFillTolerancePt and a stroke does not, and
+		// these four cases are the whole of that split. The raster is the full
+		// page; the wash overhangs it by half a point on every side, which is the
+		// producer disagreement about where the page edge is that
+		// govdocs1/050104.pdf p2 shows.
+		{"a fill half a point outside the raster",
+			"-0.5 -0.5 613 793 re f\n" + fullPageDo, "", ""},
+
+		// The same overhang stroked rather than filled still diverts. This is the
+		// case the old comment argued about: a 1pt tolerance would cancel the
+		// spread recordPaint adds, so a stroke never gets one. The pen here is
+		// hairline, so the spread is nil and the half point is the path's own.
+		{"a stroke half a point outside the raster",
+			"0 w -0.5 -0.5 613 793 re S\n" + fullPageDo, "", "vector-paint"},
+
+		// Past the tolerance a fill diverts like anything else. Two points of
+		// unpainted page is content, and govdocs1/600666.pdf p1 is the measured
+		// case: poppler paints its escaping wash a visible dark grey.
+		{"a fill two points outside the raster",
+			"-2 -2 616 796 re f\n" + fullPageDo, "", "vector-paint"},
+
+		// The tolerance is an allowance, not a licence: a fill that escapes on one
+		// side only is judged by that side.
+		{"a fill half a point past one edge only",
+			"0 0 612.5 792 re f\n" + fullPageDo, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, got := classify(page, walkPage(t, tc.src, tc.form), plainFacts); got != tc.want {
@@ -1088,6 +1114,18 @@ func TestClassifyPaintOcclusionAcrossPlacements(t *testing.T) {
 		{"a fill painted after every image",
 			coverIm0 + coverIm1 + "1 1 1 scn 0 0 100 100 re f\n",
 			map[int]pdfdoc.ImageInfo{1: plain, 2: plain}, "vector-paint"},
+
+		// byb-e04 moves a counter, and classify's doc comment says not to move one
+		// silently. A wash escaping the raster by half a point is now hidden, so
+		// the paint arm stops firing and the page reports the layered stack that
+		// actually stops it reducing to one raster. The page diverted before and
+		// diverts now; only the reason changes, and it changes to the true one.
+		//
+		// This is govdocs1/300512.pdf pages 16, 17, 18 and 23, the only four pages
+		// in the 169,376-page sample whose reason moves. Their wash needs 0.0603pt.
+		{"a wash inside the fill tolerance over a stack that does not reduce",
+			"1 1 1 scn -0.5 -0.5 613 793 re f\n" + coverIm0 + "q 100 0 0 100 100 100 cm /Im1 Do Q\n",
+			map[int]pdfdoc.ImageInfo{1: plain, 2: plain}, "multiple-images"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, got := classify(page, walkPage(t, tc.src, ""), facts(tc.info)); got != tc.want {
