@@ -227,8 +227,30 @@ func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.
 	return pi, s, nil
 }
 
+// rectOf projects a page box onto the integer rectangle PageInfo.Bounds and
+// PageRaster.Page report. It is boxRect's rule applied to the other box, and
+// byb-67j is why they now agree: byb-62t stopped the RASTER rectangle collapsing
+// and left this half alone, which made the asymmetry visible rather than fixing
+// it — a raster covering 100% of a 1.2 x 0.48 pt page reported a non-empty
+// Bounds that was not contained in an empty Page.
+//
+// The rule is re-derived here rather than copied, because a page box is not a
+// placement box. Poppler 26.06.0 reports a sub-point /MediaBox VERBATIM through
+// pdfinfo and renders every one measured to at least one inked pixel, down to
+// 0.1 x 0.1 pt. It applies no minimum of its own — worth stating, since ISO
+// 32000-1 names 3 units as the smallest page and poppler DOES substitute a
+// 612x792 default for a missing /MediaBox (byb-8ly), so it has opinions here and
+// this is not one of them. Collapsing the box says "no page" about a page
+// poppler draws, and byb-3jq settled that trade.
+//
+// A box with no extent still projects to an empty rectangle, and that is
+// load-bearing: CoversPage's Page.Empty() guard exists for the zero PageRaster
+// every error return hands back, and it keeps working only while a genuinely
+// zero box stays empty.
 func rectOf(r pdfdoc.Rect) image.Rectangle {
-	return image.Rect(round(r.LLX), round(r.LLY), round(r.URX), round(r.URY))
+	llx, urx := roundExtent(r.LLX, r.URX)
+	lly, ury := roundExtent(r.LLY, r.URY)
+	return image.Rect(llx, lly, urx, ury)
 }
 
 // boxRect projects a float box onto the integer rectangle a caller reads as
