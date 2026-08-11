@@ -127,6 +127,24 @@ var (
 	// Measured placement DPI was a round number in every dominant file: DTIC
 	// 302/303, CIA 299.3, dc-1238360 400.0, govdocs1 200/300/300.3.
 	NaturalDPIPlacement = [6]float64{568.3708, 0, 0, 791.7616, 0, 0}
+
+	// SubPointPlacement squeezes the raster into 0.4 point on BOTH axes. Every
+	// edge of the placed box rounds to the same integer as its opposite edge, so
+	// a projection that rounds to nearest reports an empty rectangle for a
+	// placement that paints (byb-62t).
+	//
+	// It is content, not a rounding ghost. poppler 26.06.0 renders the page: a
+	// 4x4 grey image under this matrix inks 2 pixels at 72 DPI and 9 at 300, and
+	// pdfimages -list reports the image present at 720 ppi, which is what 4
+	// pixels across 0.4 point is.
+	SubPointPlacement = [6]float64{0.4, 0, 0, 0.4, 10, 10}
+
+	// SubPointStripePlacement is the same squeeze on ONE axis only: 0.4 point
+	// wide and the full height of the page. It separates a per-axis projection
+	// from a whole-box one, and it is the harder case to call invisible --
+	// poppler inks 792 pixels of it at 72 DPI and 9,900 at 300, a black stripe
+	// running the length of the page.
+	SubPointStripePlacement = [6]float64{0.4, 0, 0, PageHeightPt, 10, 0}
 )
 
 // cmOperands renders a placement matrix as the six operands of a `cm` operator.
@@ -400,6 +418,16 @@ func scanPlaced(cm string, rotate int) []byte {
 	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
 	return w.finish(cat)
 }
+
+// ScanPlacedAt is the one-page scan document under a caller-chosen placement
+// matrix, for a geometry no named corpus document carries.
+//
+// Exported and deliberately NOT in All(), for the reason NoMediaBox gives: All()
+// is iterated by every write-path test and its length is a measured figure in
+// five files (byb-3y8), so a document added there costs nine edits that have
+// nothing to do with the bead adding it. A test that needs one placement reaches
+// for this by name.
+func ScanPlacedAt(m [6]float64) []byte { return scanPlaced(cmOperands(m), 0) }
 
 // scanBilevel is scan(0) with the raster declared /BitsPerComponent 1 and
 // stored uncompressed, so it extracts rather than diverting.

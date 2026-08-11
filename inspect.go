@@ -32,6 +32,13 @@ import (
 // Height) must account for this — a clipped Bounds does not mean the raster
 // was stored at a different resolution.
 //
+// Bounds is never EMPTY for a placement that can paint (byb-62t). A placement
+// narrower than a point on an axis — `q .4 0 0 .4 10 10 cm /Im0 Do Q`, which
+// poppler renders — is reported as the smallest integer rectangle containing
+// it, so it overstates the extent by up to a point per edge rather than
+// vanishing. That is a further reason to read a scale off Placement and not off
+// Bounds.
+//
 // Filter is the codec the stored raster declares: "JBIG2Decode",
 // "CCITTFaxDecode", "DCTDecode", "FlateDecode", and so on; "" when the stream
 // declares no /Filter or declares one this does not recognize as a name. It is
@@ -224,8 +231,44 @@ func rectOf(r pdfdoc.Rect) image.Rectangle {
 	return image.Rect(round(r.LLX), round(r.LLY), round(r.URX), round(r.URY))
 }
 
+// boxRect projects a float box onto the integer rectangle a caller reads as
+// Bounds. PageRaster.Bounds and ImageRef.Bounds are both this, of the same
+// placement box, and they must not disagree.
+//
+// Rounding each edge to nearest is the presentation answer, and for any box
+// wider than a point it is the whole answer. What it must never do is report an
+// EMPTY rectangle beside raster bytes: nothing tells that record apart from a
+// page carrying no marks, while PageGeometry's raster_box states a real extent
+// alongside it (byb-62t). So on an axis whose two edges round together, the
+// rectangle widens outward instead, to the smallest integer interval that
+// contains the box.
+//
+// A sub-point extent is content, not a rounding ghost, which is why widening
+// rather than refusing is the answer. poppler 26.06.0 renders `q .4 0 0 792 10
+// 0 cm /Im0 Do Q` as a 0.4pt-wide full-height stripe and inks 792 pixels of it
+// at 72 DPI.
+//
+// Whether anything is visible AT ALL is a different question, it is a float one,
+// and it is not asked here: a box with no extent on an axis still projects to an
+// empty rectangle. classify (extract.go) decides visibility with marks() before
+// any of this is reached.
 func boxRect(b content.Box) image.Rectangle {
-	return image.Rect(round(b.LLX), round(b.LLY), round(b.URX), round(b.URY))
+	llx, urx := roundExtent(b.LLX, b.URX)
+	lly, ury := roundExtent(b.LLY, b.URY)
+	return image.Rect(llx, lly, urx, ury)
+}
+
+// roundExtent projects one axis of a box, widening outward rather than letting a
+// positive extent collapse to nothing. See boxRect.
+//
+// Both edges move when they collapse, not just the far one: 10.6 and 10.9 round
+// to the same 11 and ceil(10.9) is 11 as well, so widening the far edge alone
+// would leave the interval empty.
+func roundExtent(lo, hi float64) (int, int) {
+	if l, h := round(lo), round(hi); l != h || hi <= lo {
+		return l, h
+	}
+	return int(math.Floor(lo)), int(math.Ceil(hi))
 }
 
 func round(v float64) int { return int(math.Round(v)) }

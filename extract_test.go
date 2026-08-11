@@ -576,18 +576,36 @@ func TestClassify(t *testing.T) {
 				Clip: &content.Box{LLX: 700, LLY: 800, URX: 700, URY: 800},
 			}}},
 			want: "clipped-away"},
-		// A sub-point-tall clip: 0.4pt of height has positive float area
-		// (612*0.4 = 244.8) but rounds to a zero-height Bounds (boxRect rounds
-		// 100 and 100.4 to the same 100), which is the same incoherent state --
-		// a non-empty raster against an empty raster_box -- the guard exists to
-		// prevent. Testing float area alone let this slip through; testing the
-		// rounded rectangle catches it.
-		{name: "a sub-point clip sliver rounds to an empty Bounds and diverts",
+		// A sub-point-tall clip is NOT clipped away: 0.4pt of height is a real
+		// extent, and byb-62t measured what poppler 26.06.0 does with one -- it
+		// inks 792 pixels of the transposed shape at 72 DPI and 9,900 at 300, a
+		// stripe running the length of the page. Diverting it would lose a page
+		// poppler renders.
+		//
+		// This case used to divert, on a guard that asked "is anything visible"
+		// by testing whether boxRect COLLAPSED. That conflated visibility with
+		// presentation and selected the wrong page set; boxRect now widens such a
+		// box rather than collapsing it, and the guard asks the float question
+		// directly. The row below is the one the guard is really for.
+		{name: "a sub-point clip sliver is a visible stripe and extracts",
 			scan: &contentScan{Images: []content.Placement{{
 				Name: "Im0", ID: 1,
 				CTM:  content.Matrix{612, 0, 0, 792, 0, 0},
 				Box:  contentBox(0, 100, 612, 100.4),
 				Clip: &content.Box{LLX: 0, LLY: 100, URX: 612, URY: 100.4},
+			}}},
+			want: ""},
+		// A clip DISJOINT from the placement, which is what clipped-away is for:
+		// intersectBox clamps the pair to a degenerate box at the near corner
+		// (internal/content/walk.go), so the extent is zero on both axes and
+		// nothing renders. Unlike the sliver above, no rounding is involved in
+		// telling these apart.
+		{name: "a clip disjoint from the placement leaves no extent and diverts",
+			scan: &contentScan{Images: []content.Placement{{
+				Name: "Im0", ID: 1,
+				CTM:  content.Matrix{612, 0, 0, 792, 0, 0},
+				Box:  contentBox(612, 0, 612, 0),
+				Clip: &content.Box{LLX: 700, LLY: 0, URX: 800, URY: 792},
 			}}},
 			want: "clipped-away"},
 		// A clip WAS in effect and still narrowed nothing: `0 0 612 792 re W n`
