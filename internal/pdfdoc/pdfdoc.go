@@ -216,6 +216,10 @@ type Doc interface {
 	// bytes and the file type pdfcpu inferred. The id is the one XObject
 	// returned; an id this document has not resolved is an error.
 	RawImage(id int) (data []byte, fileType string, err error)
+	// RawImageGlobals returns the JBIG2 page-0 segments an image's
+	// /DecodeParms names in /JBIG2Globals, decoded, and nil when it names
+	// none. See the method for why it is separate from RawImage.
+	RawImageGlobals(id int) ([]byte, error)
 	// ReplaceImage and Write are the write half; see write.go. They are on the
 	// same interface because writing requires the context Open normalized, so
 	// there is no way to reach them from a document Byblos did not read.
@@ -690,6 +694,93 @@ func (d *doc) RawImage(id int) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("byblos/pdfdoc: reading image %d: %w", id, err)
 	}
 	return b, im.FileType, nil
+}
+
+// RawImageGlobals returns the JBIG2 page-0 segments image id declares in
+// /DecodeParms /JBIG2Globals, decoded, or nil when it declares none.
+//
+// IT IS SEPARATE FROM RawImage BECAUSE THE TWO ARE DIFFERENT STREAMS, and PDF
+// gives them different lifetimes on purpose. The image stream is one page. The
+// globals stream is shared: a bulk scanner writes one symbol dictionary for a
+// whole document and every page's image dictionary points at it, so the same
+// bytes come back for hundreds of ids. Returning them concatenated with the
+// image would be wrong in both directions -- it would multiply the dictionary
+// by the page count, and it would put page-0 segments in front of a page-1
+// stream, which is not what ISO 32000-1:2008 7.4.7 describes.
+//
+// pdfcpu's ExtractImage is no help here. It renders the IMAGE, and for JBIG2 it
+// hands the stream back opaque (see RawImage), so /DecodeParms is never looked
+// at by anything upstream of this.
+//
+// ABSENCE IS NOT AN ERROR and unreadability is. A generic-region JBIG2 image
+// legitimately carries no globals -- byblos's own encoder writes none -- so nil
+// is the ordinary answer. A /JBIG2Globals entry that is present and does not
+// resolve to a stream is the opposite case: those segments are needed, and
+// decoding without them composes a text region against an empty symbol list and
+// yields a blank page rather than an error.
+func (d *doc) RawImageGlobals(id int) (globals []byte, err error) {
+	// The one path in this package that dereferences an arbitrary indirect
+	// object named by an image dictionary and then runs pdfcpu's filter chain
+	// over whatever it finds. That is the shape catchPanic exists for (see
+	// ErrMalformed): a corrupt /JBIG2Globals object would otherwise take the
+	// whole run down instead of diverting one page, which is the loss byb-avp
+	// fixed at the Page boundary.
+	defer catchPanic(fmt.Sprintf("reading /JBIG2Globals for image %d", id), &err)
+
+	sd, ok := d.streams[id]
+	if !ok {
+		return nil, fmt.Errorf("byblos/pdfdoc: image %d has not been resolved on this document", id)
+	}
+	parms := d.decodeParms(sd.Dict)
+	if parms == nil {
+		return nil, nil
+	}
+	obj, ok := parms.Find("JBIG2Globals")
+	if !ok {
+		return nil, nil
+	}
+	gsd, _, err := d.ctx.XRefTable.DereferenceStreamDict(obj)
+	if err != nil {
+		return nil, fmt.Errorf("byblos/pdfdoc: image %d: resolving /JBIG2Globals: %w", id, err)
+	}
+	if gsd == nil {
+		return nil, fmt.Errorf("byblos/pdfdoc: image %d: /JBIG2Globals does not resolve to a stream", id)
+	}
+	if err := gsd.Decode(); err != nil {
+		return nil, fmt.Errorf("byblos/pdfdoc: image %d: decoding /JBIG2Globals: %w", id, err)
+	}
+	return gsd.Content, nil
+}
+
+// decodeParms returns the /DecodeParms dictionary that belongs to the LAST
+// entry of dict's /Filter -- the image codec, by the same argument filterName
+// makes for reading the last entry rather than the first.
+//
+// /DecodeParms is parallel to /Filter (ISO 32000-1:2008 7.4.1, table 5): a
+// dictionary when /Filter is a name, an array of the same length when /Filter
+// is an array, with a null in the slot of every filter that takes no
+// parameters. A lone dictionary against a filter array is out of specification
+// and files write it anyway; it is accepted here because there is only one
+// filter in the chain that takes parameters and only one dictionary offered, so
+// nothing is being guessed at.
+func (d *doc) decodeParms(dict types.Dict) types.Dict {
+	parms := d.deref(dict["DecodeParms"])
+	arr, isArray := parms.(types.Array)
+	if !isArray {
+		p, _ := parms.(types.Dict)
+		return p
+	}
+	// Index by the filter chain, so a two-filter image takes the second
+	// dictionary rather than the first.
+	i := len(arr) - 1
+	if f, ok := d.deref(dict["Filter"]).(types.Array); ok && len(f) <= len(arr) {
+		i = len(f) - 1
+	}
+	if i < 0 || i >= len(arr) {
+		return nil
+	}
+	p, _ := d.deref(arr[i]).(types.Dict)
+	return p
 }
 
 func (d *doc) number(o types.Object) (float64, bool) {

@@ -374,11 +374,20 @@ func TestDecodeRejectsRatherThanGuesses(t *testing.T) {
 		// Segment type 36 is an intermediate generic region, destined for an
 		// auxiliary buffer rather than the page.
 		"intermediate-generic": setByte(base, 11+19+4, 36),
-		"symbol-dictionary":    setByte(base, 11+19+4, 0),
-		"text-region":          setByte(base, 11+19+4, 6),
+		"intermediate-text":    setByte(base, 11+19+4, 4),
 		"refinement-region":    setByte(base, 11+19+4, 42),
 		"halftone-region":      setByte(base, 11+19+4, 22),
+		"pattern-dictionary":   setByte(base, 11+19+4, 16),
 	}
+	// SYMBOL DICTIONARY (type 0) AND TEXT REGION (types 6 and 7) USED TO BE HERE
+	// and byb-9v0 removed them, because relabelling a generic region segment as
+	// one of those does not produce a legal stream -- it produces a generic
+	// region body being read as a symbol dictionary header, which is damage. The
+	// cases passed only because the dispatch refused by segment type before
+	// parsing anything, so what they pinned was the refusal and not the reason
+	// for it. The legal streams byblos still declines in those types are the
+	// Huffman and refinement variants, and they are pinned in symbol_test.go
+	// against a fixture a real encoder wrote.
 	for name, stream := range cases {
 		t.Run(name, func(t *testing.T) {
 			got, err := DecodeEmbeddedStream(stream)
@@ -761,10 +770,11 @@ func TestParseSegmentsHeaderArithmetic(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := parseSegments(c.h.bytes())
+			parsed, err := parseSegments(c.h.bytes())
 			if err != nil {
 				t.Fatalf("parseSegments() error = %v", err)
 			}
+			got := parsed.segs
 			if len(got) != 1 {
 				t.Fatalf("parseSegments() returned %d segments; want 1", len(got))
 			}
@@ -792,10 +802,11 @@ func TestParseSegmentsHeaderArithmetic(t *testing.T) {
 		second := handHeader{num: 70001, typ: segTypeImmediateGenericRegion,
 			refs: []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9}, refBytes: 4,
 			longCount: true, retainBytes: 2, deferred: true, data: []byte{0x33}}
-		got, err := parseSegments(append(first.bytes(), second.bytes()...))
+		parsed, err := parseSegments(append(first.bytes(), second.bytes()...))
 		if err != nil {
 			t.Fatalf("parseSegments() error = %v", err)
 		}
+		got := parsed.segs
 		if len(got) != 2 {
 			t.Fatalf("parseSegments() returned %d segments; want 2", len(got))
 		}
@@ -1774,7 +1785,10 @@ func TestDecodeRefusesAStreamWithNoRegionSegment(t *testing.T) {
 		t.Fatalf("PageSize() = %dx%d, err = nil; a stream with no region segment declares a "+
 			"page and carries nothing to put on it", w, h)
 	}
-	if !strings.Contains(err.Error(), "no immediate generic region segment") {
+	// "region", not "generic region": since byb-9v0 a text region is also
+	// something this decoder will put on a page, so a stream carrying one is not
+	// a stream with nothing on it.
+	if !strings.Contains(err.Error(), "no immediate region segment") {
 		t.Errorf("error = %v; want the refusal to name the missing region segment", err)
 	}
 	if errors.Is(err, ErrUnsupportedFeature) {
@@ -2105,10 +2119,11 @@ func TestSegmentCountBoundAdmitsLegitimateStreams(t *testing.T) {
 		if err != nil {
 			t.Fatalf("EmbeddedStream() error = %v", err)
 		}
-		segs, err := parseSegments(s)
+		parsed, err := parseSegments(s)
 		if err != nil {
 			t.Fatalf("parseSegments() on this package's own output: %v", err)
 		}
+		segs := parsed.segs
 		if len(segs) != 2 {
 			t.Errorf("EmbeddedStream wrote %d segments; want 2. The doc comment on "+
 				"DecodeJBIG2Generic states that count as the headroom under the %d-segment "+

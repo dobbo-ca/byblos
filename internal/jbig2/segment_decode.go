@@ -50,7 +50,7 @@ var ErrUnsupportedFeature = errors.New("jbig2: unsupported feature")
 //
 // THAT LAST CLAUSE IS NOT "HAVING ALLOCATED NOTHING", which is what an earlier
 // version of this comment claimed. Reading the headers is itself an allocation
-// -- one 32-byte descriptor per segment, plus the slice growth to hold them --
+// -- one 40-byte descriptor per segment, plus the slice growth to hold them --
 // and it is the one cost these rules cannot charge for, because it is paid in
 // order to find out what to charge. Measured on this code with rule 5 removed:
 // 1,114,113 one-pixel region segments in 41,222,211 bytes of stream, refused by
@@ -60,12 +60,14 @@ var ErrUnsupportedFeature = errors.New("jbig2: unsupported feature")
 // bounds that, and it is the only one of the five that cannot wait for the
 // headers to finish parsing.
 //
-// Five rules, each bounding a different thing. Four are evaluated in planStream
+// Seven rules, each bounding a different thing. Four are evaluated in planStream
 // from segment headers alone; the fifth runs inside parseSegments, while the
-// headers are still being read, because what it bounds is the reading. They are
-// whole-STREAM rules: a stream may carry any number of individually legal
-// regions, every one decoded and RETAINED until the page is composed, so
-// bounding each region on its own bounds nothing.
+// headers are still being read, because what it bounds is the reading. The last
+// two are symbol mode's, and byb-9v0 added them; rule 6 is a header rule like
+// the first four, and rule 7 IS NOT AND CANNOT BE ONE. They are whole-STREAM
+// rules: a stream may carry any number of individually legal regions, every one
+// decoded and RETAINED until the page is composed, so bounding each region on
+// its own bounds nothing.
 //
 //  1. OUTPUT. The page is at most MaxPagePixels. The page is the only thing a
 //     caller gets back, and the PDF layer expands it to one byte per pixel, so
@@ -154,9 +156,9 @@ var ErrUnsupportedFeature = errors.New("jbig2: unsupported feature")
 //     that is checked as they are parsed rather than afterwards. Rules 1-4 all
 //     count PACKED BITMAP BYTES, so nothing in them sees per-segment object
 //     overhead at all: a one-pixel region is one byte of bitmap and about 190
-//     bytes of everything else -- a 32-byte descriptor in the parsed-segment
-//     slice and again in the region slice, a 48-byte entry in the decode
-//     slice, a Bitmap header, and the slice growth behind each of those. On a
+//     bytes of everything else -- a 40-byte descriptor in the parsed-segment
+//     slice and again in the work slice, a 48-byte entry in the decode slice, a
+//     Bitmap header, and the slice growth behind each of those. On a
 //     stream of one-pixel regions the budget being charged is a thousandth of
 //     the memory actually being used, which is how 41 MB of input reached
 //     393.9 MiB with every one of rules 1-4 satisfied.
@@ -180,20 +182,59 @@ var ErrUnsupportedFeature = errors.New("jbig2: unsupported feature")
 //     the cap. What the cap refuses is a stream with more region segments than
 //     the page it declares has rows, which is a stream no encoder produces.
 //
-//     What it costs at the cap, measured on this code: a stream of 65,536
-//     segments -- one page information segment and 65,535 one-pixel regions --
-//     is 2,424,825 bytes, parses in 2.0 ms, and allocates 10.6 MiB of segment
-//     descriptors, 12.6 MiB by the time planStream has collected the region
-//     segments into their own slice. That is inside the 16 MiB rules 1-4
-//     already concede for bitmap, which is the property worth having: the worst
-//     header cost is now the same order as the worst bitmap cost instead of
-//     being set by the input length. ONE SEGMENT PAST THE CAP is refused in
-//     0.6 ms through PageSize having allocated 10.6 MiB and no more, whatever
-//     the rest of the stream claims -- and so is a stream FOUR TIMES the cap, at
-//     the same 10.6 MiB, which is the property in one line. The check is made
-//     INSIDE parseSegments, where the slice is built, and that is what buys it;
-//     it is NOT that the check sits before the append, and an earlier version of
-//     this comment said it was. See the comment at the check.
+//     What it costs at the cap, REMEASURED FOR byb-9v0 because the descriptor
+//     grew: a stream of 65,536 segments -- one page information segment and
+//     65,535 one-pixel regions -- is 2,424,825 bytes and allocates 13.3 MiB of
+//     segment descriptors, 15.8 MiB by the time planStream has collected the
+//     content segments into their own slice. That is inside the 16 MiB rules
+//     1-4 already concede for bitmap, which is the property worth having: the
+//     worst header cost is the same order as the worst bitmap cost instead of
+//     being set by the input length. ONE SEGMENT PAST THE CAP is refused
+//     through PageSize having allocated 13.3 MiB and no more, whatever the rest
+//     of the stream claims -- and so is a stream SEVENTEEN TIMES the cap
+//     (41,222,174 bytes), at the same 13.3 MiB, which is the property in one
+//     line. The check is made INSIDE parseSegments, where the slice is built,
+//     and that is what buys it; it is NOT that the check sits before the
+//     append, and an earlier version of this comment said it was. See the
+//     comment at the check.
+//
+//     THE FIGURES WERE 10.6 AND 12.6 MiB BEFORE byb-9v0 and the difference is
+//     eight bytes per descriptor: a text region names its symbol dictionary by
+//     segment number and by nothing else, so the referred-to numbers parseSegments
+//     used to step over are now retained, as a range into one shared slab. The
+//     margin under 16 MiB is what made that affordable and it is not large. It
+//     was spent once already and recovered: collecting the regions into a slice
+//     of their own ON TOP of the work slice cost another 2.6 MiB at the cap and
+//     took the figure to 18.3 MiB, outside the concession, which is why
+//     planStream keeps one list and a count. A third slice does not fit.
+//
+//     The slab itself is rule 5's other half, bounded by maxStreamRefs at the
+//     check in parseSegments.
+//
+//  6. SYMBOL AND INSTANCE COUNTS -- a header rule, byb-9v0's. SDNUMNEWSYMS and
+//     SBNUMINSTANCES are four bytes each, so a twenty-byte segment asks for four
+//     billion symbol slots or four billion placements. Bounded by
+//     maxStreamSymbols and maxStreamInstances, from the headers, exactly as
+//     rules 1-4 are.
+//
+//  7. SYMBOL WORK -- and this one is NOT a header rule, because it cannot be.
+//     Every rule above rests on a region segment stating its size in its header.
+//     A symbol dictionary states no such thing: T.88 6.5.5 codes symbol heights
+//     and widths as arithmetic deltas INSIDE the coded data, so there is no
+//     arithmetic over the header fields that bounds the work, the header not
+//     containing the terms. A text region breaks it the other way -- its header
+//     does state its size and its instance count, and its cost is neither, being
+//     the sum of the areas of symbols that live in another segment or another
+//     STREAM.
+//
+//     So rule 7 is charged DURING decoding, before each allocation and each
+//     placement, and it continues rules 2 and 4's running totals rather than
+//     starting its own: a stream whose regions have already spent the pixel
+//     budget has none left for its symbols. Placement gets rule 3's shape and
+//     its own total, because a placement pixel is not an MQ decision and costs
+//     about a sixth as much. The derivation, the measurement behind that sixth,
+//     and why a shared budget would refuse a legitimate 600-dpi scan are in
+//     budget_symbol.go.
 //
 // THE MAGNITUDES ARE A PRODUCT DECISION, not a security one, and they are the
 // only thing here to retune. There is no bound derivable from the input length,
@@ -358,14 +399,41 @@ const (
 	maxRegionOverdraw    = 4
 	overdrawFloorPixels  = 1 << 16
 	maxStreamSegments    = 1 << 16
+	maxStreamRefs        = 4 * maxStreamSegments
 )
 
 // segment is one parsed T.88 7.2 segment header together with the slice of the
 // input holding its data. The data is not copied.
+//
+// refFirst and refCount are a range in the parsed stream's shared refs slab,
+// not a slice, and that is a memory decision rule 5 already made once. A
+// []uint32 field would be a 24-byte slice header on EVERY descriptor and grow
+// this struct from 32 bytes to 56 -- three quarters more on the one allocation
+// rule 5 exists to bound, paid by every stream including the generic-region
+// ones that refer to nothing. Two uint32s cost 8 bytes and one shared
+// allocation for the whole stream. See parseSegments for what bounds the slab.
 type segment struct {
-	number uint32
-	typ    byte
-	data   []byte
+	number   uint32
+	typ      byte
+	data     []byte
+	refFirst uint32
+	refCount uint32
+}
+
+// parsedStream is what parseSegments produces: the segment descriptors and the
+// slab their referred-to segment numbers live in.
+type parsedStream struct {
+	segs []segment
+	refs []uint32
+}
+
+// refsOf returns the segment numbers sg refers to, in the order the header
+// lists them. THE ORDER IS LOAD-BEARING, not incidental: a text region's symbol
+// list is the exported symbols of its referred-to dictionaries concatenated in
+// exactly this order (T.88 7.4.3.1.7), so sorting or de-duplicating this slice
+// renumbers every symbol the region places.
+func (p parsedStream) refsOf(sg segment) []uint32 {
+	return p.refs[sg.refFirst : sg.refFirst+sg.refCount]
 }
 
 // parseSegments walks the sequence of segment headers in the embedded file
@@ -388,8 +456,9 @@ type segment struct {
 // is documented at the check: segments that disagree about which page they are
 // on are refused, and holding the field long enough to compare it in planStream
 // would cost every stream a wider segment descriptor.
-func parseSegments(s []byte) ([]segment, error) {
+func parseSegments(s []byte) (parsedStream, error) {
 	var out []segment
+	var refSlab []uint32
 	// The page every segment that names one is on, and the segment it was first
 	// seen from. Zero means "no segment has named a page yet", which is exactly
 	// the value T.88 7.2.6 gives a segment associated with no page.
@@ -402,7 +471,7 @@ func parseSegments(s []byte) ([]segment, error) {
 		// read below safe without a check of its own: rest[4], rest[5], and the
 		// four-byte long-form count at rest[5:9] are all inside it.
 		if len(rest) < 11 {
-			return nil, fmt.Errorf("jbig2: segment header at offset %d is %d bytes; the minimum is 11", off, len(rest))
+			return parsedStream{}, fmt.Errorf("jbig2: segment header at offset %d is %d bytes; the minimum is 11", off, len(rest))
 		}
 		num := binary.BigEndian.Uint32(rest[0:4])
 		flags := rest[4]
@@ -424,7 +493,7 @@ func parseSegments(s []byte) ([]segment, error) {
 		if count == 7 {
 			n := binary.BigEndian.Uint32(rest[i:i+4]) & 0x1FFFFFFF
 			if uint64(n) > uint64(len(s)) {
-				return nil, fmt.Errorf("jbig2: segment %d: refers to %d segments in a %d-byte stream", num, n, len(s))
+				return parsedStream{}, fmt.Errorf("jbig2: segment %d: refers to %d segments in a %d-byte stream", num, n, len(s))
 			}
 			count = int(n)
 			i += 4 + (count+8)/8
@@ -441,6 +510,7 @@ func parseSegments(s []byte) ([]segment, error) {
 		case num > 256:
 			refSize = 2
 		}
+		refOff := i
 		i += count * refSize
 
 		// Page association (T.88 7.2.6): four bytes when bit 6 of the flags is
@@ -468,7 +538,7 @@ func parseSegments(s []byte) ([]segment, error) {
 		// added to a negative pageOff -- so it is dead on this build for the same
 		// reason and guarded here for the same reason.
 		if i < 0 || pageOff < 0 || i+4 > len(rest) {
-			return nil, fmt.Errorf("jbig2: segment %d: header runs past the end of the stream", num)
+			return parsedStream{}, fmt.Errorf("jbig2: segment %d: header runs past the end of the stream", num)
 		}
 
 		// The page association is readable now, and only now: pageOff+pageLen is
@@ -519,7 +589,7 @@ func parseSegments(s []byte) ([]segment, error) {
 			if streamPage == 0 {
 				streamPage, streamPageSeg = page, num
 			} else if page != streamPage {
-				return nil, fmt.Errorf("jbig2: segment %d is associated with page %d but segment %d "+
+				return parsedStream{}, fmt.Errorf("jbig2: segment %d is associated with page %d but segment %d "+
 					"is associated with page %d; an embedded JBIG2 stream carries exactly one page "+
 					"(ISO 32000-1:2008 7.4.7)", num, page, streamPageSeg, streamPage)
 			}
@@ -528,10 +598,10 @@ func parseSegments(s []byte) ([]segment, error) {
 		dataLen := binary.BigEndian.Uint32(rest[i : i+4])
 		i += 4
 		if dataLen == 0xFFFFFFFF {
-			return nil, fmt.Errorf("%w: segment %d has an unknown data length", ErrUnsupportedFeature, num)
+			return parsedStream{}, fmt.Errorf("%w: segment %d has an unknown data length", ErrUnsupportedFeature, num)
 		}
 		if uint64(dataLen) > uint64(len(rest)-i) {
-			return nil, fmt.Errorf("jbig2: segment %d declares %d bytes of data but only %d remain",
+			return parsedStream{}, fmt.Errorf("jbig2: segment %d declares %d bytes of data but only %d remain",
 				num, dataLen, len(rest)-i)
 		}
 		// Rule 5, charged here because this append is the allocation it bounds.
@@ -549,17 +619,51 @@ func parseSegments(s []byte) ([]segment, error) {
 		// the same figure, not merely a close one. Nothing in the tree can
 		// distinguish the two placements and nothing should try to.
 		if len(out) == maxStreamSegments {
-			return nil, fmt.Errorf("jbig2: stream carries more than %d segments; the limit is "+
+			return parsedStream{}, fmt.Errorf("jbig2: stream carries more than %d segments; the limit is "+
 				"one region per row of the tallest page these budgets admit, and no encoder "+
 				"writes a page with more regions than it has rows", maxStreamSegments)
 		}
-		out = append(out, segment{number: num, typ: typ, data: rest[i : i+int(dataLen)]})
+		// The referred-to segment numbers, read now that the header is known to
+		// be all there. They were stepped over before byb-9v0 and are retained
+		// now because a text region's symbol list is defined by them: the
+		// symbols it may place are the ones its referred-to dictionaries
+		// exported, in this order, and nothing else in the stream identifies
+		// which dictionary a region belongs to.
+		//
+		// Rule 5's other half, and it is charged here for the same reason the
+		// segment count is: this slab is an allocation the budgets cannot see
+		// once it exists. maxStreamRefs = 4 * maxStreamSegments comes out of
+		// T.88 7.2.4 rather than out of a fixture -- four is the largest count
+		// the SHORT form of the referred-to field encodes, so a stream averaging
+		// more than four references per segment is one whose every segment took
+		// the long form to refer to more segments than a decoder can use. At the
+		// cap the slab is 1 MiB, against the 16 MiB rules 1-4 already concede.
+		if len(refSlab)+count > maxStreamRefs {
+			return parsedStream{}, fmt.Errorf("jbig2: segment %d: the stream refers to more than %d "+
+				"segments in total; the limit is %d per segment at the segment cap, which is the most "+
+				"the short form of T.88 7.2.4's referred-to field encodes",
+				num, maxStreamRefs, maxStreamRefs/maxStreamSegments)
+		}
+		first := uint32(len(refSlab))
+		for k := 0; k < count; k++ {
+			p := rest[refOff+k*refSize : refOff+(k+1)*refSize]
+			var v uint32
+			for _, b := range p {
+				v = v<<8 | uint32(b)
+			}
+			refSlab = append(refSlab, v)
+		}
+
+		out = append(out, segment{
+			number: num, typ: typ, data: rest[i : i+int(dataLen)],
+			refFirst: first, refCount: uint32(count),
+		})
 		off += i + int(dataLen)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("jbig2: stream contains no segments")
+		return parsedStream{}, errors.New("jbig2: stream contains no segments")
 	}
-	return out, nil
+	return parsedStream{segs: out, refs: refSlab}, nil
 }
 
 // regionInfo is the region segment information field of T.88 7.4.1: 17 bytes
@@ -710,10 +814,44 @@ func composite(page, region *Bitmap, x0, y0 int, op byte) {
 // yield a raster that is wrong without being detectably wrong, which is a
 // strictly worse outcome for a caller than an error it can route around.
 //
-// Page-0 (global) segments carried in a PDF /JBIG2Globals stream are not
-// consulted. They only ever hold symbol dictionaries and pattern dictionaries,
-// which nothing here can use.
+// Page-0 (global) segments carried in a PDF /JBIG2Globals stream are consulted
+// when the caller supplies them; see DecodeEmbeddedStreamWithGlobals, which this
+// is the no-globals case of.
 func DecodeEmbeddedStream(s []byte) (*Bitmap, error) {
+	return DecodeEmbeddedStreamWithGlobals(nil, s)
+}
+
+// DecodeEmbeddedStreamWithGlobals decodes an embedded JBIG2 bitstream together
+// with the page-0 segments a PDF /JBIG2Globals object carries for it.
+//
+// THE TWO STREAMS ARE ONE STREAM, and PDF splits them for a reason that has
+// nothing to do with decoding: a bulk scanner writes one symbol dictionary for a
+// whole document and every page's image dictionary points at the same object, so
+// the alphabet is stored once and the typesetting per page. T.88 knows nothing
+// of the split -- the segments are simply the globals' followed by the page's,
+// which is what this concatenates them into.
+//
+// Concatenating the BYTES rather than merging two parses is deliberate. Rule 5
+// bounds the cost of reading segment headers, and it can only do that from one
+// place; two parses with two caps would admit twice the headers, and a globals
+// stream is exactly as untrusted as the page stream. The copy costs the length
+// of the globals per page, which is what a shared dictionary is small enough
+// for.
+//
+// It decodes immediate generic regions (GBTEMPLATE 0, nominal AT), symbol
+// dictionaries and immediate text regions, both arithmetically coded. Everything
+// else in JBIG2 -- Huffman symbol coding, refinement, halftones, MMR, the other
+// three generic templates, non-nominal AT pixels, intermediate regions destined
+// for an auxiliary buffer -- is reported as ErrUnsupportedFeature and decoded by
+// nobody. That is deliberate: a stream this package half-understands would yield
+// a raster that is wrong without being detectably wrong, which is a strictly
+// worse outcome for a caller than an error it can route around.
+func DecodeEmbeddedStreamWithGlobals(globals, s []byte) (*Bitmap, error) {
+	if len(globals) > 0 {
+		joined := make([]byte, 0, len(globals)+len(s))
+		joined = append(joined, globals...)
+		s = append(joined, s...)
+	}
 	p, err := planStream(s)
 	if err != nil {
 		return nil, err
@@ -723,13 +861,48 @@ func DecodeEmbeddedStream(s []byte) (*Bitmap, error) {
 		b    *Bitmap
 		info regionInfo
 	}
-	decoded := make([]placed, 0, len(p.regions))
-	for _, sg := range p.regions {
-		b, info, err := decodeGenericRegionSegment(sg.data)
-		if err != nil {
-			return nil, fmt.Errorf("jbig2: segment %d: %w", sg.number, err)
+	decoded := make([]placed, 0, p.regionCount)
+	// Exported symbols, keyed by the dictionary segment that exported them.
+	// A text region names its dictionaries by segment number and by nothing
+	// else, so this is the only way back from a reference to a symbol list.
+	exported := map[uint32][]*Bitmap{}
+
+	for _, sg := range p.work {
+		switch sg.typ {
+		case segTypeSymbolDictionary:
+			input, err := symbolsFor(p, sg, exported)
+			if err != nil {
+				return nil, err
+			}
+			syms, err := decodeSymbolDict(sg, input, p.budget)
+			if err != nil {
+				return nil, fmt.Errorf("jbig2: segment %d: %w", sg.number, err)
+			}
+			if _, dup := exported[sg.number]; dup {
+				return nil, fmt.Errorf("jbig2: two symbol dictionaries are both numbered %d; T.88 7.2.2 "+
+					"numbers the segments of a file uniquely, and a text region names its dictionary by "+
+					"that number alone", sg.number)
+			}
+			exported[sg.number] = syms
+
+		case segTypeImmediateTextRegion, segTypeImmediateLosslessTextRegion:
+			syms, err := symbolsFor(p, sg, exported)
+			if err != nil {
+				return nil, err
+			}
+			b, info, err := decodeTextRegion(sg, syms, p.budget)
+			if err != nil {
+				return nil, fmt.Errorf("jbig2: segment %d: %w", sg.number, err)
+			}
+			decoded = append(decoded, placed{b, info})
+
+		default:
+			b, info, err := decodeGenericRegionSegment(sg.data)
+			if err != nil {
+				return nil, fmt.Errorf("jbig2: segment %d: %w", sg.number, err)
+			}
+			decoded = append(decoded, placed{b, info})
 		}
-		decoded = append(decoded, placed{b, info})
 	}
 
 	out := NewBitmap(p.pageW, p.pageH)
@@ -745,6 +918,35 @@ func DecodeEmbeddedStream(s []byte) (*Bitmap, error) {
 	return out, nil
 }
 
+// symbolsFor returns the symbol list a segment's referred-to dictionaries
+// export, concatenated in the order the header refers to them (T.88 7.4.3.1.7).
+//
+// THE ORDER IS THE NUMBERING. A text region identifies a symbol by its index in
+// this list, so referring to dictionaries A then B and referring to B then A
+// produce two different alphabets from the same segments. Nothing else in the
+// stream carries the mapping, which is why parseSegments retains the referred-to
+// numbers in header order rather than sorting or de-duplicating them.
+//
+// A reference to a segment that is not a symbol dictionary is IGNORED rather
+// than refused: a text region legitimately refers to the table segments its
+// Huffman tables live in, and a decoder that refused those would refuse the
+// arithmetic regions beside them.
+func symbolsFor(p streamPlan, sg segment, exported map[uint32][]*Bitmap) ([]*Bitmap, error) {
+	var out []*Bitmap
+	for _, n := range p.parsed.refsOf(sg) {
+		syms, ok := exported[n]
+		if !ok {
+			continue
+		}
+		out = append(out, syms...)
+	}
+	if len(out) > maxStreamSymbols {
+		return nil, fmt.Errorf("jbig2: segment %d refers to %d symbols; the limit is %d",
+			sg.number, len(out), int64(maxStreamSymbols))
+	}
+	return out, nil
+}
+
 // PageSize reports the page a stream resolves to, reading only its headers.
 // Every refusal DecodeEmbeddedStream makes before decoding -- a malformed
 // header, a segment type this package will not touch, the resource budgets --
@@ -755,6 +957,22 @@ func DecodeEmbeddedStream(s []byte) (*Bitmap, error) {
 // between refusing a mismatched stream for the price of parsing 26-byte region
 // headers and refusing it after having decoded the whole page.
 func PageSize(s []byte) (w, h int, err error) {
+	return PageSizeWithGlobals(nil, s)
+}
+
+// PageSizeWithGlobals is PageSize over a stream and the page-0 segments a PDF
+// /JBIG2Globals object carries for it.
+//
+// The globals matter to the ANSWER, not just to the refusals: a page whose only
+// region is a text region is refused outright without them -- the region refers
+// to a symbol dictionary that is not in the stream -- so asking for the page
+// size without them reports an error on a page that decodes.
+func PageSizeWithGlobals(globals, s []byte) (w, h int, err error) {
+	if len(globals) > 0 {
+		joined := make([]byte, 0, len(globals)+len(s))
+		joined = append(joined, globals...)
+		s = append(joined, s...)
+	}
 	p, err := planStream(s)
 	if err != nil {
 		return 0, 0, err
@@ -770,14 +988,25 @@ func PageSize(s []byte) (w, h int, err error) {
 type streamPlan struct {
 	pageW, pageH int
 	pageDefault  int
-	regions      []segment
+	// work is every segment that produces something -- symbol dictionaries and
+	// the regions composed onto the page -- in stream order, which is the order
+	// they must be decoded in.
+	work []segment
+	// regionCount is how many of work are regions. Kept as a count rather than
+	// as a second slice; see planStream.
+	regionCount int
+	parsed      parsedStream
+	// budget carries the header-time totals forward into decoding, where symbol
+	// sizes finally become knowable. See budget_symbol.go.
+	budget *streamBudget
 }
 
 func planStream(s []byte) (streamPlan, error) {
-	segs, err := parseSegments(s)
+	parsed, err := parseSegments(s)
 	if err != nil {
 		return streamPlan{}, err
 	}
+	segs := parsed.segs
 
 	// Region segments are collected rather than decoded so that a page
 	// information segment declaring the unknown height 0xFFFFFFFF (T.88
@@ -787,7 +1016,22 @@ func planStream(s []byte) (streamPlan, error) {
 	var pageDefault int
 	sawPageInfo := false
 	pageKnownHeight := true
-	regions := make([]segment, 0, len(segs))
+	// Symbol dictionaries and the regions that consume them go in ONE list in
+	// stream order, because that order is the only thing that sequences them: a
+	// text region's symbols come from dictionaries earlier in the stream, and
+	// T.88 7.2.5 guarantees a referred-to segment precedes the segment that
+	// refers to it. Decoding regions first and dictionaries after would resolve
+	// every symbol list against an empty dictionary.
+	//
+	// ONE list and not two, and that is rule 5's business rather than tidiness.
+	// A second slice holding just the regions would be another 40 bytes per
+	// segment on the allocation rule 5 exists to bound -- 2.6 MiB at the cap,
+	// which is what took the measured header cost of a stream AT the cap past
+	// the 16 MiB the bitmap rules concede. The budget loop below filters this
+	// list instead, which costs a comparison per segment and nothing else.
+	work := make([]segment, 0, len(segs))
+	var regionCount int
+	var symbolsDeclared, instancesDeclared int64
 
 	for _, sg := range segs {
 		switch sg.typ {
@@ -815,8 +1059,24 @@ func planStream(s []byte) (streamPlan, error) {
 			}
 			pageW, pageH = int(w), int(h)
 
-		case segTypeImmediateGenericRegion, segTypeImmediateLosslessGenericRegion:
-			regions = append(regions, sg)
+		case segTypeImmediateGenericRegion, segTypeImmediateLosslessGenericRegion,
+			segTypeImmediateTextRegion, segTypeImmediateLosslessTextRegion:
+			regionCount++
+			work = append(work, sg)
+
+		case segTypeSymbolDictionary:
+			// Header-time half of the symbol budget. The count is four bytes and
+			// the slots are allocated from it, so it is refused here rather than
+			// on the first symbol -- see budget_symbol.go.
+			h, err := parseSymbolDictHeader(sg.data)
+			if err != nil {
+				return streamPlan{}, fmt.Errorf("jbig2: segment %d: %w", sg.number, err)
+			}
+			if err := h.unsupported(); err != nil {
+				return streamPlan{}, fmt.Errorf("jbig2: segment %d: %w", sg.number, err)
+			}
+			symbolsDeclared += int64(h.numNew)
+			work = append(work, sg)
 
 		case segTypeEndOfPage, segTypeEndOfStripe, segTypeEndOfFile,
 			segTypeProfiles, segTypeTables, segTypeExtension:
@@ -831,6 +1091,10 @@ func planStream(s []byte) (streamPlan, error) {
 			// producer did not intend to be there.
 			return streamPlan{}, fmt.Errorf("%w: intermediate generic region (segment %d)", ErrUnsupportedFeature, sg.number)
 
+		case segTypeIntermediateTextRegion:
+			// The same, one region type over.
+			return streamPlan{}, fmt.Errorf("%w: intermediate text region (segment %d)", ErrUnsupportedFeature, sg.number)
+
 		default:
 			return streamPlan{}, fmt.Errorf("%w: segment type %d (segment %d)", ErrUnsupportedFeature, sg.typ, sg.number)
 		}
@@ -839,8 +1103,23 @@ func planStream(s []byte) (streamPlan, error) {
 	if !sawPageInfo {
 		return streamPlan{}, errors.New("jbig2: stream has no page information segment")
 	}
-	if len(regions) == 0 {
-		return streamPlan{}, errors.New("jbig2: stream has no immediate generic region segment")
+	if regionCount == 0 {
+		return streamPlan{}, errors.New("jbig2: stream has no immediate region segment")
+	}
+	// Text regions declare their instance count in the header, so the other
+	// header-time half of the symbol budget is charged from the same walk.
+	for _, sg := range work {
+		if sg.typ != segTypeImmediateTextRegion && sg.typ != segTypeImmediateLosslessTextRegion {
+			continue
+		}
+		h, err := parseTextRegionHeader(sg.data)
+		if err != nil {
+			return streamPlan{}, fmt.Errorf("jbig2: segment %d: %w", sg.number, err)
+		}
+		if err := h.unsupported(); err != nil {
+			return streamPlan{}, fmt.Errorf("jbig2: segment %d: %w", sg.number, err)
+		}
+		instancesDeclared += int64(h.numInstances)
 	}
 
 	// Everything below is read from region HEADERS. No coded data is touched
@@ -852,7 +1131,13 @@ func planStream(s []byte) (streamPlan, error) {
 	// with it, which keeps a malformed stream's error the one it was before
 	// these budgets existed.
 	var regionPixels, bmBytes int64
-	for _, sg := range regions {
+	for _, sg := range work {
+		if sg.typ == segTypeSymbolDictionary {
+			// It has no region information field and paints nothing. What it
+			// costs is charged during decoding, where its symbol sizes finally
+			// become knowable; see budget_symbol.go.
+			continue
+		}
 		info, err := parseRegionInfo(sg.data)
 		if err != nil {
 			continue
@@ -862,7 +1147,7 @@ func planStream(s []byte) (streamPlan, error) {
 		if regionPixels > MaxPagePixels || bmBytes > maxStreamBitmapBytes {
 			return streamPlan{}, fmt.Errorf("jbig2: segment %d: the stream's %d regions want to "+
 				"decode %d pixels into %d bytes; the budget for one stream is %d pixels in %d bytes",
-				sg.number, len(regions), regionPixels, bmBytes, int64(MaxPagePixels), int64(maxStreamBitmapBytes))
+				sg.number, regionCount, regionPixels, bmBytes, int64(MaxPagePixels), int64(maxStreamBitmapBytes))
 		}
 		// An unknown page height is resolved from the region headers, not from
 		// the decoded regions: a region placed at y = 0xFFFFFFFF asks for a
@@ -888,7 +1173,7 @@ func planStream(s []byte) (streamPlan, error) {
 	if pagePixels > MaxPagePixels || bmBytes > maxStreamBitmapBytes {
 		return streamPlan{}, fmt.Errorf("jbig2: a %dx%d page under %d region(s) wants %d page "+
 			"pixels and %d bytes of bitmap; the budget for one stream is %d pixels in %d bytes",
-			pageW, pageH, len(regions), pagePixels, bmBytes, int64(MaxPagePixels), int64(maxStreamBitmapBytes))
+			pageW, pageH, regionCount, pagePixels, bmBytes, int64(MaxPagePixels), int64(maxStreamBitmapBytes))
 	}
 
 	// Rule 3, and it runs here rather than in the loop above because a page of
@@ -900,9 +1185,30 @@ func planStream(s []byte) (streamPlan, error) {
 		return streamPlan{}, fmt.Errorf("jbig2: a %dx%d page under %d region(s) wants to decode "+
 			"%d pixels onto a page that can show %d; the budget admits %dx the page plus %d "+
 			"pixels, and everything past the page's edges is decoded and then discarded",
-			pageW, pageH, len(regions), regionPixels, pagePixels,
+			pageW, pageH, regionCount, regionPixels, pagePixels,
 			int64(maxRegionOverdraw), int64(overdrawFloorPixels))
 	}
 
-	return streamPlan{pageW: pageW, pageH: pageH, pageDefault: pageDefault, regions: regions}, nil
+	// The two header-time symbol rules. They are charged into the same budget
+	// the decode-time rules continue, so a stream cannot spend each in full.
+	budget := &streamBudget{
+		pixels: regionPixels, bmBytes: bmBytes,
+		pagePixels:     pagePixels,
+		placementLimit: maxRegionOverdraw*pagePixels + overdrawFloorPixels,
+	}
+	if err := budget.chargeSymbols(symbolsDeclared); err != nil {
+		return streamPlan{}, err
+	}
+	if err := budget.chargeInstances(instancesDeclared); err != nil {
+		return streamPlan{}, err
+	}
+	// Charged for the refusal only: each dictionary and region charges its own
+	// share again as it is decoded, and the running totals must not count them
+	// twice.
+	budget.symbols, budget.instances = 0, 0
+
+	return streamPlan{
+		pageW: pageW, pageH: pageH, pageDefault: pageDefault,
+		parsed: parsed, work: work, regionCount: regionCount, budget: budget,
+	}, nil
 }

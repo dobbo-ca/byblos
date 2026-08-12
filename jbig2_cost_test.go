@@ -262,7 +262,7 @@ func TestDecodeJBIG2PlacementAdmitsAFullResolutionPage(t *testing.T) {
 			info := func(int) (pdfdoc.ImageInfo, bool) {
 				return pdfdoc.ImageInfo{Width: c.w, Height: c.h}, true
 			}
-			_, err := decodeJBIG2Placement([]byte("garbage"), info, 7)
+			_, err := decodeJBIG2Placement([]byte("garbage"), nil, info, 7)
 			if err == nil {
 				t.Fatal("an unparseable stream must still be an error")
 			}
@@ -306,7 +306,7 @@ func TestDecodeJBIG2PlacementRefusesAnAbsurdDictionaryWithoutOpeningTheStream(t 
 	}
 	var first, firstName string
 	for name, s := range streams {
-		_, err := decodeJBIG2Placement(s, info, 7)
+		_, err := decodeJBIG2Placement(s, nil, info, 7)
 		if err == nil {
 			t.Fatalf("%s: a 65536x65536 dictionary must be refused", name)
 		}
@@ -357,7 +357,7 @@ func TestDecodeJBIG2PlacementComparesSizesBeforeDecoding(t *testing.T) {
 
 	before := jbig2.DecodedPixels()
 	start := time.Now()
-	got, err := decodeJBIG2Placement(data, info, 7)
+	got, err := decodeJBIG2Placement(data, nil, info, 7)
 	elapsed := time.Since(start)
 	decoded := jbig2.DecodedPixels() - before
 

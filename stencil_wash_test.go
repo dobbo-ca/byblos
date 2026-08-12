@@ -248,7 +248,7 @@ func stencilMarks(d pdfdoc.Doc, id int) ([]bool, int, int, error) {
 	var img image.Image
 	switch fileType {
 	case "jbig2":
-		img, err = decodeJBIG2Placement(data, d.ImageInfo, id)
+		img, err = decodeJBIG2Placement(data, nil, d.ImageInfo, id)
 	case "jpx":
 		return nil, 0, 0, errors.New("unsupported-codec-jpx")
 	default:

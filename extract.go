@@ -367,17 +367,31 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	case "jbig2":
 		// pdfcpu returns JBIG2 as opaque bytes rather than erroring, so nothing
 		// upstream of here has looked at them; image.Decode would not recognise
-		// them either. byblos decodes the generic-region subset itself
-		// (jbig2.go), which is exactly the subset EncodeJBIG2Generic writes, so
-		// a byblos-compressed page is re-extractable by byblos (byb-riy).
+		// them either. byblos decodes them itself (jbig2.go): the generic-region
+		// subset EncodeJBIG2Generic writes, so a byblos-compressed page is
+		// re-extractable by byblos (byb-riy), and since byb-9v0 the arithmetic
+		// symbol mode most archive scanners emit.
 		//
-		// Everything else JBIG2 can be -- symbol mode above all, which is what
-		// most archive scanners emit -- still diverts, under the SAME reason
-		// string as before. The taxonomy does not gain a term for it: a page
-		// that needs a fuller JBIG2 decoder and a page that needs any JBIG2
-		// decoder nominate the same capability, decode-jbig2, and splitting
-		// them is byb-z8j's to decide, not this site's.
-		img, err = decodeJBIG2Placement(data, d.ImageInfo, placement.ID)
+		// What still diverts is the rest -- Huffman symbol coding, refinement,
+		// halftones, MMR, the three generic templates byblos does not code --
+		// under the SAME reason string as before. The taxonomy does not gain a
+		// term for it: a page that needs a fuller JBIG2 decoder and a page that
+		// needs any JBIG2 decoder nominate the same capability, decode-jbig2,
+		// and splitting them is byb-z8j's to decide, not this site's.
+		//
+		// The symbol dictionary a text region places is very often not in this
+		// stream at all: a bulk scanner writes one per DOCUMENT and points every
+		// page's image dictionary at it through /DecodeParms /JBIG2Globals
+		// (byb-9v0). Without it such a page decodes to a blank raster rather
+		// than failing, so the globals are fetched here, and a failure to read
+		// an entry that IS there is a diverted page rather than a silent one.
+		globals, gerr := d.RawImageGlobals(placement.ID)
+		if gerr != nil {
+			countDivert("unsupported-codec-jbig2")
+			return nil, PageProvenance{Diverted: divertClass("unsupported-codec-jbig2")},
+				fmt.Errorf("%w: jbig2: %v", ErrUnsupportedImageCodec, gerr)
+		}
+		img, err = decodeJBIG2Placement(data, globals, d.ImageInfo, placement.ID)
 		if err != nil {
 			// No fileType interpolation here, unlike the sibling sites: every
 			// error this branch can produce already opens with "jbig2:", so

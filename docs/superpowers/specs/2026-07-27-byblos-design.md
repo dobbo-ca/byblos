@@ -515,6 +515,22 @@ compression than CCITT G4 for around 2-3k LOC of well-specified work.
 Lossless symbol-dictionary coding — better ratios, still zero substitution risk,
 substantially more complex — is recorded in `FUTURE.md` as the intended next step.
 
+**Scope note (byb-9v0): this section is about what Byblos WRITES, and Byblos now
+READS symbol mode.** The heading and the decision above are unchanged —
+`EncodeJBIG2Generic` emits a generic region and nothing else, and lossy symbol
+matching stays rejected. What changed is the other direction:
+`ExtractPageRaster` decodes arithmetically coded symbol dictionaries and text
+regions, including the dictionary a PDF keeps in `/DecodeParms /JBIG2Globals`.
+
+The two directions are not the same decision and it is worth saying why, because
+the section title reads as though they were. The substitution risk this section
+refuses belongs entirely to the encoder: it arises from an encoder *judging two
+glyphs alike*. A decoder makes no such judgement — it places the symbols the
+stream names, and a stream that says "glyph 6 goes here" gets glyph 6. Refusing
+to read symbol mode protected nobody from it; it only meant Byblos could not open
+54% of the JBIG2 pages in its own sample, which is what byb-9v0 measured and
+fixed.
+
 ---
 
 ## 6. Provenance and upgradeability (G3)
