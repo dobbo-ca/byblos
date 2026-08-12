@@ -159,7 +159,42 @@ func fork(self, capability, doc string, reps int) (bench.Sample, error) {
 	return s, nil
 }
 
-// cmdScore is implemented in Task 7.
+// cmdScore compares a head run against a committed baseline and prints the
+// markdown table. It exits non-zero when the candidate fails, so the workflow
+// can branch without parsing the table.
 func cmdScore(args []string) error {
-	return errors.New("not implemented")
+	fs := flag.NewFlagSet("score", flag.ExitOnError)
+	baselinePath := fs.String("baseline", "internal/bench/baseline.json", "committed baseline")
+	headPath := fs.String("head", "", "head run JSON")
+	out := fs.String("out", "", "where to write the markdown table; stdout if empty")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	base, err := bench.LoadBaseline(*baselinePath)
+	if err != nil {
+		return err
+	}
+	body, err := os.ReadFile(*headPath)
+	if err != nil {
+		return err
+	}
+	var head bench.Run
+	if err := json.Unmarshal(body, &head); err != nil {
+		return err
+	}
+
+	res := bench.Score(base, head)
+	md := res.Markdown()
+	if *out != "" {
+		if err := os.WriteFile(*out, []byte(md), 0o644); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(md)
+	}
+	if !res.Pass {
+		os.Exit(1)
+	}
+	return nil
 }
