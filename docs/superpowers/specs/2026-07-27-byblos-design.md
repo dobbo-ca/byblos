@@ -552,27 +552,19 @@ archive to discover that defeats Kleio's cost directive.
 
 Byblos therefore records **capabilities and what each page received**:
 
-```go
-type Provenance struct {
-    Version      string    // byblos semver, for humans and bug reports
-    Capabilities []string  // what this build could do at processing time
-    ProcessedAt  time.Time
-    Pages        []PageProvenance
+- `Version` is byblos semver, for humans and bug reports. It never drives the
+  upgrade decision — that is this section's whole point.
+- `Capabilities` is what this build could do at `ProcessedAt`. It is what the
+  upgrade decision reads instead.
+- `Optimized` names the branch `Optimize` (byb-b5) took; see §4 and §8.
+- One `PageProvenance` per page records what was `Applied` to that page, whether
+  it was `Diverted` and why, and the `Placement`, `Geometry` and `DroppedAnnots`
+  measured at write time (byb-b1.3, byb-b5.1).
 
-    // Optimized records which branch Optimize (byb-b5) took: "" (not known
-    // to have been rewritten), "rewritten", "rewritten-delinearized", or
-    // "rewritten-linearized" (byb-1y7). See §4 and §8.
-    Optimized string
-}
-
-type PageProvenance struct {
-    Applied       []string      // e.g. ["downsample-150", "jbig2-generic"]
-    Diverted      string        // e.g. "not-single-raster"; "" when handled normally
-    Placement     []float64     // paint matrix recorded at write time (byb-b1.3)
-    DroppedAnnots int           // annotations that painted but are not in the extracted raster
-    Geometry      *PageGeometry // raster/page boxes measured at write time (byb-b5.1)
-}
-```
+§4 declares `Provenance` and `PageProvenance`. This section deliberately does not
+repeat the declarations: two copies drift in the trailing glosses that no test
+can compare, which is how the two blocks came to gloss four of these fields
+differently while agreeing on every name and type (byb-vz1).
 
 `UpgradeCandidates` returns only the capability gaps that would change *this*
 document's output:
