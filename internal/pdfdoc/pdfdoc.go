@@ -132,7 +132,23 @@ type ImageInfo struct {
 	ImageMask     bool // /ImageMask: a stencil painted in the fill colour
 	SMask         bool // /SMask: a soft mask supplies per-pixel alpha
 	Mask          bool // /Mask: a stencil mask or a colour-key range
-	Decode        bool // /Decode is present: samples need a remap this struct does not carry
+	Decode        bool // /Decode is present: the samples need a remap
+
+	// DecodeArray is /Decode's elements when every one of them is a number,
+	// and nil otherwise — either the entry is absent, or it is present in a
+	// shape this cannot read.
+	//
+	// Decode and this field answer different questions and a caller must pick
+	// the one it means. "Is there a remap at all" is Decode, and an entry whose
+	// numbers could not be read is still a remap; optimize.go's eligibility
+	// test reads it that way. "What is the remap" is this, and nil means there
+	// is none to be had — never that the samples pass through unchanged.
+	//
+	// The values are as written. This does not supply the default array for an
+	// absent entry, because the default depends on the colour space and the
+	// bit depth (ISO 32000-1 table 39) and ColorSpace is deliberately not
+	// resolved here.
+	DecodeArray []float64
 
 	// Filter is the image codec the stream declares: /Filter when it is a
 	// name, the LAST entry when it is an array, and "" when /Filter is absent
@@ -494,17 +510,18 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 			}
 		}
 		d.images[id] = ImageInfo{
-			Name:       name,
-			ObjNr:      id,
-			Width:      d.intEntry(sd.Dict, "Width"),
-			Height:     d.intEntry(sd.Dict, "Height"),
-			BPC:        d.intEntry(sd.Dict, "BitsPerComponent"),
-			ImageMask:  d.boolEntry(sd.Dict, "ImageMask"),
-			SMask:      hasEntry(sd.Dict, "SMask"),
-			Mask:       hasEntry(sd.Dict, "Mask"),
-			Decode:     hasEntry(sd.Dict, "Decode"),
-			Filter:     d.filterName(sd.Dict),
-			ColorSpace: csName,
+			Name:        name,
+			ObjNr:       id,
+			Width:       d.intEntry(sd.Dict, "Width"),
+			Height:      d.intEntry(sd.Dict, "Height"),
+			BPC:         d.intEntry(sd.Dict, "BitsPerComponent"),
+			ImageMask:   d.boolEntry(sd.Dict, "ImageMask"),
+			SMask:       hasEntry(sd.Dict, "SMask"),
+			Mask:        hasEntry(sd.Dict, "Mask"),
+			Decode:      hasEntry(sd.Dict, "Decode"),
+			DecodeArray: d.numberArray(sd.Dict, "Decode"),
+			Filter:      d.filterName(sd.Dict),
+			ColorSpace:  csName,
 		}
 		// Keep the stream dictionary. RawImage renders from this rather than
 		// asking pdfcpu which objects a page uses, because that answer comes
@@ -754,6 +771,26 @@ func (d *doc) filterName(dict types.Dict) string {
 		}
 	}
 	return ""
+}
+
+// numberArray reads key as an array of numbers, and returns nil unless every
+// element is one. All-or-nothing on purpose: a partly-read array is a remap a
+// caller cannot apply, and returning it with holes in it invites applying it
+// anyway.
+func (d *doc) numberArray(dict types.Dict, key string) []float64 {
+	arr := d.arrayEntry(dict, key)
+	if len(arr) == 0 {
+		return nil
+	}
+	out := make([]float64, len(arr))
+	for i, o := range arr {
+		v, ok := d.number(o)
+		if !ok {
+			return nil
+		}
+		out[i] = v
+	}
+	return out
 }
 
 func (d *doc) arrayEntry(dict types.Dict, key string) types.Array {

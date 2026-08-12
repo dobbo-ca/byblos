@@ -28,7 +28,14 @@ package byblos
 //
 // So every row carries TWO verdicts: the gate that stopped extraction, and what
 // DecodeEmbeddedStream says about the bytes regardless of that gate. Only the
-// second prices byb-9v0; the difference between them prices byb-e7n.
+// second prices byb-9v0; the difference between them priced byb-e7n.
+//
+// byb-e7n then added three DICTIONARY columns -- decode, cs and bpc -- because
+// pricing the /Decode gate said how many pages it holds and not what it would
+// take to release them, and those are different questions. The first run to
+// carry them is the acceptance run for the fix: applying the array must empty
+// the decode-array gate, and any page left in it is one whose array byblos
+// still declines, named by its own columns rather than by inference.
 //
 // THE SENTINEL IS THE INTERNAL ONE, DELIBERATELY. errors.Is against the root
 // package's ErrUnsupportedJBIG2Feature reports false here, because
@@ -118,7 +125,33 @@ type jbig2Row struct {
 	// priced on.
 	coding  string
 	segType int // -1 when the message carried none
-	msg     string
+	// decode, cs and bpc are the dictionary facts that decide what a /Decode
+	// array MEANS, and byb-e7n added them. The array alone is not enough: the
+	// same [1 0] inverts a /DeviceGray sample and indexes a palette backwards
+	// in an /Indexed space, so the colour space and the bit depth travel with
+	// it. cs is "-" when /ColorSpace is an array or an indirect reference,
+	// which is exactly the case ImageInfo declines to resolve.
+	decode string
+	cs     string
+	bpc    int
+	msg    string
+}
+
+// decodeColumn formats an image's /Decode array for the census: "-" when the
+// entry is absent, "?" when it is present in a shape pdfdoc could not read as
+// numbers, and the numbers otherwise.
+func decodeColumn(info pdfdoc.ImageInfo) string {
+	switch {
+	case !info.Decode:
+		return "-"
+	case info.DecodeArray == nil:
+		return "?"
+	}
+	parts := make([]string, len(info.DecodeArray))
+	for i, v := range info.DecodeArray {
+		parts[i] = strconv.FormatFloat(v, 'g', -1, 64)
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 func (r jbig2Row) line() string {
@@ -132,6 +165,7 @@ func (r jbig2Row) line() string {
 		r.path, strconv.Itoa(r.page),
 		fmt.Sprintf("%dx%d", r.w, r.h),
 		r.gate, r.coding, strconv.Itoa(r.segType), name,
+		r.decode, r.cs, strconv.Itoa(r.bpc),
 		strings.ReplaceAll(r.msg, "\t", " "),
 	}, "\t")
 }
@@ -192,9 +226,13 @@ func censusFile(path string) (rows []jbig2Row, pages int) {
 		if err != nil || fileType != "jbig2" {
 			continue
 		}
-		r := jbig2Row{path: path, page: n, segType: -1}
+		r := jbig2Row{path: path, page: n, segType: -1, decode: "-", cs: "-"}
 		if info, ok := d.ImageInfo(placement.ID); ok {
 			r.w, r.h = info.Width, info.Height
+			r.decode, r.bpc = decodeColumn(info), info.BPC
+			if info.ColorSpace != "" {
+				r.cs = info.ColorSpace
+			}
 		}
 		// What stops extraction today.
 		if _, err := decodeJBIG2Placement(data, d.ImageInfo, placement.ID); err != nil {
@@ -286,11 +324,19 @@ func TestJBIG2CodingModeCensus(t *testing.T) {
 	byType := map[int]int{}
 	byGate := map[string]int{}
 	byCoding := map[string]int{}
+	// byDecode keys on the three dictionary facts together, because no one of
+	// them decides anything on its own (see jbig2Row.decode). Only rows that
+	// declare a /Decode array are counted; the rest are the "-" column and are
+	// already the difference between this total and byGate.
+	byDecode := map[string]int{}
 	for i := range paths {
 		for _, r := range per[i] {
 			total++
 			byGate[r.gate]++
 			byCoding[r.coding]++
+			if r.decode != "-" {
+				byDecode[fmt.Sprintf("%s cs=%s bpc=%d coding=%s", r.decode, r.cs, r.bpc, r.coding)]++
+			}
 			// The pages a /Decode fix alone would release: a dictionary fact
 			// stopped them and the bytes underneath decode cleanly. This is the
 			// number that separates byb-e7n's payoff from byb-9v0's.
@@ -325,6 +371,14 @@ func TestJBIG2CodingModeCensus(t *testing.T) {
 	}
 	for _, c := range []string{"decodes", "unsupported-feature", "malformed"} {
 		t.Logf("  coding %-18s %d pages", c, byCoding[c])
+	}
+	keys := make([]string, 0, len(byDecode))
+	for k := range byDecode {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return byDecode[keys[i]] > byDecode[keys[j]] })
+	for _, k := range keys {
+		t.Logf("  decode %-52s %d pages", k, byDecode[k])
 	}
 	types := make([]int, 0, len(byType))
 	for k := range byType {

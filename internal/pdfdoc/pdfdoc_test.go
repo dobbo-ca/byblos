@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"image"
+	"slices"
 	"strings"
 	"testing"
 
@@ -384,6 +385,75 @@ func TestImageInfoReportsTransparencyEntries(t *testing.T) {
 		}
 		if info.Mask {
 			t.Errorf("%s: Mask = true; the document declares none", name)
+		}
+	}
+}
+
+// ImageInfo.DecodeArray is what byb-e7n needs and ImageInfo.Decode alone could
+// never supply: /Decode [1 0] on a bilevel raster inverts it and /Decode [0 1]
+// is the default and changes nothing, and presence cannot tell those apart.
+//
+// The two fields say different things and BOTH are load-bearing. Decode is
+// "the entry is there", which is what optimize.go's eligibility test wants —
+// an entry it cannot read is still an entry it must not drop. DecodeArray is
+// "and these are its numbers", nil when there are none to have. So the
+// unreadable case below is the sharp one: /Decode present in a shape this
+// cannot turn into floats must leave Decode true and DecodeArray nil, or a
+// caller reading only DecodeArray would treat a remap it does not understand
+// as no remap at all.
+func TestImageInfoReadsTheDecodeArray(t *testing.T) {
+	const raw = "<< /Type /XObject /Subtype /Image /Width 4 /Height 4 " +
+		"/BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /JBIG2Decode /Length 4 >>\n" +
+		"stream\n\x00\x01\x02\x03\nendstream"
+	data := buildPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << " +
+			"/Absent 4 0 R /Default 5 0 R /Inverted 6 0 R /Float 7 0 R " +
+			"/Indirect 8 0 R /Unreadable 10 0 R >> >> >>",
+		raw,
+		strings.Replace(raw, "/Length 4", "/Decode [0 1] /Length 4", 1),
+		strings.Replace(raw, "/Length 4", "/Decode [1 0] /Length 4", 1),
+		strings.Replace(raw, "/Length 4", "/Decode [1.0 0.0] /Length 4", 1),
+		strings.Replace(raw, "/Length 4", "/Decode 9 0 R /Length 4", 1),
+		"[1 0]",
+		strings.Replace(raw, "/Length 4", "/Decode [/Bogus 0] /Length 4", 1),
+	})
+
+	d, err := Open(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Open error = %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v", err)
+	}
+	for _, tc := range []struct {
+		name    string
+		present bool
+		want    []float64
+	}{
+		{"Absent", false, nil},
+		{"Default", true, []float64{0, 1}},
+		{"Inverted", true, []float64{1, 0}},
+		{"Float", true, []float64{1, 0}},
+		{"Indirect", true, []float64{1, 0}},
+		{"Unreadable", true, nil},
+	} {
+		xo, ok := d.XObject(p.Scope, tc.name)
+		if !ok || !xo.Image {
+			t.Fatalf("XObject(%q) not resolved as an image; the fixture is broken, "+
+				"not the behaviour under test", tc.name)
+		}
+		info, ok := d.ImageInfo(xo.ID)
+		if !ok {
+			t.Fatalf("ImageInfo for %q not found", tc.name)
+		}
+		if info.Decode != tc.present {
+			t.Errorf("ImageInfo(%q).Decode = %v; want %v", tc.name, info.Decode, tc.present)
+		}
+		if !slices.Equal(info.DecodeArray, tc.want) {
+			t.Errorf("ImageInfo(%q).DecodeArray = %v; want %v", tc.name, info.DecodeArray, tc.want)
 		}
 	}
 }

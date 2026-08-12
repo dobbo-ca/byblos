@@ -247,17 +247,229 @@ func TestExtractPageRasterRejectsJBIG2ItCannotDecode(t *testing.T) {
 	}
 }
 
-// TestDecodeJBIG2PlacementGuardsTheDictionary covers the two dictionary facts
-// that can make a perfectly decoded bitmap the wrong answer. Both fail
-// silently if unguarded, which is why they are checked rather than assumed:
+// grayInfo is an image dictionary that says what the /Decode-applying path
+// needs said: a matching size and a resolved /DeviceGray colour space. Tests
+// that are not about the colour space start from this and change one field.
+func grayInfo(w, h int) pdfdoc.ImageInfo {
+	return pdfdoc.ImageInfo{Width: w, Height: h, BPC: 1, ColorSpace: "DeviceGray"}
+}
+
+// TestDecodeJBIG2PlacementAppliesTheDecodeArray is byb-e7n's acceptance in one
+// function: an array byblos can read is APPLIED, not refused.
 //
-//   - /Decode [1 0] on a 1-bit image inverts it, so the page would come back as
-//     its own photographic negative with no error anywhere. ImageInfo records
-//     only that the array is PRESENT, so there is nothing to apply.
+// It asserts against the table in grayLevels, which is poppler's answer and not
+// this package's opinion -- so the cases are the rows of that table, and the
+// two non-flip rows are the ones that matter. Reading /Decode as "invert when
+// the array is [1 0]" passes the first three cases and fails the last two, and
+// that is the wrong reading this exists to catch.
+//
+// The ink count guard is the same one TestExtractPageRasterDecodesASubstituted-
+// JBIG2Page carries: a fixture with no ink cannot tell an inversion from a
+// match, and every assertion below would hold vacuously on a blank page.
+func TestDecodeJBIG2PlacementAppliesTheDecodeArray(t *testing.T) {
+	src := jbig2TestBitmap()
+	data, err := EncodeJBIG2Generic(src.Clone())
+	if err != nil {
+		t.Fatalf("EncodeJBIG2Generic: %v", err)
+	}
+	var ink int
+	for y := 0; y < src.Height; y++ {
+		for x := 0; x < src.Width; x++ {
+			if src.At(x, y) != 0 {
+				ink++
+			}
+		}
+	}
+	if ink == 0 || ink == src.Width*src.Height {
+		t.Fatalf("the fixture is %d ink pixels of %d; a uniform bitmap could not tell "+
+			"any of these levels apart", ink, src.Width*src.Height)
+	}
+
+	for _, tc := range []struct {
+		name             string
+		decode           []float64
+		wantInk, wantBkg uint8
+	}{
+		{"absent", nil, 0x00, 0xFF},
+		{"default", []float64{0, 1}, 0x00, 0xFF},
+		{"inverted", []float64{1, 0}, 0xFF, 0x00},
+		{"grey-ink", []float64{0.5, 1}, 0x80, 0xFF},
+		{"grey-background", []float64{0, 0.5}, 0x00, 0x80},
+		{"flat-white", []float64{1, 1}, 0xFF, 0xFF},
+		{"out-of-range-clamps", []float64{2, -1}, 0xFF, 0x00},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := grayInfo(src.Width, src.Height)
+			if tc.decode != nil {
+				info.Decode, info.DecodeArray = true, tc.decode
+			}
+			img, err := decodeJBIG2Placement(data, func(int) (pdfdoc.ImageInfo, bool) {
+				return info, true
+			}, 7)
+			if err != nil {
+				t.Fatalf("decodeJBIG2Placement with /Decode %v: %v", tc.decode, err)
+			}
+			g, ok := img.(*image.Gray)
+			if !ok {
+				t.Fatalf("raster is %T; want *image.Gray", img)
+			}
+			var wrong, firstX, firstY int
+			var gotAt uint8
+			for y := 0; y < src.Height; y++ {
+				for x := 0; x < src.Width; x++ {
+					want := tc.wantBkg
+					if src.At(x, y) != 0 {
+						want = tc.wantInk
+					}
+					got := g.Pix[y*g.Stride+x]
+					if got != want {
+						if wrong == 0 {
+							firstX, firstY, gotAt = x, y, got
+						}
+						wrong++
+					}
+				}
+			}
+			if wrong != 0 {
+				t.Errorf("/Decode %v: %d of %d pixels are wrong, first at (%d,%d) = %#02x; "+
+					"want ink %#02x and background %#02x. poppler renders this array as those "+
+					"two levels (see grayLevels).",
+					tc.decode, wrong, src.Width*src.Height, firstX, firstY, gotAt,
+					tc.wantInk, tc.wantBkg)
+			}
+		})
+	}
+}
+
+// TestDecodeJBIG2PlacementRefusesADecodeArrayItCannotRead pins the other half
+// of byb-e7n: the arrays that are NOT applied, and are not applied because the
+// numbers do not mean grey levels there.
+//
+// Every one of these was a divert before byb-e7n and is a divert after it, so
+// nothing here is a regression -- what is new is that the refusal is narrow.
+// The failure mode it guards against is a widening: reading /Decode [1 0] in an
+// /Indexed space as an inversion returns a raster that is not a negative of
+// anything, it is a different image (grayLevels records poppler's numbers).
+//
+// The message substring is asserted rather than just the error, and the shared
+// "/Decode array" prefix is deliberate: jbig2_symbol_probe_test.go's census
+// classifies this gate by that phrase, so a refusal that drops it is a refusal
+// no measurement can see.
+func TestDecodeJBIG2PlacementRefusesADecodeArrayItCannotRead(t *testing.T) {
+	src := jbig2TestBitmap()
+	data, err := EncodeJBIG2Generic(src.Clone())
+	if err != nil {
+		t.Fatalf("EncodeJBIG2Generic: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		info func(pdfdoc.ImageInfo) pdfdoc.ImageInfo
+		want string
+	}{
+		{"unresolved-colour-space", func(i pdfdoc.ImageInfo) pdfdoc.ImageInfo {
+			i.ColorSpace = ""
+			i.Decode, i.DecodeArray = true, []float64{1, 0}
+			return i
+		}, "against an array or an indirect reference"},
+		{"device-rgb", func(i pdfdoc.ImageInfo) pdfdoc.ImageInfo {
+			i.ColorSpace = "DeviceRGB"
+			i.Decode, i.DecodeArray = true, []float64{1, 0}
+			return i
+		}, "against /DeviceRGB"},
+		{"unreadable-entries", func(i pdfdoc.ImageInfo) pdfdoc.ImageInfo {
+			i.Decode, i.DecodeArray = true, nil
+			return i
+		}, "entries are not all numbers"},
+		{"six-entries", func(i pdfdoc.ImageInfo) pdfdoc.ImageInfo {
+			i.Decode, i.DecodeArray = true, []float64{0, 1, 0, 1, 0, 1}
+			return i
+		}, "array of 6 entries"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := tc.info(grayInfo(src.Width, src.Height))
+			got, err := decodeJBIG2Placement(data, func(int) (pdfdoc.ImageInfo, bool) {
+				return info, true
+			}, 7)
+			if err == nil {
+				t.Fatalf("decodeJBIG2Placement returned a %v raster; want a refusal", got.Bounds())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v; want it to contain %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "/Decode array") {
+				t.Errorf("error = %v; want it to name the /Decode array, which is how the "+
+					"byb-9v0 census attributes this gate", err)
+			}
+		})
+	}
+}
+
+// TestDecodeJBIG2PlacementReadsTheDecodeArrayBeforeOpeningTheStream keeps
+// byb-e7n from quietly undoing the ordering argument decodeJBIG2Placement's own
+// comment calls load-bearing.
+//
+// /Decode is a dictionary fact and stays the FIRST check, ahead of the pixel
+// limit and the page-size comparison, so a refusal costs nothing. The
+// observable form of that is the same one the size gate uses: hold the
+// dictionary fixed, vary the stream across shapes that fail for unrelated
+// reasons, and require the identical error. Only a check that never opens the
+// stream can produce it.
+func TestDecodeJBIG2PlacementReadsTheDecodeArrayBeforeOpeningTheStream(t *testing.T) {
+	valid, err := EncodeJBIG2Generic(jbig2TestBitmap())
+	if err != nil {
+		t.Fatalf("EncodeJBIG2Generic: %v", err)
+	}
+	// Refused on the colour space, and sized so that neither the pixel limit
+	// nor the size comparison could be what refuses it instead.
+	info := func(int) (pdfdoc.ImageInfo, bool) {
+		return pdfdoc.ImageInfo{Width: 101, Height: 73, BPC: 1,
+			Decode: true, DecodeArray: []float64{1, 0}}, true
+	}
+	var first, firstName string
+	for _, c := range []struct {
+		name string
+		data []byte
+	}{
+		{"too-short-for-a-segment-header", []byte("garbage")},
+		{"empty", nil},
+		{"valid-and-the-right-size", valid},
+	} {
+		got, err := decodeJBIG2Placement(c.data, info, 7)
+		if err == nil {
+			t.Fatalf("%s: an unreadable /Decode array must be refused", c.name)
+		}
+		if got != nil {
+			t.Fatalf("%s: a refusal returned a %v raster", c.name, got.Bounds())
+		}
+		if first == "" {
+			first, firstName = err.Error(), c.name
+			continue
+		}
+		if err.Error() != first {
+			t.Errorf("the refusal depends on the stream, so the /Decode check is no longer "+
+				"reading the dictionary alone:\n  %s: %s\n  %s: %s",
+				firstName, first, c.name, err.Error())
+		}
+	}
+	if !strings.Contains(first, "/Decode array") {
+		t.Errorf("the refusal does not name the /Decode array: %s", first)
+	}
+}
+
+// TestDecodeJBIG2PlacementGuardsTheDictionary covers the dictionary facts that
+// can make a perfectly decoded bitmap the wrong answer. They fail silently if
+// unguarded, which is why they are checked rather than assumed:
+//
 //   - a /Width and /Height that disagree with the JBIG2 page mean the stream is
 //     not the one this dictionary describes. The transposed case below is the
 //     sharp one: 73x101 against a 101x73 page has the same pixel count, so a
 //     check on area alone would pass it.
+//   - a dictionary that is not there at all, which without its own branch is
+//     read as a ZERO one and refused for saying 0x0.
+//
+// /Decode used to be a third entry here and is not one any more: byb-e7n
+// applies the array, and TestDecodeJBIG2PlacementAppliesTheDecodeArray plus
+// TestDecodeJBIG2PlacementRefusesADecodeArrayItCannotRead replace this case.
 //
 // This drives decodeJBIG2Placement directly. Going through a real PDF would
 // mean splicing /Decode into a written file, and splicing bytes into a PDF
@@ -296,7 +508,6 @@ func TestDecodeJBIG2PlacementGuardsTheDictionary(t *testing.T) {
 		ok   bool
 		want string
 	}{
-		"decode-array":         {pdfdoc.ImageInfo{Width: src.Width, Height: src.Height, Decode: true}, true, "carries a /Decode array"},
 		"transposed-size":      {pdfdoc.ImageInfo{Width: src.Height, Height: src.Width}, true, "dictionary says"},
 		"wrong-width":          {pdfdoc.ImageInfo{Width: src.Width + 1, Height: src.Height}, true, "dictionary says"},
 		"no-dictionary":        {pdfdoc.ImageInfo{}, false, "has no dictionary to check the decoded raster against"},

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"math"
 
 	"github.com/dobbo-ca/byblos/internal/jbig2"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
@@ -163,13 +164,13 @@ func DecodeJBIG2Generic(data []byte) (*Bitmap, error) {
 // renderer would show.
 //
 // Two dictionary facts can make a correctly decoded bitmap the wrong answer,
-// and both are checked rather than assumed away, because each one's failure
-// mode is a silently inverted or mis-shaped page rather than an error:
+// and both are read rather than assumed away, because each one's failure mode
+// is a silently inverted or mis-shaped page rather than an error:
 //
 //   - /Decode remaps samples. On a 1-bit image /Decode [1 0] inverts it, so a
-//     page that decoded perfectly comes out as its own negative. ImageInfo
-//     records only that the array is PRESENT, not its contents, so there is
-//     nothing here to apply and the page diverts.
+//     page that decoded perfectly comes out as its own negative. The array is
+//     APPLIED here rather than refused (byb-e7n); grayLevels resolves it into
+//     the two greys grayImage writes, and says which arrays are still declined.
 //   - /Width and /Height are what the PDF says the raster is. A JBIG2 page of a
 //     different size means the stream was not the one this dictionary describes,
 //     or that it was mis-parsed; either way the placement geometry the caller
@@ -236,8 +237,9 @@ func decodeJBIG2Placement(data []byte, imageInfo func(int) (pdfdoc.ImageInfo, bo
 	if !ok {
 		return nil, fmt.Errorf("jbig2: image %d has no dictionary to check the decoded raster against", id)
 	}
-	if info.Decode {
-		return nil, fmt.Errorf("jbig2: image %d carries a /Decode array, which byblos cannot apply to a bilevel raster", id)
+	ink, background, err := grayLevels(info, id)
+	if err != nil {
+		return nil, err
 	}
 	if px := int64(info.Width) * int64(info.Height); px > jbig2.MaxPagePixels {
 		return nil, fmt.Errorf("jbig2: image %d's dictionary declares %dx%d, %d pixels; byblos renders a "+
@@ -256,16 +258,143 @@ func decodeJBIG2Placement(data []byte, imageInfo func(int) (pdfdoc.ImageInfo, bo
 	if err != nil {
 		return nil, err
 	}
-	return grayImage(b), nil
+	return grayImage(b, ink, background), nil
 }
 
-// grayImage renders b as an 8-bit greyscale image under the PDF /DeviceGray
-// convention: ink (bit 1) becomes 0x00 and background becomes 0xFF.
+// defaultInk and defaultBackground are the /DeviceGray samples a 1-bit image
+// carries when it declares no /Decode array: the default array is [0 1] (ISO
+// 32000-1 table 39), and the JBIG2Decode filter presents a JBIG2 ink pixel as
+// sample 0.
+const (
+	defaultInk        uint8 = 0x00
+	defaultBackground uint8 = 0xFF
+)
+
+// grayLevels resolves the /DeviceGray samples an ink bit and a background bit
+// must become, applying image id's /Decode array.
+//
+// THE ARRAY IS APPLIED AT THIS BOUNDARY, and that is the whole of byb-e7n's
+// design question. Two other places could have taken it -- invert the Bitmap
+// after decoding, or carry a polarity flag beside the raster -- and both are
+// worse for the same reason. Bitmap's convention is that a set bit is ink
+// (bitmap.go), the JBIG2 codec produces exactly that, and neither fact has
+// anything to do with /Decode. What /Decode remaps is the SAMPLE a renderer
+// reads, which is what grayImage already builds, and already builds by
+// inverting. So no new concept enters: grayImage's two constants become two
+// arguments, and no caller learns a new field.
+//
+// POPPLER IS THE SPECIFICATION HERE (byb-3jq, byb-62t) and it was asked rather
+// than remembered. Measured with pdftoppm 26.06.0 on a 4x4 JBIG2 raster whose
+// top-left quadrant is ink, /DeviceGray, 1 bit per component:
+//
+//	/Decode absent    ink 0    background 255
+//	/Decode [0 1]     ink 0    background 255   the default; a no-op
+//	/Decode [1 0]     ink 255  background 0     exactly inverted
+//	/Decode [0.5 1]   ink 128  background 255   not every array is a flip
+//	/Decode [0 0]     ink 0    background 0     and not every one is bilevel
+//	/Decode [2 -1]    ink 255  background 0     out of range, clamped
+//
+// The scaling is round(v * 255) and was checked rather than assumed: the same
+// probe on [0.25 0.75] gives 64 and 191, and on [0.3333 0.6667] gives 85 and
+// 170, which is what graySample computes to the level.
+//
+// internal/jbig2's TestPDFDecodeArrayWouldInvert pins the [1 0] row of that
+// table from the other side, through pdfimages, and has done since v0.1.0.
+//
+// So the rule is a two-entry lookup table rather than a flip: sample 0 takes
+// the array's first number and sample 1 its second. Reading it as "invert when
+// the array is [1 0]" gets the same answer on the two common arrays and a
+// silently wrong one on the other four rows.
+//
+// WHAT IS STILL REFUSED. Each is a case where the numbers do not mean grey
+// levels, so applying them would not be a narrower fix but a wrong one:
+//
+//   - Any colour space other than /DeviceGray, INCLUDING an unresolved one.
+//     ImageInfo.ColorSpace is "" for an array or an indirect reference, which
+//     is exactly where /Indexed lives. Measured with the same probe on
+//     [/Indexed /DeviceGray 1 <8020>]: /Decode [1 0] swaps the two PALETTE
+//     entries and poppler paints 32 and 128 where this would paint 255 and 0.
+//   - An array pdfdoc could not read as numbers (ImageInfo.DecodeArray nil
+//     while ImageInfo.Decode is true), or one that is not two numbers long. A
+//     one-component image's array has two entries (ISO 32000-1 table 39), and
+//     an array of any other length describes an image this is not.
+//
+// Both refusals still say "/Decode array", because the byb-9v0 census
+// classifies this gate by that phrase and a refusal it cannot see is a refusal
+// nobody counts.
+//
+// WHAT THE CORPUS ACTUALLY HOLDS, and it is not what the shape of this function
+// suggests. Measured 2026-08-11 by jbig2_symbol_probe_test.go over all four
+// corpora, 5,672 files and 169,376 pages: of the 6,818 pages that are a single
+// page-covering JBIG2 raster, 4,371 were held by this gate, and every one of
+// them is /DeviceGray at 1 bit per component with an array of exactly two
+// numbers. Two arrays appear in the whole sample and no others:
+//
+//	[0 1]   4,304 pages   the DEFAULT, which remaps nothing
+//	[1 0]      67 pages   the inversion
+//
+// So the 2,773 pages this releases are all [0 1]: byblos was refusing them over
+// an array that changes no pixel. And all 67 pages that DO invert are also
+// coded in a mode byblos cannot decode, so not one of them is released here --
+// the inverting path is live in the code and dead in the corpus, and it stops
+// being dead when byb-9v0 lands a symbol-mode decoder.
+//
+// THAT IS WHY THE RENDER TEST EXISTS. No corpus page reaches this function with
+// [1 0], so a corpus sweep cannot tell a correct inversion from a missing one.
+// TestExtractedJBIG2RasterCarriesThePopplerGreysForADecodeArray builds the page
+// the corpus does not have and asks poppler; it is the only assertion in the
+// tree that fails if this table is wrong.
+func grayLevels(info pdfdoc.ImageInfo, id int) (ink, background uint8, err error) {
+	if !info.Decode {
+		return defaultInk, defaultBackground, nil
+	}
+	if info.ColorSpace != "DeviceGray" {
+		cs := info.ColorSpace
+		if cs == "" {
+			cs = "an array or an indirect reference"
+		} else {
+			cs = "/" + cs
+		}
+		return 0, 0, fmt.Errorf("jbig2: image %d carries a /Decode array against %s; byblos applies "+
+			"one only in /DeviceGray, where its two numbers ARE the grey levels", id, cs)
+	}
+	if info.DecodeArray == nil {
+		return 0, 0, fmt.Errorf("jbig2: image %d carries a /Decode array whose entries are not all "+
+			"numbers, so there is nothing to apply", id)
+	}
+	if len(info.DecodeArray) != 2 {
+		return 0, 0, fmt.Errorf("jbig2: image %d carries a /Decode array of %d entries; a "+
+			"one-component image's array has two", id, len(info.DecodeArray))
+	}
+	return graySample(info.DecodeArray[0]), graySample(info.DecodeArray[1]), nil
+}
+
+// graySample maps a /DeviceGray component to an 8-bit sample, clamping outside
+// [0, 1] as poppler does (see grayLevels for the measurement).
+//
+// The first case is written as a negated test rather than v <= 0 so that a NaN
+// takes it. A float-to-uint8 conversion of a NaN is not defined by the Go
+// specification, and these numbers come out of an untrusted file.
+func graySample(v float64) uint8 {
+	switch {
+	case !(v > 0):
+		return 0x00
+	case v >= 1:
+		return 0xFF
+	}
+	return uint8(math.Round(v * 255))
+}
+
+// grayImage renders b as an 8-bit greyscale image, writing ink for a set bit
+// and background for a clear one. Under the PDF /DeviceGray convention and an
+// absent /Decode array those are 0x00 and 0xFF; grayLevels resolves them.
 //
 // That inversion is the Bitmap-to-PDF boundary Bitmap's own doc comment names.
 // It is applied here rather than left to the caller because the result is handed
 // out as an image.Image to code -- OCR, thumbnailing, human review -- that has
-// no way to know a photographic negative from a page.
+// no way to know a photographic negative from a page. Taking the two levels as
+// arguments is what lets /Decode be applied at the same seam and not a second
+// one; grayLevels says why that seam is the right one.
 //
 // *image.Gray rather than a one-bit image.Image over the same buffer: it costs
 // 8x the memory and buys interoperability with everything that type-switches on
@@ -273,15 +402,15 @@ func decodeJBIG2Placement(data []byte, imageInfo func(int) (pdfdoc.ImageInfo, bo
 // 8x is why jbig2.MaxPagePixels is the bound that matters on this path: the
 // result of this function is MaxPagePixels bytes, the largest single allocation
 // anywhere in a JBIG2 extraction.
-func grayImage(b *jbig2.Bitmap) *image.Gray {
+func grayImage(b *jbig2.Bitmap, ink, background uint8) *image.Gray {
 	g := image.NewGray(image.Rect(0, 0, b.W, b.H))
 	for y := 0; y < b.H; y++ {
 		row := g.Pix[y*g.Stride : y*g.Stride+b.W]
 		for x := range row {
 			if b.Get(x, y) != 0 {
-				row[x] = 0x00
+				row[x] = ink
 			} else {
-				row[x] = 0xFF
+				row[x] = background
 			}
 		}
 	}
