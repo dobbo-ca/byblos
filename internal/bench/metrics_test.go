@@ -52,7 +52,7 @@ func TestParseProcIOIncomplete(t *testing.T) {
 }
 
 func TestPeakRSSReportsItsUnit(t *testing.T) {
-	v, unit := peakRSS()
+	v, unit := PeakRSS()
 	if v <= 0 {
 		t.Errorf("peakRSS = %d, want a positive value", v)
 	}

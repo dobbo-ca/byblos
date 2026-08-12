@@ -10,36 +10,36 @@ import (
 	"syscall"
 )
 
-// procIO holds the three /proc/self/io counters design spec section 2 scores:
+// ProcIO holds the three /proc/self/io counters design spec section 2 scores:
 // wchar for bytes written, syscw and syscr for write and read syscall counts.
 //
 // All three are deterministic for the same code over the same input, which is
 // what lets them live in the committed baseline (spec section 5.3).
-type procIO struct {
+type ProcIO struct {
 	WChar int64
 	SysCW int64
 	SysCR int64
 }
 
-// readProcIO reads /proc/self/io.
+// ReadProcIO reads /proc/self/io.
 //
 // ok is false on any platform without that file, which is every platform
 // except Linux. A caller MUST record that as absence rather than substituting
 // zero: zero is the reading for "wrote nothing", and a macOS run that reported
 // it would claim a disk improvement CI could not reproduce.
-func readProcIO() (procIO, bool) {
+func ReadProcIO() (ProcIO, bool) {
 	f, err := os.Open("/proc/self/io")
 	if err != nil {
-		return procIO{}, false
+		return ProcIO{}, false
 	}
 	defer f.Close()
 	return parseProcIO(f)
 }
 
-// parseProcIO is readProcIO's body, split out so it can be tested against a
+// parseProcIO is ReadProcIO's body, split out so it can be tested against a
 // fixture on a machine that has no /proc.
-func parseProcIO(r io.Reader) (procIO, bool) {
-	var out procIO
+func parseProcIO(r io.Reader) (ProcIO, bool) {
+	var out ProcIO
 	var sawWChar, sawCW, sawCR bool
 	s := bufio.NewScanner(r)
 	for s.Scan() {
@@ -61,19 +61,19 @@ func parseProcIO(r io.Reader) (procIO, bool) {
 		}
 	}
 	if s.Err() != nil {
-		return procIO{}, false
+		return ProcIO{}, false
 	}
 	return out, sawWChar && sawCW && sawCR
 }
 
-// peakRSS returns ru_maxrss and the unit it is expressed in.
+// PeakRSS returns ru_maxrss and the unit it is expressed in.
 //
 // Linux reports kilobytes and Darwin reports bytes. The value is informational
 // only -- design spec section 2 scores memory on runtime.MemStats.TotalAlloc,
 // because peak RSS depends on when the garbage collector happened to run -- so
 // it is recorded with its unit rather than normalised into a number that would
 // invite comparison across platforms.
-func peakRSS() (value int64, unit string) {
+func PeakRSS() (value int64, unit string) {
 	var ru syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
 		return 0, "unknown"
