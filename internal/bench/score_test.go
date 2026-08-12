@@ -98,3 +98,102 @@ func TestScoreOfAnIdenticalRunIsZero(t *testing.T) {
 		t.Errorf("Score = %v, want 0 for an identical run", got.Score)
 	}
 }
+
+// TestScoreOfExactlyZeroFails pins that Pass requires a net positive score: a
+// purely neutral candidate has not proposed an improvement, and the routine
+// exists to propose improvements.
+func TestScoreOfExactlyZeroFails(t *testing.T) {
+	head := Run{Samples: []Sample{
+		{Capability: "jbig2-generic", OutBytes: 600},
+		{Capability: "quantize-png", OutBytes: 300},
+		{Capability: "build-pdf", OutBytes: 100},
+	}}
+	got := Score(scoringBaseline(), head)
+	if got.Pass {
+		t.Error("a score of exactly 0 passed; Pass must require Score > 0")
+	}
+}
+
+// TestRegressionCeilingBoundaryIsExclusive pins the wording of design spec
+// section 6 rule 1, "worse than +10%": a delta of exactly +10% does not breach
+// the ceiling.
+func TestRegressionCeilingBoundaryIsExclusive(t *testing.T) {
+	head := Run{Samples: []Sample{
+		{Capability: "jbig2-generic", OutBytes: 600},
+		{Capability: "quantize-png", OutBytes: 300},
+		{Capability: "build-pdf", OutBytes: 110}, // exactly +10%
+	}}
+	got := Score(scoringBaseline(), head)
+	if len(got.Ceilings) != 0 {
+		t.Errorf("got %d ceiling breaches at exactly +10%%, want 0", len(got.Ceilings))
+	}
+}
+
+// TestScoreSkipsAZeroBaseline pins that a capability whose baseline reading is
+// zero -- inspect and extract-raster read zero for size, spec section 3.3 --
+// is skipped rather than dividing by zero.
+func TestScoreSkipsAZeroBaseline(t *testing.T) {
+	base := BaselineFrom(Run{Samples: []Sample{
+		{Capability: "inspect", OutBytes: 0},
+		{Capability: "jbig2-generic", OutBytes: 600},
+	}}, fixtureFingerprint())
+
+	head := Run{Samples: []Sample{
+		{Capability: "inspect", OutBytes: 0},
+		{Capability: "jbig2-generic", OutBytes: 600},
+	}}
+	got := Score(base, head)
+	for _, f := range got.Findings {
+		if f.Capability == "inspect" {
+			t.Errorf("got a finding for a zero-baseline capability: %+v", f)
+		}
+	}
+}
+
+// TestScoreSumsSamplesAcrossDocuments pins that a capability's total is summed
+// over every document in the corpus, not just the last one measured -- the
+// corpus is more than one document per capability in production.
+func TestScoreSumsSamplesAcrossDocuments(t *testing.T) {
+	base := BaselineFrom(Run{Samples: []Sample{
+		{Capability: "jbig2-generic", Doc: "a.pdf", OutBytes: 300},
+		{Capability: "jbig2-generic", Doc: "b.pdf", OutBytes: 300},
+	}}, fixtureFingerprint())
+
+	head := Run{Samples: []Sample{
+		{Capability: "jbig2-generic", Doc: "a.pdf", OutBytes: 270},
+		{Capability: "jbig2-generic", Doc: "b.pdf", OutBytes: 270},
+	}}
+	got := Score(base, head)
+	if len(got.Findings) != 1 {
+		t.Fatalf("got %d findings, want 1", len(got.Findings))
+	}
+	f := got.Findings[0]
+	if f.Base != 600 || f.Head != 540 {
+		t.Errorf("base/head = %v/%v, want 600/540 -- both documents must be summed", f.Base, f.Head)
+	}
+}
+
+// TestOverrideMultipliesContribution pins design spec section 3.2: a target's
+// hand multiplier must actually reach the score, not just be validated for
+// having a reason.
+func TestOverrideMultipliesContribution(t *testing.T) {
+	old := Targets
+	Targets = append([]Target{{
+		Capability: "jbig2-generic",
+		Override:   2.0,
+		Why:        "test",
+	}}, old...)
+	t.Cleanup(func() { Targets = old })
+
+	head := Run{Samples: []Sample{
+		{Capability: "jbig2-generic", OutBytes: 540},
+		{Capability: "quantize-png", OutBytes: 300},
+		{Capability: "build-pdf", OutBytes: 100},
+	}}
+	got := Score(scoringBaseline(), head)
+	// Same fixture as TestScoreIsTheWeightedPercentImprovement, doubled by the
+	// override: 0.40 x 0.6 x 10 x 2.0 = 4.8.
+	if got.Score < 4.7999 || got.Score > 4.8001 {
+		t.Errorf("Score = %v, want 4.8 with a 2.0 override applied", got.Score)
+	}
+}

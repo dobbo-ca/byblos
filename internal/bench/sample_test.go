@@ -69,3 +69,29 @@ func TestSampleLatencyAbsentWhenUntimed(t *testing.T) {
 		t.Error("latency reported present with no timings recorded")
 	}
 }
+
+// TestSampleLatencyMedianEvenLength pins the even-length case of the median:
+// the harness defaults to an odd -reps, but nothing stops an even count, and
+// the reduction must still be a single, stable value.
+func TestSampleLatencyMedianEvenLength(t *testing.T) {
+	s := Sample{WallNS: []int64{10, 20, 30, 40}}
+	v, ok := s.Value(MetricLatency)
+	if !ok {
+		t.Fatal("latency reported absent with four timings recorded")
+	}
+	if v != 30 {
+		t.Errorf("latency = %v, want 30 (the upper-middle element)", v)
+	}
+}
+
+// TestMetricDeterministicOnlyFalseForLatency pins design spec section 5.3:
+// latency is the one metric that cannot be carried in the committed baseline,
+// because it is the one metric measured with repetition rather than once.
+func TestMetricDeterministicOnlyFalseForLatency(t *testing.T) {
+	for m := range MetricWeights {
+		want := m != MetricLatency
+		if got := m.Deterministic(); got != want {
+			t.Errorf("%s.Deterministic() = %v, want %v", m, got, want)
+		}
+	}
+}
