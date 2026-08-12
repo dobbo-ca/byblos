@@ -683,7 +683,7 @@ Deliberately excluded from this design:
 - **A stored wall-time history.** Wall time is not in the baseline, by design
   (section 5.3), so there is no latency trend across runners. Tracking latency
   over time would need a fixed machine, which section 7.2 declines.
-- **A wider corpus.** Deferred until the thirteen-document set is shown to
+- **A wider corpus.** Deferred until the twelve-document set is shown to
   mislead.
 - **Benchmarks for unshipped capabilities.** The map covers `buildCapabilities`
   only. `jbig2-symbol`, `ccitt-g4` and the renderer have rules in
@@ -705,7 +705,7 @@ Deliberately excluded from this design:
   published and the first baseline is committed.** Building the baseline first
   means measuring a dependency version that is already known to be under
   review.
-- **Thirteen documents can be unrepresentative.** A change that wins on the
+- **Twelve documents can be unrepresentative.** A change that wins on the
   anchors and loses on the archive is possible. Section 4.2 accepts that risk in
   exchange for a loop that runs today.
 - **Runner variance.** Handled by rule 2, but a persistent hardware change on
