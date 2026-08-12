@@ -59,7 +59,7 @@ func TestSweepIsDeterministicAcrossWorkerCounts(t *testing.T) {
 	}
 
 	serial := run(1)
-	if serial.files == 0 || serial.pages == 0 {
+	if serial.pop.Files == 0 || serial.pop.Pages == 0 {
 		t.Fatalf("sweep walked nothing: %+v", serial)
 	}
 	if len(serial.lines) == 0 {
@@ -69,8 +69,8 @@ func TestSweepIsDeterministicAcrossWorkerCounts(t *testing.T) {
 
 	for _, workers := range []int{2, 4, 8} {
 		got := run(workers)
-		if got.files != serial.files || got.pages != serial.pages || got.unreadable != serial.unreadable {
-			t.Errorf("%d workers: counts %+v, want %+v", workers, got, serial)
+		if got.pop != serial.pop {
+			t.Errorf("%d workers: population %+v, want %+v", workers, got.pop, serial.pop)
 		}
 		if len(got.lines) != len(serial.lines) {
 			t.Fatalf("%d workers: %d lines, want %d", workers, len(got.lines), len(serial.lines))
@@ -99,8 +99,21 @@ func TestSweepCountsAgreeWithTheCounters(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := byblos.ExtractStats()
-	if int(c.Attempted) != got.pages {
-		t.Errorf("Attempted = %d, but the sweep walked %d pages", c.Attempted, got.pages)
+	// Attempted is what this run REACHED; pop.Pages is the population. They are
+	// equal only while every document that opens is also one Inspect will read,
+	// which is true of the generated corpus and was NOT true of the pinned
+	// sample before byb-3jq: 17 documents opened, held 342 pages between them,
+	// and byblos.Inspect refused every one. Asserting equality here would quietly
+	// re-assert that those two counts are the same thing (byb-wj2), so the
+	// inequality is asserted as well as the equality, and the second one is the
+	// claim that survives a corpus with a damaged document in it.
+	if int(c.Attempted) > got.pop.Pages {
+		t.Errorf("Attempted = %d, above the population's %d pages; a run cannot reach "+
+			"more pages than the page trees hold", c.Attempted, got.pop.Pages)
+	}
+	if int(c.Attempted) != got.pop.Pages {
+		t.Errorf("Attempted = %d, but the population is %d pages, and every document in "+
+			"the generated corpus that opens is one Inspect reads", c.Attempted, got.pop.Pages)
 	}
 	if c.Extracted+c.Diverted+c.Failed != c.Attempted {
 		t.Errorf("counters do not reconcile: %d extracted + %d diverted + %d failed != %d attempted",

@@ -94,7 +94,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,13 +101,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/jbig2"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
+	"github.com/dobbo-ca/byblos/internal/sample"
 )
 
 // segTypeNames are T.88's segment type numbers. Only the ones byblos might meet
@@ -261,20 +260,14 @@ func gateOf(msg string) string {
 	}
 }
 
-// censusFile reports one row per page whose returned raster is a JBIG2 stream.
-func censusFile(path string) (rows []jbig2Row, pages int) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, 0
-	}
-	defer f.Close()
-	d, err := pdfdoc.Open(f)
-	if err != nil {
-		return nil, 0
-	}
+// censusDoc reports one row per page whose returned raster is a JBIG2 stream.
+// The document is already open: sample.Walk opened it to count its pages, and
+// counting them again here is what let this probe and byb-dng's publish two
+// different populations (byb-wj2).
+func censusDoc(doc sample.Doc) (rows []jbig2Row) {
+	d, path := doc.Doc, doc.Path
 	ctx := context.Background()
 	for n := 1; n <= d.PageCount(); n++ {
-		pages++
 		p, err := d.Page(n)
 		if err != nil {
 			continue
@@ -360,7 +353,7 @@ func censusFile(path string) (rows []jbig2Row, pages int) {
 		}
 		rows = append(rows, r)
 	}
-	return rows, pages
+	return rows
 }
 
 // oracleEnabled is set once from the environment: asking jbig2dec about every
@@ -467,19 +460,12 @@ func TestJBIG2CodingModeCensus(t *testing.T) {
 	if outPath == "" {
 		t.Fatal("set BYBLOS_JBIG2_OUT to the TSV to write")
 	}
-	var paths []string
-	if err := filepath.WalkDir(root, func(p string, e fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(p), ".pdf") {
-			paths = append(paths, p)
-		}
-		return nil
-	}); err != nil {
+	// internal/sample owns the enumeration and the page count, so this probe and
+	// every other lane divide by the same population (byb-wj2).
+	paths, err := sample.Paths(root)
+	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
 	}
-	sort.Strings(paths)
 	if len(paths) == 0 {
 		t.Fatalf("no PDFs under %s", root)
 	}
@@ -491,24 +477,15 @@ func TestJBIG2CodingModeCensus(t *testing.T) {
 	// Slot-indexed like the clause probe, so the output is in lexical path
 	// order whatever the worker count and two runs diff cleanly.
 	per := make([][]jbig2Row, len(paths))
-	pages := make([]int, len(paths))
 	start := time.Now()
-	work := make(chan int)
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range work {
-				per[i], pages[i] = censusFile(paths[i])
-			}
-		}()
+	pop, err := sample.Walk(root, workers, func(d sample.Doc) {
+		if d.Err == nil {
+			per[d.Index] = censusDoc(d)
+		}
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
 	}
-	for i := range paths {
-		work <- i
-	}
-	close(work)
-	wg.Wait()
 	elapsed := time.Since(start)
 
 	out, err := os.Create(outPath)
@@ -586,13 +563,9 @@ func TestJBIG2CodingModeCensus(t *testing.T) {
 	if err := out.Close(); err != nil {
 		t.Fatalf("close %s: %v", outPath, err)
 	}
-	var sum int
-	for _, n := range pages {
-		sum += n
-	}
 	t.Logf("files=%d pages=%d jbig2-rasters=%d extract-today=%d symbol-mode=%d symbol-mode-refused=%d "+
 		"seg-type-unparsed=%d gate-only=%d elapsed=%v",
-		len(paths), sum, total, byGate["none"], symbolPages, symbol, unparsed, gateOnly, elapsed)
+		pop.Files, pop.Pages, total, byGate["none"], symbolPages, symbol, unparsed, gateOnly, elapsed)
 	t.Logf("  symbol-mode counts pages whose HEADERS carry a symbol dictionary or text region; " +
 		"symbol-mode-refused counts the far smaller set whose refusal message still names one of " +
 		"those segment types. See symbolModeType for why the second reads zero after byb-9v0.")

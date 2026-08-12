@@ -78,10 +78,10 @@ func skewDegrees(m content.Matrix) float64 {
 // before it counts as an MRC patch rather than a stamp or a logo.
 //
 // It is not clear of noise, and it is load-bearing. Measured over the pinned
-// sample at ~/work/dobbo-ca/.byblos-sample -- 5672 files, 169376 pages -- by
-// walking every page and recording each non-bitonal placement's area fraction
-// on the 742 pages that carry a qualifying bitonal base. The page counts it
-// yields are reproducible with the shipped tool:
+// sample at ~/work/dobbo-ca/.byblos-sample -- 5,672 sample files and
+// 169,376 sample pages -- by walking every page and recording each non-bitonal
+// placement's area fraction on the 742 pages that carry a qualifying bitonal
+// base. The page counts it yields are reproducible with the shipped tool:
 //
 //	byblos-divert -json ~/work/dobbo-ca/.byblos-sample/anchors  # mrc-layers: 176
 //	byblos-divert -json ~/work/dobbo-ca/.byblos-sample/dc       # mrc-layers:  42
@@ -102,11 +102,12 @@ func skewDegrees(m content.Matrix) float64 {
 // run of real MRC insets; the nearest thing that is genuinely a stamp is 6.6x
 // further down -- dc-28519909.pdf's greyscale form stamps, 0.003016 and below.
 //
-// It stays at 0.02 anyway. Moving it would relabel 3 pages of 169376, all in
-// one file, and every one of them diverts either way -- and both sides of the
-// gap rest on a single document each, which is not enough to place a threshold
-// with. Whether those pages need both layers is a pixel question (is the base
-// blank?), not a geometry one. TestClassifyMRCPatchFloorBracket pins both ends.
+// It stays at 0.02 anyway. Moving it would relabel 3 of 169,376 sample pages,
+// all in one file, and every one of them diverts either way -- and both sides
+// of the gap rest on a single document each, which is not enough to place a
+// threshold with. Whether those pages need both layers is a pixel question (is
+// the base blank?), not a geometry one. TestClassifyMRCPatchFloorBracket pins
+// both ends.
 const mrcPatchAreaFrac = 0.02
 
 // mrcBaseAreaFrac is how much of the page a bitonal placement must cover to be
@@ -837,7 +838,7 @@ const paintTolerancePt = 1e-3
 // "multiple-images". They diverted before and divert now; what changed is that
 // the reason names the layered stack that actually stops the page reducing to
 // one raster, instead of a wash that was never visible. They are the only four
-// reason changes in the 169,376-page sample. See
+// reason changes across 169,376 sample pages. See
 // TestClassifyPaintOcclusionAcrossPlacements.
 const paintFillTolerancePt = 1.0
 
