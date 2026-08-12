@@ -105,6 +105,42 @@ zero — wrong syntax, not an empty corpus).
 A disagreement with a bead's number therefore means the sampling frame differs.
 It is a reason to look at the sample, not to change the code.
 
+## The bench set
+
+`cmd/byblos-bench` measures cost against a fixed set of twelve documents,
+pinned by name and sha256 in `ids/bench-v1.tsv`. They are the anchors: seven
+govdocs1 files and five of the six archive.org files, about 89 MB.
+
+```sh
+tools/sample/bench_set.sh "$(mktemp -d)"     # writes bench-v1.tar.zst + .sha256
+```
+
+The script hashes every document against `ids/bench-v1.tsv` first and writes
+nothing at all if one is missing or has moved. It stages each file with one
+fixed timestamp, so two builds of the same twelve documents produce the same
+archive — the baseline records that archive's sha256 as its bench-set
+fingerprint, and a rebuild that moved those bytes would invalidate a baseline
+that is otherwise still good. `bench_set_test.sh` covers both refusals and the
+rebuild.
+
+The archive is flat, because `byblos-bench` globs `DIR/*.pdf`:
+
+```sh
+mkdir -p bench-v1 && tar --zstd -xf bench-v1.tar.zst -C bench-v1
+```
+
+The sixth archive.org anchor, `ia-06043926.cn.pdf`, is **excluded and must not
+be added back**. archive.org publishes no rights statement and no date for that
+item, so there is nothing on which to base republication from a public
+repository. It stays in the local sample. The cost is that the bench set has no
+CJK document, which is a known gap for a later `bench-v2` rather than an
+oversight — glyph density there is unlike Latin, and `jbig2-generic` is the
+capability most likely to behave differently on it.
+
+The archive is published as a GitHub release asset rather than through Git LFS.
+LFS bandwidth is billed against every public clone; release asset bandwidth is
+not.
+
 ## Measuring
 
 ```sh
