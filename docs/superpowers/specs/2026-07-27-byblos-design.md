@@ -257,6 +257,12 @@ type ImageRef struct {
     Width, Height int             // pixel dimensions
     Bitonal       bool
     Filter        string          // declared codec, e.g. "JBIG2Decode"; "" when none
+    ObjNr         int             // the image XObject's object number, and the handle
+                                  // ReplaceImages takes. Per-OBJECT: one raster painted
+                                  // on several pages reports the same ObjNr, which is
+                                  // what lets a caller re-encode it once rather than
+                                  // once per page. Negative for a direct object, which
+                                  // ReplaceImages refuses.
 }
 
 type PageInfo struct {
@@ -469,8 +475,12 @@ type PageProvenance struct {
 }
 
 type PageGeometry struct {
-    RasterBox [4]float64 // [llx lly urx ury], PDF default user space, points
-    PageBox   [4]float64 // same order; NOT Placement's [a b c d e f] matrix order
+    RasterBox [4]float64  // [llx lly urx ury], PDF default user space, points
+    PageBox   [4]float64  // same order; NOT Placement's [a b c d e f] matrix order
+    ClipBox   *[4]float64 // same order (byb-b1.12). Set only when a clip NARROWED the
+                          // placement below its unclipped raster box; nil otherwise. It
+                          // carries its own presence bit because a zero box inside a
+                          // non-nil Geometry already means "measured, and degenerate".
 }
 
 func (g PageGeometry) CoversPage() bool
