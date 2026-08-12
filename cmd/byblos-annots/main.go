@@ -29,15 +29,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/dobbo-ca/byblos"
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
+	"github.com/dobbo-ca/byblos/internal/sample"
 )
 
 // tol mirrors paintTolerancePt, not coverTolerancePt. The raster box here is
@@ -127,18 +126,19 @@ func main() {
 		SubtypeHistogram: map[string]int{},
 		BucketHistogram:  map[string]int{},
 	}
+	// internal/sample owns which files are candidates, so this tool and the
+	// divert sweep cannot disagree about the population before either opens
+	// anything. It also refuses a directory it cannot read rather than reporting
+	// a smaller corpus (byb-wj2).
 	root := args[0]
-	err := filepath.WalkDir(root, func(path string, e fs.DirEntry, err error) error {
-		if err != nil || e.IsDir() || !strings.EqualFold(filepath.Ext(path), ".pdf") {
-			return nil
-		}
-		s.Files++
-		scanFile(path, root, &s, enc)
-		return nil
-	})
+	paths, err := sample.Paths(root)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "byblos-annots:", err)
 		os.Exit(1)
+	}
+	for _, path := range paths {
+		s.Files++
+		scanFile(path, root, &s, enc)
 	}
 
 	c := byblos.ExtractStats()

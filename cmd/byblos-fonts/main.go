@@ -27,13 +27,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
+	"github.com/dobbo-ca/byblos/internal/sample"
 )
 
 // The seven classes of section 4.1, in the table's order. The letters are the
@@ -93,17 +93,18 @@ func main() {
 		enc = json.NewEncoder(f)
 	}
 
+	// internal/sample owns which files are candidates, so this tool and the
+	// divert sweep cannot disagree about the population before either opens
+	// anything. It also refuses a directory it cannot read rather than reporting
+	// a smaller corpus (byb-wj2).
 	s := summary{Class: map[string]int{}}
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(path), ".pdf") {
-			return nil
-		}
-		scanFile(path, root, &s, enc, *cmp)
-		return nil
-	})
+	paths, err := sample.Paths(root)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "byblos-fonts:", err)
 		os.Exit(1)
+	}
+	for _, path := range paths {
+		scanFile(path, root, &s, enc, *cmp)
 	}
 	report(s, *cmp)
 }

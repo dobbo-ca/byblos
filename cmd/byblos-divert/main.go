@@ -19,15 +19,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
-	"sync"
 
 	"github.com/dobbo-ca/byblos"
+	"github.com/dobbo-ca/byblos/internal/sample"
 )
 
 // defaultJobs is deliberately a small constant rather than NumCPU. These sweeps
@@ -52,12 +49,20 @@ func jobs(flagVal int) int {
 	return defaultJobs
 }
 
-// sweepResult is what one walk observed. lines are the per-page diagnostics —
-// the same text the serial version wrote to stderr as it went — in lexical path
-// order.
+// sweepResult is what one walk observed: the population, and the per-page
+// diagnostics — the same text the serial version wrote to stderr as it went —
+// in lexical path order.
+//
+// THE POPULATION IS internal/sample's AND NOT THIS TOOL'S. It used to be
+// counted here, and counting it here is what byb-wj2 had to reconcile: this
+// tool called a document that Inspect refused "unreadable" and gave it zero
+// pages, while the measurement probes counted the same document's pages off its
+// page tree. The two definitions differed by 342 pages over the pinned sample
+// and neither said so. sample.Walk now decides, so a lane that walks with this
+// tool and a lane that walks with the package inherit one answer.
 type sweepResult struct {
-	files, pages, unreadable int
-	lines                    []string
+	pop   sample.Population
+	lines []string
 }
 
 // sweep walks root and extracts every page of every PDF, with workers files in
@@ -66,81 +71,62 @@ type sweepResult struct {
 // ORDER IS PART OF THE CONTRACT. The whole use of this tool is diffing one
 // build against another over the same corpus, so output must depend on the
 // corpus and not on which worker finished first. Each file's lines are gathered
-// into its own slot and concatenated in path order at the end; nothing is
-// printed from a worker. Buffering the lot is affordable — a full govdocs1 run
-// is about 9.6 MB of lines.
+// into its own slot by sample.Doc.Index and concatenated in path order at the
+// end; nothing is printed from a worker. Buffering the lot is affordable — a
+// full govdocs1 run is about 9.6 MB of lines.
 //
 // The counters byblos keeps are package-level and already mutex-guarded
 // (stats.go), so they need nothing here.
 func sweep(root string, workers int) (sweepResult, error) {
-	var paths []string
-	err := filepath.WalkDir(root, func(path string, e fs.DirEntry, err error) error {
-		if err != nil || e.IsDir() || !strings.EqualFold(filepath.Ext(path), ".pdf") {
-			return nil
-		}
-		paths = append(paths, path)
-		return nil
+	paths, err := sample.Paths(root)
+	if err != nil {
+		return sweepResult{}, err
+	}
+	per := make([][]string, len(paths))
+
+	pop, err := sample.Walk(root, workers, func(d sample.Doc) {
+		per[d.Index] = sweepDoc(d)
 	})
 	if err != nil {
 		return sweepResult{}, err
 	}
-	sort.Strings(paths)
 
-	if workers < 1 {
-		workers = 1
-	}
-	per := make([][]string, len(paths))
-	pages := make([]int, len(paths))
-	unreadable := make([]int, len(paths))
-
-	work := make(chan int)
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range work {
-				per[i], pages[i], unreadable[i] = sweepFile(paths[i])
-			}
-		}()
-	}
-	for i := range paths {
-		work <- i
-	}
-	close(work)
-	wg.Wait()
-
-	out := sweepResult{files: len(paths)}
-	for i := range paths {
-		out.pages += pages[i]
-		out.unreadable += unreadable[i]
+	out := sweepResult{pop: pop}
+	for i := range per {
 		out.lines = append(out.lines, per[i]...)
 	}
 	return out, nil
 }
 
-// sweepFile is one document's share of the walk. It touches nothing shared
+// sweepDoc is one document's share of the walk. It touches nothing shared
 // except byblos's own counters, so it is safe to run many at once.
-func sweepFile(path string) (lines []string, pages, unreadable int) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, 0, 1
+//
+// It extracts the pages sample.Walk counted, and it reaches them through the
+// page indices Inspect reports rather than through 1..Pages, because
+// ExtractPageRaster is indexed by PageInfo.Index. A document whose page tree
+// sample.Walk could count but that Inspect will not read at all is reported and
+// contributes no extraction attempt — and it is NOT removed from the
+// population, which is the whole of byb-wj2.
+func sweepDoc(d sample.Doc) (lines []string) {
+	if d.Err != nil {
+		return []string{fmt.Sprintf("open %s: %v", d.Path, d.Err)}
 	}
-	defer f.Close()
-	infos, err := byblos.Inspect(f)
+	if _, err := d.File.Seek(0, 0); err != nil {
+		return []string{fmt.Sprintf("seek %s: %v", d.Path, err)}
+	}
+	infos, err := byblos.Inspect(d.File)
 	if err != nil {
-		return []string{fmt.Sprintf("inspect %s: %v", path, err)}, 0, 1
+		return []string{fmt.Sprintf("inspect %s: %v", d.Path, err)}
 	}
 	for _, pi := range infos {
-		pages++
-		if _, err := f.Seek(0, 0); err != nil {
-			return lines, pages, unreadable
+		if _, err := d.File.Seek(0, 0); err != nil {
+			return lines
 		}
-		if _, err := byblos.ExtractPageRaster(f, pi.Index); err != nil {
-			lines = append(lines, fmt.Sprintf("%s page %d: %v", path, pi.Index, err))
+		if _, err := byblos.ExtractPageRaster(d.File, pi.Index); err != nil {
+			lines = append(lines, fmt.Sprintf("%s page %d: %v", d.Path, pi.Index, err))
 		}
 	}
-	return lines, pages, unreadable
+	return lines
 }
 
 func main() {
@@ -167,17 +153,24 @@ func main() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(struct {
-			Files, Pages, Unreadable int
+			Files, Documents, Unopenable, Pages int
 			byblos.ExtractCounters
 			DivertRate    float64
 			UnhandledRate float64
-		}{res.files, res.pages, res.unreadable, c, c.DivertRate(), c.UnhandledRate()})
+		}{res.pop.Files, res.pop.Documents, res.pop.Unopenable, res.pop.Pages,
+			c, c.DivertRate(), c.UnhandledRate()})
 		return
 	}
 
-	fmt.Printf("files       %d\n", res.files)
-	fmt.Printf("unreadable  %d\n", res.unreadable)
-	fmt.Printf("pages       %d\n", c.Attempted)
+	// Files, documents and pages are the population (internal/sample); attempted
+	// and below are what this run did with it. They are printed apart because
+	// conflating them is how byb-wj2 happened: "pages" used to mean whichever of
+	// the two the reader assumed.
+	fmt.Printf("files       %d\n", res.pop.Files)
+	fmt.Printf("unopenable  %d\n", res.pop.Unopenable)
+	fmt.Printf("documents   %d\n", res.pop.Documents)
+	fmt.Printf("pages       %d\n", res.pop.Pages)
+	fmt.Printf("attempted   %d\n", c.Attempted)
 	fmt.Printf("extracted   %d\n", c.Extracted)
 	// Of the extracted pages, those whose raster does not fill the page box.
 	// byb-b1.3 retired the "not-page-covering" reason, and these are the pages

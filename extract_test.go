@@ -1121,8 +1121,8 @@ func TestClassifyPaintOcclusionAcrossPlacements(t *testing.T) {
 		// actually stops it reducing to one raster. The page diverted before and
 		// diverts now; only the reason changes, and it changes to the true one.
 		//
-		// This is govdocs1/300512.pdf pages 16, 17, 18 and 23, the only four pages
-		// in the 169,376-page sample whose reason moves. Their wash needs 0.0603pt.
+		// This is govdocs1/300512.pdf pages 16, 17, 18 and 23, the only four of
+		// 169,376 sample pages whose reason moves. Their wash needs 0.0603pt.
 		{"a wash inside the fill tolerance over a stack that does not reduce",
 			"1 1 1 scn -0.5 -0.5 613 793 re f\n" + coverIm0 + "q 100 0 0 100 100 100 cm /Im1 Do Q\n",
 			map[int]pdfdoc.ImageInfo{1: plain, 2: plain}, "multiple-images"},

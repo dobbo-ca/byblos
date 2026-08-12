@@ -140,7 +140,7 @@ measurement sample described in `tools/sample/README.md`, which lives at
 `~/work/dobbo-ca/.byblos-sample/` and is not in git. **§4.1 was re-measured from
 scratch after its first run was refuted; §4.1a records what was wrong.**
 
-**Population.** 5,672 files: `govdocs1` 4,840 (digitalcorpora govdocs1 zips),
+**Population.** 5,672 sample files: `govdocs1` 4,840 (digitalcorpora govdocs1 zips),
 `dc` 520 (DocumentCloud), `ia` 299 (archive.org), `anchors` 13 (the named files
 beads quote facts about). Every probe was a throwaway program written under the
 session scratchpad and deleted; §6 proposes the beads that would make them
@@ -260,7 +260,7 @@ was **2.7× low on dc and correct on govdocs1**, which is not.
   you cannot cheaply measure the thing that decides whether to build it — but a
   cheap proxy exists: `Tj`/`TJ` operand bytes attributed to the font in force,
   which needs only `Tf` tracking (0.5 day), not the text matrix.
-- **5 of the 5,672 files could not be read at all** and contribute zero to every
+- **5 of the 5,672 sample files could not be read at all** and contribute zero to every
   count above: 1 govdocs1 file (`700620.pdf`, "xrefsection: missing trailer
   dict") and 4 dc files whose object streams only the validating reader can
   expand and which that reader then rejects (`dc-28522465`, `dc-28522472`,
@@ -348,7 +348,7 @@ a scanned corpus (design spec §2).
   computable offline today — `bornDigital` is `IsBornDigital`'s two clauses and
   `hasStash` is "whole-document `pdftotext` output is not blank"
   (`validate.go:231`) — so what byblos's corpus cannot supply is not the
-  measurement but the **intake mix**: 4,840 of its 5,672 files (85%) are
+  measurement but the **intake mix**: 4,840 of its 5,672 sample files (85%) are
   govdocs1, which is not what a family DMS receives. There are no production
   counts to fall back on either. **Kleio has no metrics or counter
   instrumentation of any kind** — the only `otel` entries in its `go.mod` are

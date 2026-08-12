@@ -40,19 +40,16 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"io/fs"
 	"math"
 	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
+	"github.com/dobbo-ca/byblos/internal/sample"
 )
 
 // clauseOrder is byb-b1.9's recorded precedence, "opacity -> image dict ->
@@ -281,19 +278,13 @@ func decodeCheck(d pdfdoc.Doc, placement content.Placement) string {
 	return "OK"
 }
 
-func probeFile(path string, decode bool) (rows []pageProbe, pages int, skipped int) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, 0, 0
-	}
-	defer f.Close()
-	d, err := pdfdoc.Open(f)
-	if err != nil {
-		return nil, 0, 0
-	}
+// probeDoc walks one already-open document. sample.Walk opened it and counted
+// its pages; re-counting them here is what let two lanes publish two different
+// populations (byb-wj2).
+func probeDoc(doc sample.Doc, decode bool) (rows []pageProbe, skipped int) {
+	d, path := doc.Doc, doc.Path
 	ctx := context.Background()
 	for n := 1; n <= d.PageCount(); n++ {
-		pages++
 		p, err := d.Page(n)
 		if err != nil {
 			// extractPage returns this page's error before classify too
@@ -331,7 +322,7 @@ func probeFile(path string, decode bool) (rows []pageProbe, pages int, skipped i
 		}
 		rows = append(rows, r)
 	}
-	return rows, pages, skipped
+	return rows, skipped
 }
 
 func TestClauseBreakdownProbe(t *testing.T) {
@@ -345,19 +336,12 @@ func TestClauseBreakdownProbe(t *testing.T) {
 	}
 	decode := os.Getenv("BYBLOS_CLAUSE_DECODE") != "0"
 
-	var paths []string
-	if err := filepath.WalkDir(root, func(p string, e fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(p), ".pdf") {
-			paths = append(paths, p)
-		}
-		return nil
-	}); err != nil {
+	// internal/sample owns the enumeration and the page count, so this probe and
+	// every other lane divide by the same population (byb-wj2).
+	paths, err := sample.Paths(root)
+	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
 	}
-	sort.Strings(paths)
 	if len(paths) == 0 {
 		t.Fatalf("no PDFs under %s", root)
 	}
@@ -371,25 +355,16 @@ func TestClauseBreakdownProbe(t *testing.T) {
 	// file's rows into its own slot, so output is in lexical path order whatever
 	// the worker count.
 	per := make([][]pageProbe, len(paths))
-	pages := make([]int, len(paths))
 	fails := make([]int, len(paths))
 	start := time.Now()
-	work := make(chan int)
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range work {
-				per[i], pages[i], fails[i] = probeFile(paths[i], decode)
-			}
-		}()
+	pop, err := sample.Walk(root, workers, func(d sample.Doc) {
+		if d.Err == nil {
+			per[d.Index], fails[d.Index] = probeDoc(d, decode)
+		}
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
 	}
-	for i := range paths {
-		work <- i
-	}
-	close(work)
-	wg.Wait()
 	elapsed := time.Since(start)
 
 	out, err := os.Create(outPath)
@@ -397,9 +372,8 @@ func TestClauseBreakdownProbe(t *testing.T) {
 		t.Fatalf("create %s: %v", outPath, err)
 	}
 	defer out.Close()
-	var totalPages, totalFails, rows, vp, heldOnly int
+	var totalFails, rows, vp, heldOnly int
 	for i := range paths {
-		totalPages += pages[i]
 		totalFails += fails[i]
 		for _, r := range per[i] {
 			rows++
@@ -418,5 +392,5 @@ func TestClauseBreakdownProbe(t *testing.T) {
 		t.Fatalf("close %s: %v", outPath, err)
 	}
 	t.Logf("files=%d pages=%d pre-classify-skips=%d diverts=%d vector-paint=%d held-only=%d elapsed=%v",
-		len(paths), totalPages, totalFails, rows, vp, heldOnly, elapsed)
+		pop.Files, pop.Pages, totalFails, rows, vp, heldOnly, elapsed)
 }

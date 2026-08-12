@@ -94,7 +94,7 @@ Evidence: `2026-08-07-font-substitution/{real,open-liberation,box-narrow,box-fil
 
 ## 4. Population
 
-Sampled every 7th manifest row: 811 of 5,672 documents.
+Sampled every 7th manifest row: 811 of 5,672 sample files.
 
 - 437/811 (**53.9%**) have at least one non-embedded page-1 font.
 - 272/437 of those are pure vector text — page 1 carries no image at all.

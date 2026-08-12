@@ -334,7 +334,7 @@ const (
 //
 // WHAT THE CORPUS ACTUALLY HOLDS, and it is not what the shape of this function
 // suggests. Measured 2026-08-11 by jbig2_symbol_probe_test.go over all four
-// corpora, 5,672 files and 169,376 pages: of the 6,818 pages that are a single
+// corpora, 5,672 sample files and 169,376 sample pages: of the 6,818 pages that are a single
 // page-covering JBIG2 raster, 4,371 were held by this gate, and every one of
 // them is /DeviceGray at 1 bit per component with an array of exactly two
 // numbers. Two arrays appear in the whole sample and no others:
