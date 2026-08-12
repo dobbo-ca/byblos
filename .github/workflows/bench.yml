@@ -29,12 +29,20 @@ jobs:
     #     a gate that has never refused anything has not been tested.
     #  3. the actor is on the allowlist.
     #
-    # BENCH_ACTORS is a repository or organisation variable holding a JSON
-    # array, so the routine's bot login can be added without editing this file.
-    # The fallback is the maintainer alone, which fails closed: an unset
-    # variable narrows who can run this, it does not widen it. Add the App's
-    # `<app-slug>[bot]` login to BENCH_ACTORS when the App slug is known, or
-    # the routine's own pull requests will be gated out of their own benchmark.
+    # BENCH_ACTORS is a repository variable holding a JSON array, so the
+    # allowlist can change without editing this file. It is set to:
+    #
+    #     ["cdobbyn","dobbobot-public[bot]"]
+    #
+    # The second entry is the routine's identity. When the App applies the
+    # label, github.actor on that event is the App's bot login and NOT the
+    # maintainer's, so leaving it out gates the routine out of its own
+    # benchmark -- silently, because a job whose if: is false does not run and
+    # reports nothing at all. Verified against the API: that login exists and
+    # is of type Bot.
+    #
+    # The fallback here is the maintainer alone, which fails closed: an unset
+    # or emptied variable narrows who can run this, it does not widen it.
     if: >-
       github.event.label.name == 'bench'
       && github.event.pull_request.head.repo.full_name == github.repository
