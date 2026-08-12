@@ -171,6 +171,50 @@ loss stays visible rather than silent.
 **Byblos wraps `pdfcpu` behind its own interfaces** so that replacing it later is
 a swap rather than a rewrite.
 
+**Poppler and seven other CLIs are test-only, and this table did not say so.**
+The table above lists what the *artifact* links. It said nothing about what the
+*test harness* runs, and that omission is why the question keeps recurring
+(`byb-vv4`). §8 already carves the oracles out; this is the same carve-out stated
+where a reader looks for dependencies.
+
+Byblos's shipped code shells out to nothing — the library imports `os/exec`
+nowhere — and the suite proves it. Measured on `main` at `098bb2c`, counted
+per-test with `go test -json` rather than by package:
+
+| `PATH` contains | pass | skip |
+|---|---|---|
+| every tool installed | 1724 | 4 |
+| everything except poppler | 1643 | 30 |
+| the Go toolchain and nothing else | 1570 | 38 |
+
+All three exit 0. Poppler gates 81 tests across 26 named cases; the other seven
+tools — `gs`, `qpdf`, `pngquant`, `jbig2dec`, `jbig2`, ImageMagick and
+`tiffdump` — gate 73 more.
+
+**They are retained deliberately, and the reason is independence, not
+capability.** All 26 cases have one shape: Byblos writes a PDF, and a *foreign*
+implementation reads it back to say whether Byblos wrote what it claimed.
+Replacing them with Byblos's own reader would not remove a dependency, it would
+remove the evidence — a reader written from the same specification by the same
+authors shares the same misreadings. `TestBuildPDFOrientationIsTopDown` puts the
+case in one line: a stray y-flip in the placement matrix is invisible to an
+in-process round trip, because both sides use the same matrix.
+
+Offline golden files do not substitute either, and the limit is worth stating so
+it is not proposed again. They work where the oracle's *input* is a committed
+fixture, which is exactly what `testdata/oracle/gen.go` and the checked-in
+`poppler.json` already do behind `make oracle`. They fail for these 26, because
+there Byblos generates the input: change the writer and the golden is stale, and
+nothing distinguishes "we improved" from "we broke it" without running the oracle
+again.
+
+**None of this is a licence to leave native gaps.** Reading and writing PDF is
+Byblos's own job, and an oracle in the test harness says nothing about what
+Byblos can do. Every known gap is tracked as an issue rather than as prose here —
+§5 and `FUTURE.md` carry the roadmap entries, and `byb-bjh` covers the register
+that makes a missing capability name its own issue from code instead of from a
+document nobody greps.
+
 **Byblos does not import Cadmus, and Cadmus does not import Byblos.** Byblos
 defines its own `TextLayer` input type (§4). The fan-out this paragraph
 describes — Kleio as the only component that knows both libraries exist,
