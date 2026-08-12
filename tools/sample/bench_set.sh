@@ -79,4 +79,8 @@ mkdir -p "$OUT"
 
 (cd "$OUT" && shasum -a 256 bench-v1.tar.zst > bench-v1.tar.zst.sha256)
 
-echo "bench-v1: $count documents, $(shasum -a 256 "$OUT/bench-v1.tar.zst" | cut -d' ' -f1)"
+# Name the files, because the caller usually passes a mktemp directory and has
+# no other way to learn where they landed.
+echo "bench-v1: $count documents, sha256 $(cut -d' ' -f1 "$OUT/bench-v1.tar.zst.sha256")"
+echo "  $OUT/bench-v1.tar.zst"
+echo "  $OUT/bench-v1.tar.zst.sha256"
