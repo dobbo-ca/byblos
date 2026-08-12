@@ -132,20 +132,29 @@ var ErrUnsupportedJBIG2Feature = errors.New("byblos: JBIG2 stream uses a feature
 // than the envelope and needing to read it back must tile it; nothing here will
 // silently produce a partial raster instead.
 //
-// It decodes IMMEDIATE GENERIC REGIONS ONLY, coded with GBTEMPLATE 0 and the
-// nominal AT pixels of T.88 Table 5. Every other JBIG2 coding mode returns
-// ErrUnsupportedJBIG2Feature and no bitmap. That covers a large share of the
-// JBIG2 in the wild: archive scanners commonly emit symbol-mode (a symbol
-// dictionary plus text regions), and none of it is decodable here.
+// WHAT IT DECODES, and the name is now narrower than the function (byb-9v0):
+// immediate generic regions coded with GBTEMPLATE 0 and the nominal AT pixels of
+// T.88 Table 5, AND arithmetically coded symbol dictionaries with the immediate
+// text regions that place them. The name is kept because callers pin it; what
+// changed is the capability, not the contract.
+//
+// Every other JBIG2 coding mode returns ErrUnsupportedJBIG2Feature and no
+// bitmap: Huffman symbol coding, refinement, halftones, MMR, the other three
+// generic templates and non-nominal AT pixels.
 //
 // The refusal is the point, not a gap left to fill in later. The MQ arithmetic
 // decoder returns a decision for any input whatsoever, so running it over a
-// symbol-mode or MMR stream does not fail -- it yields a full-size bitmap of
-// noise. An error a caller can route around is strictly better than a raster
-// that is wrong without looking wrong.
+// Huffman or MMR stream does not fail -- it yields a full-size bitmap of noise.
+// An error a caller can route around is strictly better than a raster that is
+// wrong without looking wrong.
 //
-// Page-0 (global) segments from a PDF /JBIG2Globals stream are not consulted.
-// They carry symbol and pattern dictionaries, which nothing here can use.
+// PAGE-0 (GLOBAL) SEGMENTS FROM A PDF /JBIG2Globals STREAM ARE NOT VISIBLE ON
+// THIS ENTRY POINT, because it is handed one stream and that object is another.
+// A symbol dictionary very often lives there -- a bulk scanner writes one per
+// document and every page points at it -- and a text region without its
+// dictionary is refused here rather than decoded to a blank page. Extraction
+// does not have that limitation: ExtractPageRaster reads /DecodeParms and hands
+// both streams to the decoder.
 func DecodeJBIG2Generic(data []byte) (*Bitmap, error) {
 	b, err := jbig2.DecodeEmbeddedStream(data)
 	if err != nil {
@@ -232,7 +241,7 @@ func DecodeJBIG2Generic(data []byte) (*Bitmap, error) {
 // Every error it returns opens with "jbig2:", matching the errors
 // internal/jbig2 returns, so extractPage can wrap the lot without naming the
 // codec a second time.
-func decodeJBIG2Placement(data []byte, imageInfo func(int) (pdfdoc.ImageInfo, bool), id int) (image.Image, error) {
+func decodeJBIG2Placement(data, globals []byte, imageInfo func(int) (pdfdoc.ImageInfo, bool), id int) (image.Image, error) {
 	info, ok := imageInfo(id)
 	if !ok {
 		return nil, fmt.Errorf("jbig2: image %d has no dictionary to check the decoded raster against", id)
@@ -246,7 +255,7 @@ func decodeJBIG2Placement(data []byte, imageInfo func(int) (pdfdoc.ImageInfo, bo
 			"bilevel page at one byte per pixel and the limit is %d",
 			id, info.Width, info.Height, px, int64(jbig2.MaxPagePixels))
 	}
-	w, h, err := jbig2.PageSize(data)
+	w, h, err := jbig2.PageSizeWithGlobals(globals, data)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +263,7 @@ func decodeJBIG2Placement(data []byte, imageInfo func(int) (pdfdoc.ImageInfo, bo
 		return nil, fmt.Errorf("jbig2: page is %dx%d but image %d's dictionary says %dx%d",
 			w, h, id, info.Width, info.Height)
 	}
-	b, err := jbig2.DecodeEmbeddedStream(data)
+	b, err := jbig2.DecodeEmbeddedStreamWithGlobals(globals, data)
 	if err != nil {
 		return nil, err
 	}

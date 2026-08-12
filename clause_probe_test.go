@@ -268,7 +268,7 @@ func decodeCheck(d pdfdoc.Doc, placement content.Placement) string {
 	}
 	switch fileType {
 	case "jbig2":
-		if _, err := decodeJBIG2Placement(data, d.ImageInfo, placement.ID); err != nil {
+		if _, err := decodeJBIG2Placement(data, nil, d.ImageInfo, placement.ID); err != nil {
 			return "unsupported-codec-jbig2"
 		}
 	case "jpx":

@@ -88,6 +88,14 @@ CMYK rasters pdfcpu re-renders as TIFF.
 **Why deferred:** B0/B1 targeted the extraction path, and the corpus Byblos was
 built against is consumer-scanner output, which is entirely PNG and JPEG.
 
+**`decode-jbig2` is now partly built and the entry stays open.** byb-riy landed
+the generic-region decoder and byb-9v0 the arithmetic symbol dictionary and text
+region — between them the large majority of JBIG2 in the sample. What is left is
+Huffman symbol coding, refinement regions, halftone regions, MMR, and generic
+regions using a template or AT pixels other than the nominal ones. Any page still
+diverting as `unsupported-codec-jbig2` nominates this capability, so the upgrade
+set stays correct without amendment.
+
 **Why they are separate capability strings:** the codec mix is wildly
 corpus-dependent, so "would a decoder help?" has no single answer. Codec of the
 page-covering raster on scan-shaped pages, measured on `byb-divert`:

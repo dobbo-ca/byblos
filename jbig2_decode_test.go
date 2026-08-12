@@ -95,11 +95,20 @@ func TestDecodeJBIG2GenericRejectsNonGeneric(t *testing.T) {
 	if base[regionTypeAt] != 39 {
 		t.Fatalf("offset assumption broken: segment type byte = %d, want 39", base[regionTypeAt])
 	}
+	// SYMBOL DICTIONARY (0) AND TEXT REGION (6) USED TO BE IN THIS TABLE and
+	// byb-9v0 removed them, for the reason internal/jbig2's own copy of this
+	// table states: relabelling a generic region segment as one of those does
+	// not produce a legal symbol-mode stream, it produces a generic region body
+	// read as a symbol dictionary header. The cases passed because the dispatch
+	// refused by segment type before parsing, so what they pinned was the
+	// refusal and not the reason for it. What byblos still declines in those
+	// types is the Huffman and refinement variants, and
+	// TestDecodeJBIG2GenericDecodesSymbolModeAndDeclinesItsHuffmanVariant pins
+	// that against a stream jbig2enc wrote.
 	for name, typ := range map[string]byte{
-		"symbol-dictionary": 0,
-		"text-region":       6,
-		"halftone-region":   22,
-		"refinement-region": 42,
+		"halftone-region":    22,
+		"refinement-region":  42,
+		"pattern-dictionary": 16,
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := bytes.Clone(base)
@@ -303,7 +312,7 @@ func TestDecodeJBIG2PlacementAppliesTheDecodeArray(t *testing.T) {
 			if tc.decode != nil {
 				info.Decode, info.DecodeArray = true, tc.decode
 			}
-			img, err := decodeJBIG2Placement(data, func(int) (pdfdoc.ImageInfo, bool) {
+			img, err := decodeJBIG2Placement(data, nil, func(int) (pdfdoc.ImageInfo, bool) {
 				return info, true
 			}, 7)
 			if err != nil {
@@ -387,7 +396,7 @@ func TestDecodeJBIG2PlacementRefusesADecodeArrayItCannotRead(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info := tc.info(grayInfo(src.Width, src.Height))
-			got, err := decodeJBIG2Placement(data, func(int) (pdfdoc.ImageInfo, bool) {
+			got, err := decodeJBIG2Placement(data, nil, func(int) (pdfdoc.ImageInfo, bool) {
 				return info, true
 			}, 7)
 			if err == nil {
@@ -434,7 +443,7 @@ func TestDecodeJBIG2PlacementReadsTheDecodeArrayBeforeOpeningTheStream(t *testin
 		{"empty", nil},
 		{"valid-and-the-right-size", valid},
 	} {
-		got, err := decodeJBIG2Placement(c.data, info, 7)
+		got, err := decodeJBIG2Placement(c.data, nil, info, 7)
 		if err == nil {
 			t.Fatalf("%s: an unreadable /Decode array must be refused", c.name)
 		}
@@ -487,7 +496,7 @@ func TestDecodeJBIG2PlacementGuardsTheDictionary(t *testing.T) {
 	good := pdfdoc.ImageInfo{Width: src.Width, Height: src.Height}
 
 	// The control: with a dictionary that agrees, the raster comes back.
-	img, err := decodeJBIG2Placement(data, info(good, true), 7)
+	img, err := decodeJBIG2Placement(data, nil, info(good, true), 7)
 	if err != nil {
 		t.Fatalf("decodeJBIG2Placement on a matching dictionary: %v", err)
 	}
@@ -528,7 +537,7 @@ func TestDecodeJBIG2PlacementGuardsTheDictionary(t *testing.T) {
 			"byblos renders a bilevel page at one byte per pixel"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := decodeJBIG2Placement(data, info(tc.info, tc.ok), 7)
+			got, err := decodeJBIG2Placement(data, nil, info(tc.info, tc.ok), 7)
 			if err == nil {
 				t.Fatalf("decodeJBIG2Placement returned a %v raster; want an error", got.Bounds())
 			}
@@ -989,7 +998,7 @@ func TestDecodeJBIG2PlacementGuardsTheDictionaryHeight(t *testing.T) {
 		return pdfdoc.ImageInfo{Width: pageW, Height: 2 * pageH}, true
 	}
 
-	got, err := decodeJBIG2Placement(data, info, 7)
+	got, err := decodeJBIG2Placement(data, nil, info, 7)
 	if err == nil {
 		t.Fatalf("a %dx%d JBIG2 page under a dictionary declaring %dx%d was accepted and "+
 			"returned a %v raster. The dictionary is what the PDF says the image is; a page "+

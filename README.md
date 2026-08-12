@@ -12,7 +12,7 @@ partially covered, and the residue is tracked per binary rather than estimated.
 > "book", comes from its name. This library handles the paper.
 
 **Status:** under active implementation. Inspection, raster extraction, JBIG2
-generic-region encoding, the invisible text layer, PDF assembly from images,
+generic-region encoding and symbol-mode decoding, the invisible text layer, PDF assembly from images,
 structural optimization (including our own Annex F linearizer), and image
 recompression (quantization, downsampling, JPEG recompression) all exist and
 are exported. See
@@ -35,6 +35,11 @@ rasterized at all. Pages that are neither are detected and reported
   symbol matching. Lossy JBIG2 can silently substitute characters in scanned
   documents — the 2013 Xerox scanner defect — and produces output that looks
   *cleaner* while being wrong. See [FUTURE.md](FUTURE.md) for the full reasoning.
+  That is a commitment about what Byblos **writes**. It **reads** the symbol
+  dictionaries and text regions other encoders wrote, including the shared
+  dictionary a PDF keeps in `/DecodeParms /JBIG2Globals`, because a decoder
+  places the symbols a stream names and never judges two glyphs alike — the
+  substitution risk belongs entirely to the encoder.
 - **Capability-based provenance.** Every output `Optimize` rewrites records what
   each page actually received, and claims only the capabilities that call
   exercised — never the whole build's, which would suppress a later version's
