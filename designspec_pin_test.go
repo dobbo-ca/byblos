@@ -570,11 +570,12 @@ func TestDesignSpecPublicAPIBlockMatchesStructFields(t *testing.T) {
 	}
 	// The mirror of the check above: a type the spec writes as something other
 	// than a struct while the package writes it as one.
+	specDecls := exportedDecls(t, "spec-section-4.go", block)
 	for name := range pkg {
 		if _, ok := spec[name]; ok {
 			continue
 		}
-		if _, declared := exportedDecls(t, "spec-section-4.go", block)[name]; declared {
+		if _, declared := specDecls[name]; declared {
 			t.Errorf("the package declares %s as a struct; the design spec's section 4 block "+
 				"declares %s but not as a struct type", name, name)
 		}
