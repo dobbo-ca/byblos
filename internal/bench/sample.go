@@ -95,4 +95,24 @@ type Run struct {
 	GOOSGOARCH string   `json:"goos_goarch"`
 	BenchSet   string   `json:"bench_set_sha256"`
 	Samples    []Sample `json:"samples"`
+
+	// Skipped records every (capability, document) pair that produced no
+	// sample, and why.
+	//
+	// A document that cannot be read is a property of that document, not of the
+	// build: testdata/corpus carries malformed.pdf deliberately, and one corrupt
+	// file must not zero a whole run. But a skip that is not recorded is
+	// indistinguishable from a measurement, so every one is written down and
+	// cmdRun refuses to emit a run with no samples at all.
+	Skipped []Skip `json:"skipped,omitempty"`
+}
+
+// Skip is one measurement that did not happen.
+type Skip struct {
+	Capability string `json:"capability"`
+	Doc        string `json:"doc"`
+
+	// Reason is "ineligible" when the capability does not apply to the
+	// document, or the child's error text when the document could not be read.
+	Reason string `json:"reason"`
 }

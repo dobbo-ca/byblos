@@ -11,6 +11,30 @@ import (
 // weighted sum says.
 const RegressionCeiling = 10.0
 
+// NoiseMargin multiplies the spread recorded in the baseline before a delta is
+// judged to be noise.
+//
+// It exists because a min-to-max band taken over N runs UNDER-estimates the
+// true band: three runs cannot show the widest excursion a number makes. That
+// was not a theory. A baseline built from three runs of the generated corpus,
+// scored against an unmeasured fourth run of the same commit, produced +0.001
+// and PASSED -- the exact failure this floor exists to stop. A 3x margin
+// covered every excursion observed since.
+const NoiseMargin = 3.0
+
+// MinimumScore is the smallest weighted score that may pass.
+//
+// The per-pair noise floor above suppresses jitter one pair at a time; this
+// guards the total, because many pairs each drifting below their own floor can
+// still sum to a positive number. It is also the more honest gate: the routine
+// exists to find material improvements, and a candidate that cannot clear this
+// is not worth a maintainer reading it.
+//
+// Scale: an unchanged run scored +0.001 in testing. A 1% size win on
+// jbig2-generic, which holds roughly a third of the size share, scores about
+// +0.14. This threshold sits between them, nearer the noise.
+const MinimumScore = 0.05
+
 // Finding is one capability-and-metric comparison.
 type Finding struct {
 	Capability   string  `json:"capability"`
@@ -19,6 +43,11 @@ type Finding struct {
 	Head         float64 `json:"head"`
 	DeltaPercent float64 `json:"delta_percent"` // negative is an improvement
 	Contribution float64 `json:"contribution"`
+
+	// Noise is true when the delta fell inside the spread this pair showed
+	// across repeated runs of the baseline commit. Such a finding is printed
+	// for the reader and contributes zero to the score.
+	Noise bool `json:"noise,omitempty"`
 }
 
 // Result is one scored comparison.
@@ -66,8 +95,25 @@ func Score(base Baseline, head Run) Result {
 				DeltaPercent: delta,
 				Contribution: weight * share * override * -delta,
 			}
+
+			// A delta inside the band this pair moved when nothing changed is
+			// noise, not a result. Byblos is not as deterministic as the design
+			// assumed: output size drifts by up to 0.11% on the capabilities
+			// that write through pdfcpu, and total allocation drifts on all of
+			// them. Without this, a candidate that changed nothing would score
+			// a small non-zero number and could pass on measurement jitter
+			// alone, because Pass requires only Score > 0.
+			if spread, ok := base.Spreads[metric][capability]; ok && abs(delta) <= spread*NoiseMargin {
+				f.Noise = true
+				f.Contribution = 0
+			}
+
 			res.Findings = append(res.Findings, f)
 			res.Score += f.Contribution
+
+			// The ceiling is checked against the real delta, not the
+			// noise-suppressed contribution. A spread is fractions of a
+			// percent and the ceiling is 10%, so nothing can be both.
 			if delta > RegressionCeiling {
 				res.Ceilings = append(res.Ceilings, f)
 			}
@@ -84,7 +130,7 @@ func Score(base Baseline, head Run) Result {
 		return strings.Compare(a.Capability, b.Capability)
 	})
 
-	res.Pass = res.Score > 0 && len(res.Ceilings) == 0
+	res.Pass = res.Score >= MinimumScore && len(res.Ceilings) == 0
 	return res
 }
 
@@ -115,7 +161,8 @@ func (r Result) Markdown() string {
 	if r.Pass {
 		verdict = "PASS"
 	}
-	fmt.Fprintf(&b, "**%s** — weighted score `%+.3f`\n\n", verdict, r.Score)
+	fmt.Fprintf(&b, "**%s** — weighted score `%+.3f` (pass needs `%+.2f`)\n\n",
+		verdict, r.Score, MinimumScore)
 
 	if len(r.Ceilings) > 0 {
 		fmt.Fprintf(&b, "> Regression ceiling breached (>%.0f%%):\n>\n", RegressionCeiling)
@@ -128,8 +175,21 @@ func (r Result) Markdown() string {
 	b.WriteString("| capability | metric | base | head | delta | contribution |\n")
 	b.WriteString("|---|---|---:|---:|---:|---:|\n")
 	for _, f := range r.Findings {
-		fmt.Fprintf(&b, "| %s | %s | %.0f | %.0f | %+.2f%% | %+.4f |\n",
-			f.Capability, f.Metric, f.Base, f.Head, f.DeltaPercent, f.Contribution)
+		contribution := fmt.Sprintf("%+.4f", f.Contribution)
+		if f.Noise {
+			contribution = "noise"
+		}
+		fmt.Fprintf(&b, "| %s | %s | %.0f | %.0f | %+.2f%% | %s |\n",
+			f.Capability, f.Metric, f.Base, f.Head, f.DeltaPercent, contribution)
 	}
 	return b.String()
+}
+
+// abs is math.Abs without the import, kept local because it is the only
+// floating-point helper this file needs.
+func abs(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
