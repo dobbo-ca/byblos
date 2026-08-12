@@ -45,10 +45,44 @@ deterministic one costs nothing in signal — a change that allocates less is th
 change worth having — and it moves 0.15 of the weight from the noisy column to
 the exact one.
 
-That leaves **0.75 of the total weight measurable exactly and reproducibly, and
-only wall time, at 0.25, dependent on the machine.** Section 5.3 turns that into
-the committed baseline. Peak RSS is still recorded and printed, as information
-for the reader. It never scores.
+That leaves 0.75 of the total weight measurable without a clock, and wall time,
+at 0.25, dependent on the machine. Section 5.3 turns that into the committed
+baseline. Peak RSS is still recorded and printed, as information for the reader.
+It never scores.
+
+### 2.1 What "deterministic" turned out to mean, measured
+
+The determinism column above was an assumption when this spec was written. It
+was measured during implementation, over three consecutive runs of the whole
+generated corpus on one machine with no code change between them. It is only
+partly true, and the correction is load-bearing enough to record here rather
+than in a footnote.
+
+| Capability | Output size spread | Allocation spread |
+|---|---|---|
+| `jbig2-generic` | **0.0000%** | 0.161% |
+| `build-pdf` | **0.0000%** | 0.276% |
+| `quantize-png` | **0.0000%** | 0.003% |
+| `linearize` | 0.112% | 0.151% |
+| `text-layer` | 0.079% | 0.164% |
+| `jpeg-recompress` | 0.009% | 0.163% |
+
+Two conclusions.
+
+**The three capabilities byblos encodes itself are byte-exact.** Output size for
+`jbig2-generic`, `build-pdf` and `quantize-png` did not move by a single byte
+across three runs. `jbig2-generic` is the capability expected to carry most of
+the size weight, so the central idea — that a size win can be compared against a
+stored number rather than a re-measured one — survives intact.
+
+**The three that write through pdfcpu drift, and allocation drifts everywhere.**
+The drift is small, but it is not zero, and `Pass` requires only that the score
+exceed zero. Left alone, a candidate that changed nothing could pass on jitter.
+
+The fix is section 6 rule 2, which already existed for latency, generalised: the
+baseline records the band each capability and metric moved through when nothing
+changed, and a head delta inside that band scores zero. Latency was not the only
+unstable metric; it was only the one this spec expected to be unstable.
 
 Two hard constraints govern every candidate:
 
@@ -56,9 +90,9 @@ Two hard constraints govern every candidate:
 - A test may be changed only with a justification in the pull request body, and
   a changed test is surfaced to the reader before any score is.
 
-Output file size, the highest-weighted metric, is the only one of the six with
-no measurement noise. Byblos is deterministic, so a size delta is exact rather
-than statistical. The design leans on that.
+Output file size, the highest-weighted metric, carries the least measurement
+noise of the six, and none at all on the capabilities byblos encodes itself
+(section 2.1). The design leans on that, within the band section 2.1 measured.
 
 ## 3. The map
 
@@ -257,6 +291,11 @@ actually touches. A pull request that changes `internal/jbig2` re-times
 
 #### Validity, which is the whole condition you named
 
+**The baseline is built from at least three runs of the same commit**, not one.
+A single run cannot tell you how much a number moves on its own, and section 2.1
+established that several of them do move. `spreads` is what those repetitions
+produce, and it is what rule 2 spends.
+
 A stored baseline is only comparable if what produced it is the same as what
 produces the head numbers. The file therefore carries a fingerprint, and the
 scorer refuses to use it unless every field matches:
@@ -269,8 +308,9 @@ scorer refuses to use it unless every field matches:
   "go_version":       "1.26.4",
   "goos_goarch":      "linux/amd64",
   "runner":           "ubuntu-24.04, informational only",
-  "metrics":          { },
-  "latency_shares":   { }
+  "totals":           { },
+  "shares":           { },
+  "spreads":          { }
 }
 ```
 
@@ -328,12 +368,40 @@ Three rules override the arithmetic:
 
 1. **Regression ceiling.** Any capability-and-metric pair worse than +10% fails
    the candidate outright, whatever the score.
-2. **Noise floor on latency.** Base and head are timed in the same job on the
-   same runner, five repetitions each, for the capabilities the diff touches. A
-   wall-time delta smaller than the spread of the base repetitions is recorded
-   as noise and scored as zero. Shared runners vary enough that without this the
-   scorer would reward scheduling luck. A capability the diff does not touch
-   contributes zero to the latency term, rather than a stale comparison.
+2. **Noise floor on every metric.** A delta smaller than the band that
+   capability and metric moved through when nothing changed is recorded as
+   noise and scored as zero.
+
+   For latency the band comes from five repetitions of base and head in the
+   same job on the same runner, for the capabilities the diff touches. Shared
+   runners vary enough that without this the scorer would reward scheduling
+   luck, and a capability the diff does not touch contributes zero to the
+   latency term rather than a stale comparison.
+
+   For the other five metrics the band is stored in the baseline, measured by
+   running the same commit repeatedly at the time the baseline is built
+   (section 2.1). A pair with no recorded band gets zero tolerance — the safe
+   direction, since it scores a real difference rather than forgiving one.
+
+   **The stored band is multiplied by 3 before it is believed.** A min-to-max
+   band over N runs under-estimates the true one, because N runs cannot show the
+   widest excursion a number makes. This was measured, not assumed: a baseline
+   built from three runs, scored against an unmeasured fourth run of the same
+   commit, produced `+0.001` and PASSED. A 3× margin covered every excursion
+   observed afterwards.
+
+4. **Minimum passing score.** A candidate must score at least `+0.05`, not
+   merely above zero.
+
+   The per-pair floor in rule 2 suppresses jitter one pair at a time, and that
+   is not sufficient: many pairs each drifting below their own floor still sum
+   to a positive total. This guards the total.
+
+   It is also the more honest gate. For scale, an unchanged run scores about
+   `+0.001`, and a 1% size win on `jbig2-generic` — which holds roughly a third
+   of the size share — scores about `+0.14`. A candidate that cannot clear
+   `+0.05` is not worth a maintainer's attention, which is the whole purpose of
+   the verdict.
 3. **Lossy-parameter freeze.** A candidate that changes `JPEGQuality`, or any
    other parameter governing how much information is discarded, fails
    regardless of score.

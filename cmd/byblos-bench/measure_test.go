@@ -81,3 +81,39 @@ func TestMeasureReportsIneligibleRatherThanFailing(t *testing.T) {
 func errorsIsIneligible(err error) bool {
 	return err != nil && errors.Is(err, bench.ErrIneligible)
 }
+
+// TestSkipReasonDistinguishesIneligibleFromUnreadable pins that the two
+// reasons a measurement does not happen stay distinguishable in the run.
+//
+// Collapsing them would hide the case that matters: "ineligible" is normal and
+// expected, while an unreadable document is a fact about the corpus that a
+// reader has to be able to see.
+func TestSkipReasonDistinguishesIneligibleFromUnreadable(t *testing.T) {
+	if got := skipReason(errChildSkipped); got != "ineligible" {
+		t.Errorf("skipReason(errChildSkipped) = %q, want %q", got, "ineligible")
+	}
+	unreadable := errors.New("exit status 1: xRefTable failed")
+	if got := skipReason(unreadable); got != unreadable.Error() {
+		t.Errorf("skipReason(unreadable) = %q, want the error text", got)
+	}
+	if got := skipReason(unreadable); got == "ineligible" {
+		t.Error("an unreadable document was recorded as merely ineligible")
+	}
+}
+
+// TestMeasureOverACorruptDocumentIsNotIneligible pins the classification at
+// its source: pdfcpu failing to read a document must NOT surface as
+// ErrIneligible, or cmdRun would file a read failure as a routine skip.
+func TestMeasureOverACorruptDocumentIsNotIneligible(t *testing.T) {
+	doc, ok := corpus.ByName("malformed.pdf")
+	if !ok {
+		t.Skip("malformed.pdf is not in the generated corpus")
+	}
+	_, err := measure("inspect", "malformed.pdf", doc, 0)
+	if err == nil {
+		t.Fatal("measuring inspect over malformed.pdf succeeded; want a read failure")
+	}
+	if errors.Is(err, bench.ErrIneligible) {
+		t.Errorf("a corrupt document reported ErrIneligible: %v", err)
+	}
+}

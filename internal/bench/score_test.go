@@ -197,3 +197,141 @@ func TestOverrideMultipliesContribution(t *testing.T) {
 		t.Errorf("Score = %v, want 4.8 with a 2.0 override applied", got.Score)
 	}
 }
+
+// TestSpreadsAreMeasuredFromRepeatedRuns pins that a baseline built from more
+// than one run of the SAME commit records how much each pair moved when
+// nothing changed.
+func TestSpreadsAreMeasuredFromRepeatedRuns(t *testing.T) {
+	runs := []Run{
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 1000}}},
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 1002}}},
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 999}}},
+	}
+	b := BaselineFromRuns(runs, fixtureFingerprint())
+
+	got := b.Spreads[MetricSize]["linearize"]
+	want := (1002.0 - 999.0) / 1002.0 * 100 // 0.2994%
+	if got < want-0.0001 || got > want+0.0001 {
+		t.Errorf("spread = %v, want %v", got, want)
+	}
+	if b.Totals[MetricSize]["linearize"] != 1000 {
+		t.Errorf("total = %v, want the FIRST run's 1000, not an average",
+			b.Totals[MetricSize]["linearize"])
+	}
+}
+
+// TestDeltaInsideTheSpreadScoresZero is the whole point of the spread: a
+// candidate that changed nothing must not pass on measurement jitter.
+func TestDeltaInsideTheSpreadScoresZero(t *testing.T) {
+	runs := []Run{
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 1000}}},
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 1005}}},
+	}
+	b := BaselineFromRuns(runs, fixtureFingerprint())
+
+	// 0.2% better, well inside the ~0.5% spread those two runs showed.
+	head := Run{Samples: []Sample{{Capability: "linearize", OutBytes: 998}}}
+	got := Score(b, head)
+
+	if got.Score != 0 {
+		t.Errorf("Score = %v, want 0: a delta inside the spread is noise", got.Score)
+	}
+	if got.Pass {
+		t.Error("a candidate passed on noise")
+	}
+	if len(got.Findings) != 1 || !got.Findings[0].Noise {
+		t.Errorf("the finding was not marked as noise: %+v", got.Findings)
+	}
+}
+
+// TestDeltaOutsideTheSpreadStillScores pins that the floor suppresses jitter
+// without suppressing a real win.
+func TestDeltaOutsideTheSpreadStillScores(t *testing.T) {
+	runs := []Run{
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 1000}}},
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 1001}}},
+	}
+	b := BaselineFromRuns(runs, fixtureFingerprint())
+
+	head := Run{Samples: []Sample{{Capability: "linearize", OutBytes: 900}}} // -10%
+	got := Score(b, head)
+
+	if got.Findings[0].Noise {
+		t.Error("a 10% win was suppressed as noise")
+	}
+	if got.Score <= 0 {
+		t.Errorf("Score = %v, want positive for a real 10%% size win", got.Score)
+	}
+}
+
+// TestAbsentSpreadMeansZeroTolerance pins the safe direction: a pair with no
+// measured spread scores its delta rather than being silently forgiven.
+func TestAbsentSpreadMeansZeroTolerance(t *testing.T) {
+	b := BaselineFrom(Run{Samples: []Sample{{Capability: "jbig2-generic", OutBytes: 1000}}},
+		fixtureFingerprint())
+	if len(b.Spreads) != 0 {
+		t.Fatalf("a single-run baseline recorded spreads: %v", b.Spreads)
+	}
+	head := Run{Samples: []Sample{{Capability: "jbig2-generic", OutBytes: 999}}}
+	got := Score(b, head)
+	if got.Findings[0].Noise {
+		t.Error("a pair with no measured spread was treated as noise")
+	}
+	if got.Score <= 0 {
+		t.Errorf("Score = %v, want positive", got.Score)
+	}
+}
+
+// TestATinyPositiveScoreCannotPass is the regression test for the failure this
+// gate was added for: a baseline built from three runs, scored against an
+// unmeasured fourth run of the SAME commit, produced +0.001 and passed.
+//
+// Many pairs each drifting below their own noise floor can still sum to a
+// positive total, so suppressing jitter per pair is not sufficient on its own.
+func TestATinyPositiveScoreCannotPass(t *testing.T) {
+	base := BaselineFrom(Run{Samples: []Sample{
+		{Capability: "jbig2-generic", OutBytes: 1000000},
+	}}, fixtureFingerprint())
+
+	// 0.001% better: a real, non-noise delta, but far too small to act on.
+	head := Run{Samples: []Sample{{Capability: "jbig2-generic", OutBytes: 999990}}}
+	got := Score(base, head)
+
+	if got.Score <= 0 {
+		t.Fatalf("Score = %v; this fixture must be positive for the test to mean anything", got.Score)
+	}
+	if got.Score >= MinimumScore {
+		t.Fatalf("Score = %v is above MinimumScore %v; pick a smaller delta", got.Score, MinimumScore)
+	}
+	if got.Pass {
+		t.Errorf("a score of %v passed; MinimumScore is %v", got.Score, MinimumScore)
+	}
+}
+
+// TestNoiseMarginWidensTheBand pins that the recorded spread is multiplied
+// before it is believed, because a min-to-max band over N runs under-estimates
+// the true one.
+func TestNoiseMarginWidensTheBand(t *testing.T) {
+	if NoiseMargin <= 1 {
+		t.Fatalf("NoiseMargin = %v; a margin of 1 or less does not widen anything", NoiseMargin)
+	}
+	runs := []Run{
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 10000}}},
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 10001}}},
+		{Samples: []Sample{{Capability: "linearize", OutBytes: 10000}}},
+	}
+	b := BaselineFromRuns(runs, fixtureFingerprint())
+	spread := b.Spreads[MetricSize]["linearize"] // ~0.01%
+
+	// A delta outside the raw spread but inside spread*NoiseMargin.
+	head := Run{Samples: []Sample{{Capability: "linearize", OutBytes: 9998}}} // -0.02%
+	got := Score(b, head)
+
+	if abs(got.Findings[0].DeltaPercent) <= spread {
+		t.Fatal("fixture delta is inside the raw spread; it must be outside for this test to bite")
+	}
+	if !got.Findings[0].Noise {
+		t.Errorf("delta %.4f%% was scored despite a spread of %.4f%% and a margin of %v",
+			got.Findings[0].DeltaPercent, spread, NoiseMargin)
+	}
+}

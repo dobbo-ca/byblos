@@ -37,35 +37,102 @@ type Baseline struct {
 	Fingerprint Fingerprint                   `json:"fingerprint"`
 	Totals      map[Metric]map[string]float64 `json:"totals"`
 	Shares      map[Metric]map[string]float64 `json:"shares"`
+
+	// Spreads is the percentage band each (metric, capability) moved across
+	// repeated runs of the same commit. A head delta inside that band is noise
+	// and scores zero -- see BaselineFromRuns and Score.
+	//
+	// An absent entry means a spread was never measured, which Score treats as
+	// zero tolerance. That is the safe direction: it scores a real difference
+	// rather than silently forgiving one.
+	Spreads map[Metric]map[string]float64 `json:"spreads,omitempty"`
 }
 
 // BaselineFrom reduces a run to per-capability totals and shares.
 func BaselineFrom(r Run, f Fingerprint) Baseline {
+	return BaselineFromRuns([]Run{r}, f)
+}
+
+// BaselineFromRuns reduces N repeated runs of the SAME commit to totals, shares
+// and observed spreads.
+//
+// Repetition is what makes Spreads meaningful, and Spreads is why this exists.
+// The design assumed every metric except latency was exactly reproducible.
+// Measured over three runs of the generated corpus that turned out to be true
+// only for the capabilities byblos encodes itself -- jbig2-generic, build-pdf
+// and quantize-png are byte-identical run to run -- while the three that pass
+// through pdfcpu's writer drift by up to 0.11% on output size, and total
+// allocation drifts on all nine by up to 0.28%.
+//
+// Rather than pretend otherwise, the baseline records how much each
+// (capability, metric) actually moved when nothing changed, and Score treats a
+// delta inside that band as noise. That is the same rule design spec section 6
+// already applies to latency, generalised to every metric now that latency is
+// known not to be the only unstable one.
+//
+// Totals are taken from the FIRST run, not an average, so a baseline stays a
+// set of real observed numbers rather than a synthetic mean no run produced.
+func BaselineFromRuns(runs []Run, f Fingerprint) Baseline {
 	b := Baseline{
 		Fingerprint: f,
 		Totals:      make(map[Metric]map[string]float64),
 		Shares:      make(map[Metric]map[string]float64),
+		Spreads:     make(map[Metric]map[string]float64),
 	}
+	if len(runs) == 0 {
+		return b
+	}
+
 	for m := range MetricWeights {
-		totals := make(map[string]float64)
-		var grand float64
-		for _, s := range r.Samples {
-			v, ok := s.Value(m)
-			if !ok {
-				continue
+		// perRun[i][capability] is run i's total for this metric.
+		perRun := make([]map[string]float64, len(runs))
+		for i, r := range runs {
+			totals := make(map[string]float64)
+			for _, s := range r.Samples {
+				v, ok := s.Value(m)
+				if !ok {
+					continue
+				}
+				totals[s.Capability] += v
 			}
-			totals[s.Capability] += v
+			perRun[i] = totals
+		}
+
+		totals := perRun[0]
+		var grand float64
+		for _, v := range totals {
 			grand += v
 		}
 		if m.Deterministic() && len(totals) > 0 {
 			b.Totals[m] = totals
 		}
+
+		if len(runs) > 1 {
+			spreads := make(map[string]float64)
+			for capability, first := range totals {
+				lo, hi := first, first
+				for _, totalsN := range perRun[1:] {
+					v, ok := totalsN[capability]
+					if !ok {
+						continue
+					}
+					lo, hi = min(lo, v), max(hi, v)
+				}
+				if hi > 0 {
+					spreads[capability] = (hi - lo) / hi * 100
+				}
+			}
+			if len(spreads) > 0 {
+				b.Spreads[m] = spreads
+			}
+		}
+
 		if grand == 0 {
 			continue
 		}
 		shares := make(map[string]float64, len(totals))
-		for cap, v := range totals {
-			shares[cap] = v / grand
+		for capability, v := range totals {
+			shares[capability] = v / grand
 		}
 		b.Shares[m] = shares
 	}

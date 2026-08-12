@@ -31,6 +31,8 @@ func main() {
 		err = cmdMeasure(os.Args[2:])
 	case "run":
 		err = cmdRun(os.Args[2:])
+	case "baseline":
+		err = cmdBaseline(os.Args[2:])
 	case "score":
 		err = cmdScore(os.Args[2:])
 	default:
@@ -46,6 +48,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage:
   byblos-bench measure -capability C -doc PATH [-reps N]
   byblos-bench run -set DIR -out FILE [-time C1,C2] [-reps N]
+  byblos-bench baseline -runs A.json,B.json,C.json -out FILE -commit SHA -benchset SHA
   byblos-bench score -baseline FILE -head FILE [-out FILE]
 `)
 	os.Exit(2)
@@ -119,15 +122,24 @@ func cmdRun(args []string) error {
 		}
 		for _, doc := range docs {
 			s, err := fork(self, tg.Capability, doc, n)
-			if errors.Is(err, errChildSkipped) {
-				continue
-			}
 			if err != nil {
-				return fmt.Errorf("%s over %s: %w", tg.Capability, filepath.Base(doc), err)
+				run.Skipped = append(run.Skipped, bench.Skip{
+					Capability: tg.Capability,
+					Doc:        filepath.Base(doc),
+					Reason:     skipReason(err),
+				})
+				continue
 			}
 			run.Samples = append(run.Samples, s)
 		}
 	}
+
+	// A run with no samples is a broken harness reporting success. Refuse it
+	// rather than writing a file every downstream step would treat as measured.
+	if len(run.Samples) == 0 {
+		return fmt.Errorf("measured nothing: %d skips over %d documents", len(run.Skipped), len(docs))
+	}
+	fmt.Fprintf(os.Stderr, "byblos-bench: %d samples, %d skipped\n", len(run.Samples), len(run.Skipped))
 
 	body, err := json.MarshalIndent(run, "", "  ")
 	if err != nil {
@@ -137,6 +149,18 @@ func cmdRun(args []string) error {
 }
 
 var errChildSkipped = errors.New("child reported the document ineligible")
+
+// skipReason turns a fork failure into the text recorded on the skip.
+//
+// The two cases are kept distinct because they mean different things to a
+// reader of the run: "ineligible" is the capability declining a document it
+// does not apply to, while anything else is a document byblos could not read.
+func skipReason(err error) string {
+	if errors.Is(err, errChildSkipped) {
+		return "ineligible"
+	}
+	return err.Error()
+}
 
 // fork runs one measure child and decodes its sample. A child that exits
 // non-zero having printed ErrIneligible is a skip; any other non-zero exit is
@@ -157,6 +181,69 @@ func fork(self, capability, doc string, reps int) (bench.Sample, error) {
 		return bench.Sample{}, fmt.Errorf("decode child output: %w", err)
 	}
 	return s, nil
+}
+
+// cmdBaseline reduces N repeated runs of the SAME commit to a committed
+// baseline.
+//
+// N must be at least 3. One run cannot show how much a number moves on its own,
+// and design spec section 2.1 measured that several of them move: without the
+// spreads these repetitions produce, a candidate that changed nothing can pass
+// on jitter.
+func cmdBaseline(args []string) error {
+	fs := flag.NewFlagSet("baseline", flag.ExitOnError)
+	runs := fs.String("runs", "", "comma-separated run JSON files, same commit")
+	out := fs.String("out", "internal/bench/baseline.json", "where to write the baseline")
+	commit := fs.String("commit", "", "the commit these runs measured")
+	benchSet := fs.String("benchset", "", "sha256 of the bench set archive")
+	harness := fs.String("harness", "", "sha256 over cmd/byblos-bench and internal/bench/map.go")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	var paths []string
+	for _, p := range strings.Split(*runs, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) < 3 {
+		return fmt.Errorf("got %d runs, need at least 3 to measure a spread", len(paths))
+	}
+
+	var loaded []bench.Run
+	for _, p := range paths {
+		body, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		var r bench.Run
+		if err := json.Unmarshal(body, &r); err != nil {
+			return fmt.Errorf("decode %s: %w", p, err)
+		}
+		loaded = append(loaded, r)
+	}
+
+	for i, r := range loaded[1:] {
+		if r.GoVersion != loaded[0].GoVersion || r.GOOSGOARCH != loaded[0].GOOSGOARCH {
+			return fmt.Errorf("run %s was measured on a different toolchain or platform than %s",
+				paths[i+1], paths[0])
+		}
+	}
+
+	b := bench.BaselineFromRuns(loaded, bench.Fingerprint{
+		BenchSetSHA256: *benchSet,
+		HarnessSHA256:  *harness,
+		Commit:         *commit,
+		GoVersion:      loaded[0].GoVersion,
+		GOOSGOARCH:     loaded[0].GOOSGOARCH,
+	})
+
+	body, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(*out, append(body, '\n'), 0o644)
 }
 
 // cmdScore compares a head run against a committed baseline and prints the
