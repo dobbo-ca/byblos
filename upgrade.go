@@ -28,6 +28,15 @@ var capabilityRules = map[string]func(*Provenance) bool{
 
 	// The intended next capability. Its upgrade set is exactly the pages that
 	// recorded jbig2-generic (FUTURE.md).
+	//
+	// THIS IS THE ENCODER, AND byb-9v0 IS NOT IT. That bead landed a symbol
+	// dictionary and text region DECODER, which advances decode-jbig2 below.
+	// The rules say which is which without reading either bead: this one keys
+	// on anyPageApplied, so it fires only on pages BYBLOS ITSELF WROTE as
+	// generic-region JBIG2 and would now write smaller; decode-jbig2 keys on
+	// anyPageDiverted, so it fires on pages byblos COULD NOT READ. Nothing in
+	// the tree writes a symbol dictionary, so this capability is still missing
+	// and buildCapabilities correctly omits it (byb-v66).
 	"jbig2-symbol": anyPageApplied("jbig2-generic"),
 
 	// A compatibility fallback with strictly worse compression. Gaining it never
@@ -162,6 +171,39 @@ var capabilityRules = map[string]func(*Provenance) bool{
 	// PDF/A conformance is a property of the whole file, so any document can be
 	// converted.
 	"pdfa": always,
+}
+
+// capabilityIssue names the tracked issue for every capability this build does
+// NOT have. It is the other half of the register: capabilityRules above says
+// what GAINING a capability would change, and this says WHERE THE WORK LIVES.
+//
+// Every capability is in exactly one of buildCapabilities (provenance.go) and
+// this map — shipped, or tracked — and TestEveryCapabilityIsImplementedOrTracked
+// enforces that. Before byb-bjh nothing did, and six strings had accumulated
+// with no issue behind any of them while the suite stayed green throughout.
+// FUTURE.md carried the narrative for some of them, but prose is not a tracker:
+// nothing failed when a gap was added to the code and to neither list.
+//
+// IT IS A PRODUCTION MAP AND NOT A TEST TABLE for one reason: NotImplemented.Issue
+// (notimplemented.go) reads it. A capability that is missing at run time reports
+// its own bead to the caller, and a second copy of these ids sitting in a test
+// could disagree with the one an error actually carries. One map cannot.
+//
+// WHAT IT CANNOT CHECK, stated so nobody reads more into the gate than is there:
+// the beads database is not in the repository (.beads holds a Dolt DB, and
+// .beads/issues.jsonl is a gitignored export), so no test here can confirm that
+// an id names a real issue, or that the issue is still open. The gate proves the
+// mapping is TOTAL and has no stale entries. Whether byb-mk8 exists is a fact
+// only the tracker holds.
+var capabilityIssue = map[string]string{
+	"ccitt-g4":     "byb-v41",
+	"decode-jbig2": "byb-mk8",
+	"decode-jpx":   "byb-9bn",
+	"decode-tiff":  "byb-2bx",
+	"jbig2-symbol": "byb-v66",
+	"page-cleanup": "byb-09i",
+	"pdfa":         "byb-90q",
+	"render":       "byb-8b9",
 }
 
 func never(*Provenance) bool  { return false }

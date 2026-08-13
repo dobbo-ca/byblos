@@ -374,10 +374,21 @@ func TestOptimizeFreshRecordClaimsNoCapabilities(t *testing.T) {
 // REMOVED by byb-b3's GREEN stage. assertNotImplemented's real content --
 // pinning the Error()/Unwrap()/errors.Is/errors.As shape of *NotImplemented --
 // moved to notimplemented_test.go, against a literal value, so the still-
-// exported type does not go untested now that nothing in this package
-// constructs one. TestEveryNotImplementedNamesAKnownCapability's table lost
-// its only row (RecompressJPEG no longer returns *NotImplemented) and would
-// have passed vacuously forever after; see design spec byb-b3 section 7.
+// exported type did not go untested while nothing in this package constructed
+// one. TestEveryNotImplementedNamesAKnownCapability's table lost its only row
+// (RecompressJPEG no longer returns *NotImplemented) and would have passed
+// vacuously forever after; see design spec byb-b3 section 7.
+//
+// byb-bjh CLOSED THAT GAP RATHER THAN REOPENING IT. extractPage now constructs
+// a *NotImplemented at two sites -- the jpx divert, and the jbig2 divert when
+// the stream named a coding mode this build lacks -- so "nothing in this
+// package constructs one" stopped being true. The vocabulary guard came back as
+// TestEveryNotImplementedSiteNamesTheRegister (capability_register_test.go),
+// built so it cannot go vacuous the way this one did: it drives the extract
+// path with real documents instead of holding a table, so a site that stops
+// returning a *NotImplemented FAILS it rather than emptying it.
+// notimplemented_test.go's literal-value test stays -- it pins the type's shape
+// independently of any caller.
 //
 // TestOptimizeRecompressJPEGRefused (below this comment, formerly) is gone for
 // the same reason as TestOptimizeLinearizeRefused above: it asserted the exact

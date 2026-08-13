@@ -241,6 +241,17 @@ func DecodeJBIG2Generic(data []byte) (*Bitmap, error) {
 // Every error it returns opens with "jbig2:", matching the errors
 // internal/jbig2 returns, so extractPage can wrap the lot without naming the
 // codec a second time.
+//
+// A REFUSAL FOR A MISSING CODING MODE CARRIES ErrUnsupportedJBIG2Feature, and
+// until byb-bjh it did not. This returned internal/jbig2's error unwrapped, so
+// only the exported DecodeJBIG2Generic ever attached that sentinel and
+// errors.Is reported FALSE for every page on the extract path -- erasing, for
+// exactly the population it was written for, the distinction
+// ErrUnsupportedJBIG2Feature's doc comment above says it exists to draw.
+// Measured over the pinned sample at 23a3470: 37 of 6,818 single-raster JBIG2
+// pages divert here, 36 for a coding mode and 1 for damage, and a caller could
+// not tell which was which. (The population was 3,709 before byb-9v0 decoded
+// symbol mode; the defect is older than the number.)
 func decodeJBIG2Placement(data, globals []byte, imageInfo func(int) (pdfdoc.ImageInfo, bool), id int) (image.Image, error) {
 	info, ok := imageInfo(id)
 	if !ok {
@@ -257,7 +268,7 @@ func decodeJBIG2Placement(data, globals []byte, imageInfo func(int) (pdfdoc.Imag
 	}
 	w, h, err := jbig2.PageSizeWithGlobals(globals, data)
 	if err != nil {
-		return nil, err
+		return nil, markUnsupportedJBIG2(err)
 	}
 	if w != info.Width || h != info.Height {
 		return nil, fmt.Errorf("jbig2: page is %dx%d but image %d's dictionary says %dx%d",
@@ -265,10 +276,50 @@ func decodeJBIG2Placement(data, globals []byte, imageInfo func(int) (pdfdoc.Imag
 	}
 	b, err := jbig2.DecodeEmbeddedStreamWithGlobals(globals, data)
 	if err != nil {
-		return nil, err
+		return nil, markUnsupportedJBIG2(err)
 	}
 	return grayImage(b, ink, background), nil
 }
+
+// markUnsupportedJBIG2 attaches ErrUnsupportedJBIG2Feature to an internal/jbig2
+// refusal that named a coding mode byblos does not implement, and leaves every
+// other error -- damage -- exactly as it was.
+//
+// BOTH of decodeJBIG2Placement's calls need it, which is not obvious and is why
+// this is a function rather than two inline wraps. PageSizeWithGlobals looks
+// like a cheap size lookup, but it runs the same planStream/parseSegments
+// header walk DecodeEmbeddedStreamWithGlobals does (internal/jbig2), and that
+// walk refuses a Huffman symbol dictionary, a refinement text region, an
+// intermediate region and an unrecognised segment type from the headers alone,
+// before a single coded bit is read. Marking only the decode call would have
+// left every page refused from its headers looking like damage -- and after
+// byb-9v0 that is most of what is left: 33 of the 37 refusals in the pinned
+// sample are a refinement text region, which the header walk catches.
+// TestEveryNotImplementedSiteNamesTheRegister drives a fixture through each
+// call separately for that reason; with only one of them it stayed green when
+// this wrap was deleted from the other.
+//
+// THE MESSAGE IS DELIBERATELY UNCHANGED, which is why this is a type and not a
+// fmt.Errorf. ErrUnsupportedJBIG2Feature's text says nothing the refusal it
+// wraps does not already say more precisely, and prepending it would break
+// decodeJBIG2Placement's contract that every error it returns opens with
+// "jbig2:" -- the contract extractPage leans on to avoid naming the codec
+// twice. The sentinel exists for errors.Is, not for reading (its own doc
+// comment), so it goes into the chain and stays out of the string.
+func markUnsupportedJBIG2(err error) error {
+	if errors.Is(err, jbig2.ErrUnsupportedFeature) {
+		return unsupportedJBIG2{err}
+	}
+	return err
+}
+
+// unsupportedJBIG2 carries ErrUnsupportedJBIG2Feature beside the refusal it
+// marks. Unwrap returns both, so errors.Is finds the sentinel and any caller
+// matching on internal/jbig2's own error still finds that.
+type unsupportedJBIG2 struct{ err error }
+
+func (e unsupportedJBIG2) Error() string   { return e.err.Error() }
+func (e unsupportedJBIG2) Unwrap() []error { return []error{ErrUnsupportedJBIG2Feature, e.err} }
 
 // defaultInk and defaultBackground are the /DeviceGray samples a 1-bit image
 // carries when it declares no /Decode array: the default array is [0 1] (ISO

@@ -356,6 +356,14 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// comment), so unlike the two divert sites below, there is no codec name
 		// to carry. This stays the coarse legacy reason; divertClass maps it to
 		// the class that still nominates every decode-* rule (byb-z8j).
+		//
+		// NO *NotImplemented HERE, AND THE MISSING CODEC NAME IS THE WHOLE
+		// REASON (byb-bjh). NotImplemented.Capability is a string from the
+		// register's vocabulary rather than free text, precisely so a caller can
+		// hand it back to UpgradeCandidates; with no file type there is no
+		// string to put in it, and the register has no name for "some codec
+		// pdfcpu declined to identify". Naming a missing capability this site
+		// cannot actually identify would be worse than naming none.
 		if errors.Is(err, pdfdoc.ErrUnsupportedCodec) {
 			countDivert("unsupported-codec")
 			return nil, PageProvenance{Diverted: divertClass("unsupported-codec")}, fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err)
@@ -386,6 +394,12 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// (byb-9v0). Without it such a page decodes to a blank raster rather
 		// than failing, so the globals are fetched here, and a failure to read
 		// an entry that IS there is a diverted page rather than a silent one.
+		//
+		// NO *NotImplemented ON THAT FAILURE (byb-bjh): a /JBIG2Globals entry
+		// byblos cannot resolve is a property of THIS document, not of this
+		// build. Every byblos ever written would fail on it, so no future
+		// capability recovers the page and nominating one would send a caller
+		// back over an archive for nothing.
 		globals, gerr := d.RawImageGlobals(placement.ID)
 		if gerr != nil {
 			countDivert("unsupported-codec-jbig2")
@@ -398,7 +412,26 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 			// error this branch can produce already opens with "jbig2:", so
 			// adding it again would read "jbig2: jbig2: ...".
 			countDivert("unsupported-codec-jbig2")
-			return nil, PageProvenance{Diverted: divertClass("unsupported-codec-jbig2")}, fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err)
+			prov := PageProvenance{Diverted: divertClass("unsupported-codec-jbig2")}
+			// THE DIVERT REASON CANNOT SAY THIS AND THE ERROR CAN. Both arms
+			// record "unsupported-codec-jbig2" -- byb-z8j owns the reason
+			// vocabulary and this site does not add to it -- but a coding mode
+			// byblos has not built is a property of the BUILD, and damaged bytes
+			// are a property of the DOCUMENT. The first is recovered by a future
+			// byblos for every document at once; the second is recovered by
+			// nothing. A caller that re-processes on the wrong one wastes a pass
+			// over the archive or never re-processes at all.
+			//
+			// Measured over the pinned sample at 23a3470: 37 pages reach here,
+			// 36 for a coding mode and 1 for damage.
+			if errors.Is(err, ErrUnsupportedJBIG2Feature) {
+				return nil, prov, fmt.Errorf("%w: %v (%w)", ErrUnsupportedImageCodec, err, &NotImplemented{
+					Capability: "decode-jbig2",
+					Why:        "the stream uses a JBIG2 coding mode this build does not decode",
+					Issue:      capabilityIssue["decode-jbig2"],
+				})
+			}
+			return nil, prov, fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err)
 		}
 	case "jpx":
 		// As above for the opaque bytes, and unlike jbig2 there is no byblos
@@ -409,8 +442,20 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// codec-specific class and capabilityRules (upgrade.go) can nominate
 		// decode-jpx without also nominating decode-jbig2 for the same page
 		// (byb-z8j).
+		//
+		// THIS IS THE UNCONDITIONAL CASE and the only one in the switch. The
+		// jbig2 arm has to ask which of two things went wrong, because byblos
+		// decodes some JBIG2; here it decodes none, so there is no document this
+		// arm could be reporting a property of. Every jpx page that reaches this
+		// line does so for the same reason and a future build recovers all of
+		// them together, which is exactly what *NotImplemented means.
 		countDivert("unsupported-codec-jpx")
-		return nil, PageProvenance{Diverted: divertClass("unsupported-codec-jpx")}, fmt.Errorf("%w: jpx", ErrUnsupportedImageCodec)
+		return nil, PageProvenance{Diverted: divertClass("unsupported-codec-jpx")},
+			fmt.Errorf("%w: jpx (%w)", ErrUnsupportedImageCodec, &NotImplemented{
+				Capability: "decode-jpx",
+				Why:        "byblos has no JPEG2000 code in either direction and x/image ships no decoder",
+				Issue:      capabilityIssue["decode-jpx"],
+			})
 	default:
 		img, _, err = image.Decode(bytes.NewReader(data))
 	}
@@ -432,6 +477,16 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// REJECTS it — an unsupported compression, not a colour space. That is a
 		// much narrower set than the stale comment here used to claim, and it is
 		// why decode-tiff is rare in practice rather than dead.
+		//
+		// NO *NotImplemented HERE EITHER (byb-bjh), and this is the one omission
+		// a later change could reverse. An unsupported TIFF compression IS a
+		// missing capability and decode-tiff IS its name — but image.Decode
+		// returns the same shape of error for a compression it does not
+		// implement and for a TIFF that is simply corrupt, so this site cannot
+		// tell which it is holding. The jbig2 arm above can only make that call
+		// because internal/jbig2 draws the line itself and says so with
+		// ErrUnsupportedFeature. Give a decoder here the same sentinel (byb-2bx)
+		// and this arm can name its capability the same way.
 		countDivert("unsupported-codec-" + fileType)
 		return nil, PageProvenance{Diverted: divertClass("unsupported-codec-" + fileType)}, fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err)
 	}
