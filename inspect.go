@@ -70,6 +70,28 @@ type ImageRef struct {
 // Bounds is the page's CropBox, or its MediaBox when it declares no CropBox,
 // in the same user-space convention as ImageRef.Bounds.
 //
+// Rotate is the page's effective /Rotate (ISO 32000-1 7.7.3.3), resolved
+// through page-tree inheritance rather than read off the leaf page dict alone
+// -- pdfdoc.Page.Rotate already does that resolution (internal/pdfdoc/pdfdoc.go:402),
+// this is one more field carrying it out. It exists for byb-yul: an edit list
+// storing an ABSOLUTE target rotation needs the page's current effective
+// rotation to render a starting state or compute that target, and neither is
+// derivable without it.
+//
+// Rotate is normalized into [0,360) with Go's sign-preserving %, not copied
+// verbatim from the file: a declared /Rotate -90 reads back as 270, not -90.
+// It is also not guaranteed to be a multiple of 90 -- a declared /Rotate 45
+// reads back as 45 unchanged, even though pdfcpu refuses to WRITE anything
+// that is not 0, 90, 180 or 270 (measured for byb-yul.2; see validateIntegerEntry).
+// A caller comparing Rotate against a file's declared value, or treating it
+// as one of {0,90,180,270}, must account for both.
+//
+// /Rotate is NOT applied to Bounds, and must not be assumed to be: it is a
+// display attribute (see PositionedWord's identical note, stamp.go), and byb-wtp
+// measured that both poppler and byblos report a /Rotate 90 Letter page as
+// 612 x 792 -- neither rotates the box. A consumer that needs the page as
+// actually displayed must apply Rotate to Bounds itself.
+//
 // TextChars counts the bytes shown by the page's text operators, including
 // text reached through Form XObjects. It is a born-digital signal, not a text
 // extractor: it counts stored code units, not Unicode code points, and it does
@@ -80,6 +102,7 @@ type ImageRef struct {
 type PageInfo struct {
 	Index       int
 	Bounds      image.Rectangle
+	Rotate      int
 	Images      []ImageRef
 	TextChars   int
 	Diagnostics []Diagnostic
@@ -203,7 +226,7 @@ func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.
 		return nil, nil, err
 	}
 	s, walkErr := content.Walk(ctx, p.Content, p.Scope, d)
-	pi := &PageInfo{Index: n, Bounds: rectOf(p.CropBox)}
+	pi := &PageInfo{Index: n, Bounds: rectOf(p.CropBox), Rotate: p.Rotate}
 	if s == nil {
 		// Defensive: Walk returns its partial scan even on failure. A nil one
 		// would mean a page with no numbers at all rather than a panic.

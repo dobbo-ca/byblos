@@ -267,7 +267,8 @@ type ImageRef struct {
 
 type PageInfo struct {
     Index       int
-    Bounds      image.Rectangle // page box, in points
+    Bounds      image.Rectangle // page box, in points; NOT rotated by Rotate
+    Rotate      int             // effective /Rotate, resolved through inheritance
     Images      []ImageRef
     TextChars   int             // feeds Kleio's born-digital signal
     Diagnostics []Diagnostic    // empty for almost every page

@@ -1198,6 +1198,39 @@ func indirectKids() []byte {
 	return w.finish(cat)
 }
 
+// rotateInheritance is a two-page document whose /Pages node declares
+// /Rotate 90: page 1 has no /Rotate of its own and must report the inherited
+// 90, and page 2 declares its own /Rotate 180, which must override it. Both
+// pages otherwise carry nothing -- an empty content stream and no resources --
+// because the fixture exists only to exercise inheritance resolution, not
+// content.
+func rotateInheritance() []byte {
+	w := newWriter()
+	cat, pages := w.reserve(), w.reserve()
+	p1, c1 := w.reserve(), w.reserve()
+	p2, c2 := w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R %d 0 R] /Count 2 /Rotate 90 >>", p1, p2))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, c1))
+	w.fillStream(c1, "", nil)
+	w.fill(p2, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d] /Rotate 180"+
+		" /Resources << >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, c2))
+	w.fillStream(c2, "", nil)
+	return w.finish(cat)
+}
+
+// RotateInheritance exposes rotateInheritance directly rather than through
+// ByName/All, for the reason NoMediaBox gives: All() is iterated by every
+// write-path test and its length is a measured figure in five files
+// (byb-3y8), so a document added there costs edits (Count, wantNames) that
+// have nothing to do with the bead adding it. This fixture exists for one
+// test, byb-yul.2's proof that PageInfo.Rotate resolves /Rotate through
+// page-tree inheritance rather than reading only the leaf dict.
+func RotateInheritance() []byte { return rotateInheritance() }
+
 // blankPage is a two-page document whose second page is blank in the way six
 // of 200 govdocs1 files are blank (byb-uxb; byb-cqs). Page 2's /Contents is a
 // perfectly well-formed /FlateDecode stream whose payload decodes to ZERO

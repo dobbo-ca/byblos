@@ -106,6 +106,33 @@ func TestMalformedIsATruncatedScan(t *testing.T) {
 	}
 }
 
+// RotateInheritance's whole point is that page 1 declares no /Rotate of its
+// own and page 2 does. Byb-yul.2's inspect_test.go asserts only the reported
+// values, which stay green even if a later edit gives page 1 its own /Rotate
+// -- at which point the fixture stops testing inheritance at all. Pin the
+// bytes directly, the way TestMalformedIsATruncatedScan pins "malformed".
+func TestRotateInheritanceFixtureShape(t *testing.T) {
+	doc := RotateInheritance()
+	if !bytes.Contains(doc, []byte("/Type /Pages /Kids [")) || !bytes.Contains(doc, []byte("/Rotate 90")) {
+		t.Error("want the /Pages node to declare /Rotate 90")
+	}
+	var pageObjs [][]byte
+	for _, obj := range bytes.Split(doc, []byte("endobj\n")) {
+		if bytes.Contains(obj, []byte("/Type /Page /Parent")) {
+			pageObjs = append(pageObjs, obj)
+		}
+	}
+	if len(pageObjs) != 2 {
+		t.Fatalf("got %d /Type /Page objects; want 2", len(pageObjs))
+	}
+	if bytes.Contains(pageObjs[0], []byte("/Rotate")) {
+		t.Errorf("page 1's dict declares its own /Rotate, defeating the fixture's purpose: %s", pageObjs[0])
+	}
+	if !bytes.Contains(pageObjs[1], []byte("/Rotate 180")) {
+		t.Errorf("page 2's dict does not declare /Rotate 180: %s", pageObjs[1])
+	}
+}
+
 // A self-check on the hand-rolled PDF writer: every xref offset must land on
 // its own "N 0 obj" header. A writer bug here would surface much later as an
 // unexplained pdfcpu parse failure.
