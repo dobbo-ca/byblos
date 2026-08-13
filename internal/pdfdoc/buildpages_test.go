@@ -653,6 +653,57 @@ func TestBuildFromPagesLeavesTheSourceUnmodified(t *testing.T) {
 	}
 }
 
+// TestBuildFromPagesRefusesAnEncryptedSource is the refusal Linearize already
+// makes for the same reason (linearize.go:75-81), and it is not a nicety.
+// pdfcpu decrypts strings and streams on READ, so a migration carries plaintext
+// into an output that has no /Encrypt dictionary -- silently stripping the
+// encryption from a document somebody chose to encrypt. Re-emitting under the
+// source's /Encrypt would instead produce a file that opens as garbage. Neither
+// is byblos's call to make without being asked.
+func TestBuildFromPagesRefusesAnEncryptedSource(t *testing.T) {
+	// An EMPTY user password, which is the case that matters. A document
+	// encrypted with a user password is refused earlier, by Open, because
+	// pdfcpu cannot read it at all -- so it was never the hazard. The common
+	// shape is owner-password-only: the document opens with no password and
+	// still carries an /Encrypt dictionary stating what may be done with it.
+	conf := defaultConfig()
+	conf.UserPW, conf.OwnerPW = "", "o"
+	var enc bytes.Buffer
+	if err := api.Encrypt(bytes.NewReader(corpusMust(t, "mixed")), &enc, conf); err != nil {
+		t.Fatalf("building the encrypted fixture: %v", err)
+	}
+	// The fixture has to be encrypted AND openable without a password, or this
+	// proves nothing about the path under test.
+	ctx, err := api.ReadContext(bytes.NewReader(enc.Bytes()), defaultConfig())
+	if err != nil {
+		t.Fatalf("the fixture does not open without a password: %v", err)
+	}
+	if ctx.XRefTable.Encrypt == nil {
+		t.Fatal("the fixture carries no /Encrypt dictionary, so it is not encrypted")
+	}
+
+	var buf bytes.Buffer
+	err = BuildFromPages(&buf, []PageSource{{Source: bytes.NewReader(enc.Bytes()), Page: 1}})
+	if err == nil {
+		t.Fatalf("BuildFromPages accepted an encrypted source and wrote %d bytes", buf.Len())
+	}
+	if !strings.Contains(err.Error(), "encrypted") {
+		t.Errorf("error %q does not say the document is encrypted", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a refused build wrote %d bytes", buf.Len())
+	}
+}
+
+func corpusMust(t *testing.T, name string) []byte {
+	t.Helper()
+	b, ok := corpus.ByName(name)
+	if !ok {
+		t.Fatalf("the corpus has no %q document", name)
+	}
+	return b
+}
+
 // TestBuildFromPagesRefusals covers the inputs that cannot produce a document a
 // reader would accept. Every one of them is a caller mistake that pdfcpu itself
 // accepts silently: api.InsertPages writes /Rotate 45 with a nil error and then

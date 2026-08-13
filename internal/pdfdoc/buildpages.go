@@ -146,6 +146,26 @@ func openSources(pages []PageSource) (map[io.ReadSeeker]*doc, error) {
 			return nil, fmt.Errorf("byblos/pdfdoc: build from pages: page %d source: "+
 				"unexpected document type %T", i+1, opened)
 		}
+		if d.ctx.XRefTable.Encrypt != nil {
+			// The same refusal Linearize makes, for the same reason
+			// (linearize.go:75-81). pdfcpu decrypts strings and streams on
+			// READ, so migrating them into an output with no /Encrypt
+			// dictionary silently STRIPS the encryption from a document
+			// somebody chose to encrypt -- and re-emitting them under the
+			// source's /Encrypt would produce a file that opens as garbage.
+			//
+			// A document with a user password never reaches here: Open fails
+			// on it, because pdfcpu cannot read it without the password. The
+			// case this catches is owner-password-only, which opens with no
+			// password at all and is the common one. Measured before this
+			// existed: an owner-encrypted document exported to 892 bytes of
+			// plaintext with a nil error.
+			//
+			// ReplaceImages, Optimize and StampTextLayer still have no opinion
+			// here, which is byb-cvx. This fixes only its own path.
+			return nil, fmt.Errorf("byblos/pdfdoc: build from pages: page %d source: "+
+				"the document is encrypted", i+1)
+		}
 		out[p.Source] = d
 	}
 	return out, nil
