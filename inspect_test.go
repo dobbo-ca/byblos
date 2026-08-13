@@ -213,6 +213,9 @@ func TestInspectMultiPage(t *testing.T) {
 
 func TestInspectRotatedPageReportsUnrotatedBounds(t *testing.T) {
 	p := inspect(t, "scan-rotated")[0]
+	if p.Rotate != 90 {
+		t.Errorf("Rotate = %d; want 90", p.Rotate)
+	}
 	// /Rotate is a display attribute. Content space is unaffected, so Bounds
 	// stays the MediaBox and the placement still covers it.
 	if p.Bounds != fullPage {
@@ -220,6 +223,28 @@ func TestInspectRotatedPageReportsUnrotatedBounds(t *testing.T) {
 	}
 	if len(p.Images) != 1 || p.Images[0].Bounds != fullPage {
 		t.Errorf("Images = %+v; want one page-covering placement", p.Images)
+	}
+}
+
+func TestInspectPageRotateNoRotateAnywhereReportsZero(t *testing.T) {
+	if got := inspect(t, "scan")[0].Rotate; got != 0 {
+		t.Errorf("Rotate = %d; want 0 (no /Rotate anywhere)", got)
+	}
+}
+
+func TestInspectPageRotateInheritsFromPagesNode(t *testing.T) {
+	pages, err := Inspect(bytes.NewReader(corpus.RotateInheritance()))
+	if err != nil {
+		t.Fatalf("Inspect(RotateInheritance) error = %v", err)
+	}
+	if len(pages) != 2 {
+		t.Fatalf("got %d pages; want 2", len(pages))
+	}
+	if pages[0].Rotate != 90 {
+		t.Errorf("page 1 Rotate = %d; want 90 (inherited from the /Pages node, no own /Rotate)", pages[0].Rotate)
+	}
+	if pages[1].Rotate != 180 {
+		t.Errorf("page 2 Rotate = %d; want 180 (its own /Rotate overrides the inherited 90)", pages[1].Rotate)
 	}
 }
 
