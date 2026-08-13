@@ -157,6 +157,33 @@ type PageRaster struct {
 	Image  image.Image
 	Bounds image.Rectangle // where the raster lands
 	Page   image.Rectangle // the page's CropBox
+
+	// ObjNr is the PDF object number of the image XObject this raster came
+	// from -- the same handle ImageRef.ObjNr carries from Inspect, and exactly
+	// what ReplaceImages keys its substitution map on (substitute.go:28-35,
+	// :127-131). Without it, a caller wanting to write back an encoding of
+	// this raster had no exported way to name which object to replace and had
+	// to guess.
+	//
+	// The guess is wrong on real documents. classify picks the LAST placement
+	// in paint order as the page's one visible raster (extract.go: top :=
+	// len(s.Images) - 1) because a stacked page can hide an earlier image behind
+	// an opaque one painted over it -- 16,241 measured Internet Archive pages
+	// do exactly this, two page-covering images at the identical CTM, the
+	// second occluding the first. On those pages the first placement's object
+	// number is the HIDDEN under-layer: substituting on it writes a document
+	// that opens cleanly, looks unchanged, and is wrong, with no error raised
+	// anywhere. ObjNr is the object classify actually chose, which fixes that
+	// case; it is negative for an image XObject that is a direct object rather
+	// than an indirect reference, exactly as ImageRef.ObjNr is (inspect.go:55-58),
+	// since ReplaceImages has no cross-reference entry to write such a
+	// substitution back to.
+	//
+	// ObjNr identifies the XObject, not the placement: one image can be painted
+	// on several pages, and ReplaceImages substitutes it once, changing every
+	// page that shares it (optimize.go:317 memoizes per object id for exactly
+	// this reason).
+	ObjNr int
 	// DroppedAnnots counts the annotations on this page that paint and are not
 	// in Image.
 	//
@@ -503,8 +530,14 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	// A miss leaves it false. That is the safe direction: false routes a
 	// caller to the contone resampler, which is what happened before this
 	// field existed, whereas a wrongly-true would subsample a contone scan.
+	//
+	// ObjNr is resolved the same way inspect.go turns a placement into
+	// ImageRef.ObjNr (inspect.go:215-220): the two must never disagree, since
+	// ObjNr's whole purpose is to be the handle a caller already holds from
+	// Inspect.
 	if info, ok := d.ImageInfo(placement.ID); ok {
 		out.Bitonal = info.BPC == 1 || info.ImageMask
+		out.ObjNr = info.ObjNr
 	}
 	// Only on the success path. A divert has already told the caller it is
 	// getting no raster, and 97% of a real archive diverts, so reading and

@@ -213,8 +213,6 @@ func TestReplaceImagesSubstitutesAnImageOnALaterPage(t *testing.T) {
 func TestReplaceImagesCarriesAQuantizedIndexedImageIntoAnExistingPDF(t *testing.T) {
 	in := corpusDoc(t, "scan")
 
-	before := inspect(t, "scan")
-	ref := before[0].Images[0]
 	pr, err := ExtractPageRaster(bytes.NewReader(in), 1)
 	if err != nil {
 		t.Fatalf("ExtractPageRaster: %v", err)
@@ -229,7 +227,7 @@ func TestReplaceImagesCarriesAQuantizedIndexedImageIntoAnExistingPDF(t *testing.
 	}
 
 	var out bytes.Buffer
-	if err := ReplaceImages(&out, bytes.NewReader(in), map[int]EncodedImage{ref.ObjNr: enc}); err != nil {
+	if err := ReplaceImages(&out, bytes.NewReader(in), map[int]EncodedImage{pr.ObjNr: enc}); err != nil {
 		t.Fatalf("ReplaceImages: %v", err)
 	}
 

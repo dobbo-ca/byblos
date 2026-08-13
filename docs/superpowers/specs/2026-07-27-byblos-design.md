@@ -316,6 +316,7 @@ type PageRaster struct {
     Image         image.Image
     Bounds        image.Rectangle // where the raster lands, in points
     Page          image.Rectangle // the page box, in points
+    ObjNr         int             // ImageRef.ObjNr this raster came from; the ReplaceImages key
     DroppedAnnots int             // annotations that paint and are not in Image
     Bitonal       bool            // source DECLARED 1 bpc or /ImageMask; never a pixel test
 }
