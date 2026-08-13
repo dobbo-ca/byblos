@@ -505,6 +505,26 @@ type BuildPage struct {
 func BuildPDF(w io.Writer, pages []BuildPage) error
 func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error
 
+// --- page editing (G4) ---
+//
+// BuildFromPages (byb-yul.4) materialises a NEW document from a page sequence.
+// Delete is omitting a page, reorder is ordering the sequence, insert is naming
+// a different Source, and rotate is a field — so all four operations are this
+// one call, and no stored document is ever mutated.
+//
+// It carries each page's provenance record to its NEW index (the G3 obligation
+// in §1's 2026-08-13 amendment), gives a page it has no record for a Diverted
+// reason outside the extraction vocabulary, and records
+// Optimized = "rewritten-delinearized". It DROPS catalog-level metadata —
+// outlines, page labels, the structure tree, form fields, named destinations —
+// because those describe the page set or the page order. Output is not
+// byte-stable; content-address an export rather than rewriting a key.
+type PageSource = pdfdoc.PageSource // Source io.ReadSeeker; Page int (1-based);
+                                    // Rotate int, ABSOLUTE, one of 0/90/180/270
+
+func BuildFromPages(w io.Writer, pages []PageSource) error
+func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource) error
+
 // ReplaceImages (byb-fp6) substitutes image streams in an EXISTING document,
 // keyed by 1-based page, leaving everything else as it was. It refuses an image
 // carrying /SMask, /Mask or /ImageMask, and writes no provenance: the caller

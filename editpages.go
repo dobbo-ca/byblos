@@ -1,0 +1,218 @@
+package byblos
+
+// BuildFromPages is design spec goal G4: materialise a document from a page
+// sequence (byb-yul.4).
+//
+// It is the whole edit vocabulary in one call. Deleting a page is omitting it
+// from the sequence, reordering is ordering the sequence, inserting is naming a
+// different Source, and rotating is a field. Byblos never mutates a stored
+// document: Kleio holds the sequence and an export builds a new document from
+// it, which is what makes an export impossible to half-succeed.
+//
+// The object-graph migration is internal/pdfdoc's (buildpages.go). This file is
+// the G3 half -- carrying each page's provenance record to its NEW index -- and
+// it is not a formality. Provenance.Pages is positional with no page identity,
+// so an export that left the slice alone would describe every page after the
+// first edit wrongly.
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"slices"
+	"time"
+
+	"github.com/dobbo-ca/byblos/internal/pdfdoc"
+)
+
+// PageSource names one page of one document, and the rotation to give it.
+// Aliased from the write seam for the reason EncodedImage is (build.go):
+// internal packages are unreachable from Kleio, and a parallel type would be a
+// second thing to keep in step.
+type PageSource = pdfdoc.PageSource
+
+// divertedNotRecorded is the PageProvenance.Diverted reason for a page byblos
+// did not process and has no record of -- typically a page imported from a
+// document that never went through byblos at all.
+//
+// IT IS DELIBERATELY OUTSIDE THE EXTRACTION VOCABULARY. divertClass
+// (extract.go) emits "not-single-raster" and the "unsupported-codec" family,
+// and anyPageDiverted (upgrade.go) matches those by exact string -- so an
+// unrecognised reason is inert and nominates nothing. That is the honest state:
+// this page was not diverted BY extraction, it was never offered to it.
+//
+// The zero PageProvenance is not an option. provenance.go:337-339 says it "is
+// indistinguishable to any reader from a page that was handled and had nothing
+// applied", which is a claim about this page that byblos cannot make.
+const divertedNotRecorded = "source-unrecorded"
+
+// BuildFromPages writes a document whose page i is pages[i], and a provenance
+// record that describes it.
+//
+// WHAT AN EXPORT KEEPS, AND WHAT IT DROPS. Each page arrives with its content
+// stream, its resources, its annotations, its inherited attributes pushed down,
+// and its provenance record moved to its new index. The document's catalog does
+// NOT come with it: outlines, page labels, the structure tree, form fields and
+// named destinations are dropped, because they describe the page SET or the page
+// ORDER and an edit makes them silently wrong. Measured over the pinned sample,
+// 61.9% of multi-page documents carry at least one such entry. See the design
+// spec's 2026-08-13 amendment.
+//
+// OUTPUT IS NOT BYTE-STABLE and must not be treated as though it were. Two
+// builds of one sequence differ in object numbering and in length. Content-
+// address an export -- write it once, under a key derived from its bytes -- and
+// never rewrite a key in place: a second write hands a client mid-download a
+// torn object and invalidates any checksum taken over the first.
+//
+// OUTPUT IS NEVER LINEARIZED. The record says "rewritten-delinearized", which is
+// what UpgradeCandidates reads to nominate the document for re-linearization.
+// Compose with Optimize{Linearize: true} when a linearized export is wanted;
+// asking for it here would mean re-opening the document from scratch.
+//
+// It cannot be cancelled. Use BuildFromPagesContext when the caller has a
+// deadline.
+func BuildFromPages(w io.Writer, pages []PageSource) error {
+	return BuildFromPagesContext(context.Background(), w, pages)
+}
+
+// BuildFromPagesContext is BuildFromPages, cancellable at each source and at
+// each page of the record (byb-xyn).
+//
+// CANCELLATION LATENCY: EFFECTIVELY THE WHOLE CALL, and for the same reason
+// BuildPDFContext gives. The checked boundaries bracket the two pdfcpu passes --
+// the migration walk and the provenance write -- and both are single
+// uninterruptible passes over every object of every source. Budget for the whole
+// build. A cancelled call writes nothing to w. See context.go.
+func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if len(pages) == 0 {
+		return fmt.Errorf("byblos: BuildFromPages: no pages")
+	}
+
+	// The record is assembled BEFORE the document is built, so that a source
+	// whose provenance cannot be read fails the call rather than producing a
+	// document with a record that silently describes the wrong pages.
+	record, err := buildRecord(ctx, pages)
+	if err != nil {
+		return err
+	}
+
+	var built bytes.Buffer
+	if err := pdfdoc.BuildFromPages(&built, pages); err != nil {
+		return fmt.Errorf("byblos: BuildFromPages: %w", err)
+	}
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if err := WriteProvenanceContext(ctx, bytes.NewReader(built.Bytes()), w, record); err != nil {
+		return fmt.Errorf("byblos: BuildFromPages: %w", err)
+	}
+	return nil
+}
+
+// buildRecord assembles the exported document's provenance from its sources'.
+func buildRecord(ctx context.Context, pages []PageSource) (Provenance, error) {
+	sources := map[io.ReadSeeker]*Provenance{}
+	for _, p := range pages {
+		if err := checkContext(ctx); err != nil {
+			return Provenance{}, err
+		}
+		if p.Source == nil {
+			// pdfdoc.BuildFromPages refuses this with the message that names
+			// the page; do not pre-empt it with a worse one.
+			continue
+		}
+		if _, done := sources[p.Source]; done {
+			continue
+		}
+		// A record that is absent, or is present and unparseable, is "no
+		// record" -- the same reading Optimize and RecordExtraction take. A
+		// source that cannot be READ at all is a different thing, and
+		// pdfdoc.BuildFromPages reports it in a moment with the page number.
+		got, err := ReadProvenanceContext(ctx, p.Source)
+		if err != nil {
+			got = nil
+		}
+		sources[p.Source] = got
+	}
+
+	out := Provenance{
+		Version:     Version,
+		ProcessedAt: time.Now().UTC(),
+		// Output is never linearized; see BuildFromPages.
+		Optimized: "rewritten-delinearized",
+	}
+	out.Capabilities = commonCapabilities(pages, sources)
+
+	for _, p := range pages {
+		rec := sources[p.Source]
+		// A source with no record, or one whose Pages slice is too short to
+		// reach this page, cannot say what happened to it.
+		if rec == nil || p.Page < 1 || p.Page > len(rec.Pages) {
+			out.Pages = append(out.Pages, PageProvenance{Diverted: divertedNotRecorded})
+			continue
+		}
+		out.Pages = append(out.Pages, clonePageProvenance(rec.Pages[p.Page-1]))
+	}
+	return out, nil
+}
+
+// commonCapabilities is what EVERY contributing source's build could do.
+//
+// The intersection, not the union, and the choice matters. Capabilities has no
+// per-page form, so a document assembled from two builds can only honestly claim
+// what both of them had. Claiming the union would suppress an upgrade
+// nomination for a capability one contributing build lacked, and upgrade.go
+// takes the opposite bias throughout: "reporting a wasted re-run is cheaper than
+// hiding a real upgrade".
+//
+// One unrecorded source therefore empties the claim. That is the intended
+// reading -- an export containing a page nothing is known about is a document
+// worth re-examining, not one to vouch for.
+func commonCapabilities(pages []PageSource, sources map[io.ReadSeeker]*Provenance) []string {
+	var out []string
+	first := true
+	seen := map[io.ReadSeeker]bool{}
+	for _, p := range pages {
+		if p.Source == nil || seen[p.Source] {
+			continue
+		}
+		seen[p.Source] = true
+
+		rec := sources[p.Source]
+		if rec == nil {
+			return nil
+		}
+		if first {
+			out = slices.Clone(rec.Capabilities)
+			first = false
+			continue
+		}
+		out = slices.DeleteFunc(out, func(c string) bool {
+			return !slices.Contains(rec.Capabilities, c)
+		})
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// clonePageProvenance deep-copies one page's record, so the exported document's
+// record shares no slice with the source's -- a page named twice in a sequence
+// would otherwise appear twice as the same backing array.
+func clonePageProvenance(in PageProvenance) PageProvenance {
+	out := in
+	out.Applied = slices.Clone(in.Applied)
+	out.Placement = slices.Clone(in.Placement)
+	if in.Geometry != nil {
+		g := *in.Geometry
+		if in.Geometry.ClipBox != nil {
+			clip := *in.Geometry.ClipBox
+			g.ClipBox = &clip
+		}
+		out.Geometry = &g
+	}
+	return out
+}
