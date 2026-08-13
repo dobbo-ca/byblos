@@ -200,6 +200,67 @@ func TestExtractPageRasterTakesTheOccludingLayer(t *testing.T) {
 	}
 }
 
+// PageRaster.ObjNr must be the SAME object number Inspect reports for the
+// image the raster actually came from -- the handle ReplaceImages keys its
+// substitution map on (substitute.go:28-35). A single-image page is the case
+// where a caller's guess and the true answer coincide; this pins that they
+// still agree once the field exists rather than assuming it.
+func TestExtractPageRasterObjNrMatchesInspect(t *testing.T) {
+	doc := corpusDoc(t, "scan")
+	before, err := Inspect(bytes.NewReader(doc))
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if len(before[0].Images) != 1 {
+		t.Fatalf("page 1 has %d images; want 1 (single-image page)", len(before[0].Images))
+	}
+	pr, err := ExtractPageRaster(bytes.NewReader(doc), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster() error = %v", err)
+	}
+	want := before[0].Images[0].ObjNr
+	if pr.ObjNr != want {
+		t.Errorf("PageRaster.ObjNr = %d; want %d (ImageRef.ObjNr from Inspect)", pr.ObjNr, want)
+	}
+}
+
+// The whole point of the bead: on a stacked two-layer page, ObjNr must be the
+// VISIBLE top image's object number, not Images[0]'s. Scan.Images -- and so
+// PageInfo.Images -- is in paint order (classify's comment at extract.go:656),
+// so the under layer is index 0 and the occluding layer is the last index. A
+// caller who followed byblos's own former example (before[0].Images[0]) would
+// substitute the HIDDEN layer on real documents; extract.go:754-757 measured
+// 16,241 Internet Archive pages shaped exactly like this fixture.
+func TestExtractPageRasterObjNrIsTheVisibleTopLayer(t *testing.T) {
+	for _, name := range []string{"stacked", "stacked-in-form"} {
+		t.Run(name, func(t *testing.T) {
+			doc := corpusDoc(t, name)
+			before, err := Inspect(bytes.NewReader(doc))
+			if err != nil {
+				t.Fatalf("Inspect() error = %v", err)
+			}
+			if len(before[0].Images) != 2 {
+				t.Fatalf("page 1 has %d images; want 2 (base + occluding layer)", len(before[0].Images))
+			}
+			under, top := before[0].Images[0], before[0].Images[len(before[0].Images)-1]
+			if under.ObjNr == top.ObjNr {
+				t.Fatalf("under and top layers share ObjNr %d; the fixture no longer distinguishes them", under.ObjNr)
+			}
+			pr, err := ExtractPageRaster(bytes.NewReader(doc), 1)
+			if err != nil {
+				t.Fatalf("ExtractPageRaster() error = %v", err)
+			}
+			if pr.ObjNr != top.ObjNr {
+				t.Errorf("PageRaster.ObjNr = %d; want %d (the visible top layer)", pr.ObjNr, top.ObjNr)
+			}
+			if pr.ObjNr == under.ObjNr {
+				t.Errorf("PageRaster.ObjNr = %d, the HIDDEN under-layer's object number; "+
+					"a caller substituting on this ObjNr would replace the invisible image", pr.ObjNr)
+			}
+		})
+	}
+}
+
 // The headline correction of byb-b1.1. Byblos diverted 100% of a real ScanSnap
 // iX500 corpus because classify keyed on TextOps, and 98.7% of the pages it
 // diverted over a page-covering raster carried nothing but an invisible OCR
