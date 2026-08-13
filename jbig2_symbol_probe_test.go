@@ -37,14 +37,23 @@ package byblos
 // the decode-array gate, and any page left in it is one whose array byblos
 // still declines, named by its own columns rather than by inference.
 //
-// THE SENTINEL IS THE INTERNAL ONE, DELIBERATELY. errors.Is against the root
-// package's ErrUnsupportedJBIG2Feature reports false here, because
-// decodeJBIG2Placement returns jbig2.DecodeEmbeddedStream's error unwrapped and
-// only the exported DecodeJBIG2Generic attaches that sentinel (jbig2.go). That
-// is worth knowing beyond this probe: extractPage maps every one of these to a
-// single divert reason, so on the extract path a caller cannot tell "byblos is
-// not enough" from "the bytes are damaged" -- the distinction jbig2.go:82-91
-// says the sentinel exists to draw.
+// THE SENTINEL IS THE INTERNAL ONE, and that is now a choice about WHICH layer
+// this probe interrogates rather than the only option. It used to be the only
+// option: decodeJBIG2Placement returned jbig2.DecodeEmbeddedStream's error
+// unwrapped, only the exported DecodeJBIG2Generic attached the root package's
+// ErrUnsupportedJBIG2Feature, and errors.Is against it reported false for every
+// page on the extract path -- so extractPage mapped all of them to one divert
+// reason and a caller could not tell "byblos is not enough" from "the bytes are
+// damaged", the distinction jbig2.go says that sentinel exists to draw.
+//
+// byb-bjh FIXED THAT (markUnsupportedJBIG2, jbig2.go), and this probe still
+// reads the internal sentinel on purpose. The two now agree by construction,
+// because the root-package one is attached from the internal one -- so reading
+// the internal one keeps this probe measuring internal/jbig2's own verdict
+// rather than re-measuring the wrapping. The acceptance run for that fix is the
+// gate/coding split below: the 37 pages the coding-mode gate holds are 36
+// unsupported-feature and 1 malformed, which is exactly the population the
+// extract path could not separate before.
 //
 // THE SEGMENT TYPE COMES OUT OF THE ERROR TEXT, which is a real coupling and is
 // why it is stated here. segment_decode.go's default branch formats

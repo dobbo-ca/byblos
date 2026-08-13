@@ -252,18 +252,19 @@ func TestEveryCapabilityHasARule(t *testing.T) {
 	}
 }
 
-// Every capability string named in FUTURE.md must already have a rule, so that
-// shipping one of them needs no change here.
-func TestFutureCapabilitiesHaveRules(t *testing.T) {
-	for _, c := range []string{
-		"jbig2-symbol", "ccitt-g4", "render", "pdfa", "page-cleanup",
-		"decode-jbig2", "decode-jpx", "decode-tiff",
-	} {
-		if _, ok := capabilityRules[c]; !ok {
-			t.Errorf("FUTURE.md capability %q has no rule in capabilityRules", c)
-		}
-	}
-}
+// TestFutureCapabilitiesHaveRules was REPLACED by byb-bjh with
+// TestFutureMDDeclaresExactlyTheCapabilitiesThisBuildLacks
+// (capability_register_test.go), not merely renamed.
+//
+// It held these eight names as a literal -- "jbig2-symbol", "ccitt-g4",
+// "render", "pdfa", "page-cleanup", "decode-jbig2", "decode-jpx",
+// "decode-tiff" -- and checked each had a rule. Two problems. A hand-copied
+// list beside the map it checks is not independent evidence, and one-way
+// containment could only catch a FUTURE.md entry with no rule. What actually
+// happened was the other direction: rules accumulated that named no
+// implementation and no bead, and this test passed over every one of them. The
+// replacement parses FUTURE.md itself and asserts SET EQUALITY, so both
+// directions fail.
 
 func TestAppliedCapability(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{

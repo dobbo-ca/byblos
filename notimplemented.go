@@ -36,11 +36,23 @@ var ErrNotImplemented = errors.New("byblos: not implemented")
 // caller that catches one of these can hand the string straight to
 // UpgradeCandidates later to ask whether a newer build would now handle the
 // documents it fell back on, instead of maintaining its own parallel list of
-// what this version could not do. TestEveryNotImplementedNamesAKnownCapability
+// what this version could not do. TestEveryNotImplementedSiteNamesTheRegister
 // keeps the two vocabularies from drifting apart.
 //
+// THAT SENTENCE NAMED A TEST THAT DID NOT EXIST, from byb-b3 until byb-bjh.
+// It said TestEveryNotImplementedNamesAKnownCapability enforced this; byb-b3's
+// GREEN stage had deleted that test, because its table lost its only row when
+// RecompressJPEG stopped returning a *NotImplemented and it would have passed
+// vacuously forever after (the tombstone is in optimize_test.go). A doc comment
+// promising a guard that was removed is the same defect this whole type exists
+// to fix -- a claim with nothing behind it -- so it is recorded here rather
+// than quietly corrected.
+//
 // Issue is the tracking id, so the error itself says where the answer lives
-// rather than requiring a search. It is in the message for the same reason.
+// rather than requiring a search. It is in the message for the same reason. It
+// comes from capabilityIssue (upgrade.go) rather than being written at each
+// construction site, so the bead an error reports and the bead the register
+// tracks cannot be two different answers.
 type NotImplemented struct {
 	Capability string // e.g. "linearize"
 	Why        string // one sentence, in terms of what is missing, not what to do

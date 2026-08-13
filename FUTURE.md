@@ -24,6 +24,14 @@ below.
 Compression is substantially better than generic-region coding on text-heavy
 scans, which is most of Kleio's corpus. This is the intended next capability.
 
+**This entry is the ENCODER, and `byb-9v0` did not build it.** That bead landed a
+symbol dictionary and text region *decoder*, which belongs to `decode-jbig2`
+below. The two are told apart by their upgrade rules rather than by their names:
+`jbig2-symbol` keys on `applied: jbig2-generic`, so it nominates pages **Byblos
+itself wrote** and would now write smaller, while `decode-jbig2` keys on
+`diverted: unsupported-codec-jbig2`, so it nominates pages Byblos **could not
+read**. Tracked as `byb-v66`.
+
 **Why deferred:** roughly 3-4× the work of generic region coding — glyph
 segmentation, dictionary construction, and refinement coding, on top of the MQ
 coder that v1 already needs. Generic region delivers most of the practical benefit
