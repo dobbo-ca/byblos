@@ -94,6 +94,55 @@ angle: ISO 32000-1 table 30 allows only a multiple of 90, and pdfcpu writes `/Ro
 nil error and then refuses the file it wrote. That reasoning is already recorded at
 `internal/pdfdoc/buildpages.go:126-137` and does not move.
 
+### Absolute is ENFORCED, not assumed
+
+Stating that `Deg` is absolute does not make it so. `WrapContent` cannot see a wrap that is
+already there, so applying `Deg` to an already-straightened document composes to `2·Deg` while
+the provenance record, being replaced rather than accumulated, reports `Deg`. That is a silent
+double rotation with a record that under-states it — worse than a delta, because it looks right.
+
+Citing kleio's redelivery does not close this, and validating the spec against kleio showed why:
+`ocr.go:55-57` describes a stage that re-runs **over its own output**, and `ocr.go:209-218`
+records that as a deliberate cost, safe only because OCR is idempotent from its own output.
+Kleio has both patterns in production — the compress stage re-reads the original each attempt
+(`compress.go:525`), the OCR stage does not. "The caller will send the original" is a hope.
+
+So byblos enforces it:
+
+> **The applied rotation is `Deg` minus whatever the source page's provenance already records as
+> `Straightened.Deg`, defaulting to zero.** `Deg` therefore means "the total angle from the
+> ORIGINAL", whatever document the caller hands over, and the record always holds that same
+> total rather than the increment just applied.
+
+This costs nothing to implement. `BuildFromPages` already reads the source's provenance before
+building (`editpages.go:100-103`) — the old record is in hand at exactly the moment the
+difference is needed.
+
+It makes redelivery idempotent under both of kleio's patterns. Re-running `Deg = 3.2` against an
+export already carrying `Straightened{Deg: 3.2}` applies `0.0` and changes nothing; running it
+against one carrying `1.0` applies `2.2` and lands on `3.2` from the original either way. The
+"one generation of loss" property becomes a fact about the operation rather than a rule the
+caller has to remember.
+
+A source whose provenance is absent or unreadable is treated as unstraightened, which is the
+only safe default: it is what every document byblos has never seen looks like.
+
+### The premise this still rests on, and it is kleio's to keep
+
+Byblos applies the correction to the bytes it is given. It cannot verify that those bytes are
+the original scan rather than a compressed or OCR'd rendition, and the rule above only aligns
+successive corrections — it does not recover resolution already lost upstream.
+
+Kleio's retention policy can remove that original. `ApplyRetention` (`validate.go:62-77`, called
+at `validate.go:429`) DELETES it under the `discard` policy and tags it for a Glacier lifecycle
+transition under `archive_glacier`, after which it is not readable without a restore. Only
+`keep_standard` — the default (`0001_tables.sql:89-91`) — keeps it hot.
+
+A straighten of a `discard`-policy document is therefore a correction of a second-generation
+rendition. That is a legitimate thing to do and it is not this library's call, but it is not
+what "applied once, to the pristine source" describes, and the kleio-side design must decide it
+rather than inherit it silently.
+
 ### What validate rejects
 
 `validate` (`internal/pdfdoc/buildpages.go:138`) already rejects what cannot be resolved without
@@ -244,18 +293,31 @@ skew census. If the population is material it becomes its own bead.
 
 ## 6. The crop is declared and not built
 
-`StraightenSpec.Crop` is refused when non-nil. Its frame is fixed now anyway, because kleio's
-edit-list table is built once and the frame is the part that gets silently mismatched:
+`StraightenSpec.Crop` is refused when non-nil. Its frame is fixed now anyway, because the frame
+is the part that gets silently mismatched and it is cheaper to state before a consumer exists
+than after:
 
 > **The crop is stated in the SOURCE page's unrotated PDF user space** — `[llx lly urx ury]`,
 > origin lower-left, y increasing upward, the same convention as `PageGeometry`. That is the
 > only frame that is a property of the file rather than of a viewer's interpretation of
 > `/Rotate`, and it is the frame byblos writes in.
 
-The editor does the mapping from its canvas, once. The canvas is origin top-left with y running
-**down**; PDF user space is origin lower-left with y running **up**. byb-16j.1 hit exactly this
-flip while building its own instrument, and `internal/skew/skew.go:660` is where the conversion
-is done — once, deliberately, rather than left to a caller.
+The editor does the mapping from its canvas. That mapping is **four steps, not one**, and naming
+only the axis flip would understate it:
+
+1. **pixels to points**, by the client's own render scale.
+2. **y-flip**, against the page height. The canvas is origin top-left with y running **down**;
+   PDF user space is origin lower-left with y running **up**. byb-16j.1 hit exactly this flip
+   while building its own instrument, and `internal/skew/skew.go:660` is where byblos does the
+   conversion — once, deliberately, rather than leaving it to a caller.
+3. **inverse `/Rotate`**, for a page declaring 90, 180 or 270. Every raster a client is likely to
+   hold has already had `/Rotate` applied to it — `pdftoppm` does — so its frame is the displayed
+   one and this step is not optional. This is the silent quarter-turn failure §3 names.
+4. **CropBox origin offset.** A renderer renders the CropBox, which need not sit at `(0, 0)`.
+
+Steps 3 and 4 are the ones that produce a plausible-looking crop in the wrong place, because
+they are no-ops on the common page and only bite on the page that carries an unusual box or a
+declared rotation.
 
 When the crop lands it also determines the page box, which §4 leaves alone, and it restores the
 covering-raster property that §4 gives up: a rectangle inscribed in the rotated content is
@@ -405,9 +467,22 @@ hardest class of bug to chase.
 }
 ```
 
-The Go test reads it, applies the transform, and asserts the emitted `cm` term by term. kleio
-vendors the same file and asserts its canvas maths against it. A sign flip then reports as
-`cm[1] expected -0.0296662, got +0.0296662` rather than as a pixel diff.
+The Go test reads it, applies the transform, and asserts the emitted `cm` term by term. A sign
+flip then reports as `cm[1] expected -0.0296662, got +0.0296662` rather than as a pixel diff.
+
+**The other side of this fixture does not exist yet, and the spec should not pretend otherwise.**
+kleio is a headless JSON API with three queue workers and no frontend at all — no JavaScript, no
+canvas, no client-side image code, and no editor in any of its design documents. The client the
+editor will live in is outside that repository and outside this one.
+
+So this is a commitment, not a description. Two things make it a cheap one to keep:
+
+- Because kleio imports byblos as a Go module, a kleio Go test can read `contract.json` straight
+  out of the module cache — byblos testdata ships in the module zip — so that half stays in sync
+  for free with the version bump, with nothing to vendor.
+- For the eventual JS client there is no sync mechanism today. Whoever builds it must copy this
+  file and pin the byblos version it came from, and the file carries its own `convention` string
+  for exactly that reason.
 
 Two properties hold for every case and must be asserted separately from the literal numbers,
 because they catch a whole class of error that a copied constant does not:
@@ -438,6 +513,8 @@ Red first, per case.
 | `TestStraightenRotatesAboutThePageCentre` | content stays centred; refutes origin-rotation |
 | `TestStraightenComposesWithRotate` | a `/Rotate 90` page plus an angle |
 | `TestStraightenIsAbsolute` | applying twice from the original is idempotent (byb-yul.4's redelivery) |
+| `TestStraightenOnAlreadyStraightenedSourceAppliesTheDifference` | the enforced-absolute rule: `Deg` 3.2 over a source recording 1.0 applies 2.2 and records 3.2; over one recording 3.2 it applies 0.0 and changes the geometry not at all |
+| `TestStraightenTreatsUnreadableProvenanceAsUnstraightened` | the safe default; a document byblos has never seen must not be treated as partly corrected |
 | `TestStraightenRefusesUnbalancedContent` | the q/Q guard, both directions |
 | `TestStraightenWrapsAContentsArray` | all four `/Contents` shapes |
 | `TestStraightenValidates` | `api.Validate` accepts the output, and byblos reads back the geometry it wrote |
@@ -476,7 +553,27 @@ Adding a field to `pdfdoc.PageSource` therefore breaks no test and leaves the sp
 wrong. It must be updated by hand, and this row is here so that the next person does not have to
 rediscover why.
 
-## 12. Filed, not built
+## 12. Nothing here can reach kleio without a release
+
+Validated 2026-08-14 against kleio at `2f67417`.
+
+Kleio depends on byblos as a plain Go module, pinned at **v0.1.0** (`go.mod:16`), which is 42
+commits behind this branch. `editpages.go` — `PageSource`, `BuildFromPages`, the whole seam this
+spec extends — exists at neither `v0.1.0` nor `v0.2.0`. The contract is invisible to kleio until
+byblos cuts a tag and kleio bumps to it.
+
+That bump carries a small tax worth knowing about in advance: kleio's byblos spike documents
+that a malformed last page makes `Inspect` error (`internal/pipeline/inspect.go:32-35`), and
+`35fc1aa` made per-page failures non-fatal after `v0.2.0`. The comment goes stale on the same
+bump. The spike is behind `KLEIO_BYBLOS_INSPECT`, default off, so this is contained.
+
+Kleio imports exactly three byblos symbols — `Inspect`, `PageInfo.Index`, `PageInfo.Bounds` —
+across two files, and **constructs no byblos struct anywhere**, keyed or unkeyed. Adding fields
+to `PageSource`, `PageProvenance` or `ImageRef` therefore cannot break its build. The four
+`cmd/byblos-*` binaries are measurement-only (byb-vv4) and reference none of these types either,
+so no CLI contract moves.
+
+## 13. Filed, not built
 
 Both came out of testing whether a rotated placement survives the pipeline. It does — extract,
 `Downsample`, `EncodeJBIG2Generic`, `ReplaceImages`, `Validate` and re-extract all pass at 0,
@@ -484,7 +581,7 @@ Both came out of testing whether a rotated placement survives the pipeline. It d
 identity re-encode rendering pixel-identical under poppler. What does not survive is byblos's
 *description* of the page.
 
-**AABB blindness (P2 bug, reachable today).** Every geometry consumer models a rotated
+**AABB blindness — byb-2mt (P2 bug, reachable today).** Every geometry consumer models a rotated
 footprint as its axis-aligned bounding box. `inkHidden` (`extract.go:1004-1017`) judges ink in
 the corner triangles hidden, so the page passes as clean and the ink is dropped from the
 returned raster — measured at 2152 of 2500 dark pixels omitted at 10 degrees, with no divert and
@@ -492,7 +589,8 @@ no error. `covers`/`opaqueCover` on a stack (`extract.go:750-768`) let a rotated
 under-layer, and **no fixture in the tree exercises that at all**. Both are reachable today at
 2 degrees or less, and under any sheared placement, independently of this work.
 
-**Shear and rotation are conflated (P2).** `skewDegrees` returns bit-identical `5.000000` for a
+**Shear and rotation are conflated — byb-06n (P2, blocked by byb-2mt).** `skewDegrees` returns
+bit-identical `5.000000` for a
 rigid 5-degree turn and for a 10-degree shear; `math.Abs` at `extract.go:72-73` destroys the
 sign of `b` versus `c`, which is the only information separating them. They are separable by
 column orthogonality — real rigid placements measure 1.86e-07 and 3.99e-05 degrees off
