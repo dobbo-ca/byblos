@@ -27,6 +27,39 @@ package pdfdoc
 // /AcroForm 11.7%, /Names 9.1%. Dropping the entry is honest; carrying a stale
 // one is not. See the design spec's 2026-08-13 amendment.
 //
+// MEASURED OVER THE PINNED SAMPLE, 9,798 builds: every multi-page document
+// twice, once fully reversed and once with its middle page dropped. 4,899 of the
+// 5,063 multi-page documents built each way; the 164 refused per sequence are
+// 159 encrypted documents (3.1%, see openSources) plus 5 others. Page count was
+// right on all 9,798, every output re-opened, and output/input size ran p10
+// 0.490, median 0.856, p90 0.982, max 1.001 -- an export is smaller than its
+// input, because it drops the catalog and pdfcpu's writer rewrites the rest.
+//
+// TWO KNOWN DEFECTS CAME OUT OF THAT RUN. Both are named here rather than left
+// to be rediscovered:
+//
+//   - A DANGLING REFERENCE ON 11 OF 4,899 DOCUMENTS (0.22%), and the mechanism
+//     generalises. pdfcpu's writer traverses only the entries it KNOWS, so an
+//     entry this walk migrated but the writer does not follow leaves a reference
+//     naming an object the file never defines. Measured, exactly 2 per page, in
+//     vendor-private page-dictionary keys -- /CREO_Tools and /HDAG_Tools
+//     (8 documents), /AAPL:PPK and /AAPL:PPKHash (1) -- and in
+//     /Resources/Properties/MC0 and /MC1 (1), which is NOT private but a
+//     standard marked-content property list. ISO 32000-1 7.3.10 makes such a
+//     reference the null object, so a reader sees an absent entry rather than an
+//     error, which is why nothing else caught it. The real fix is for byblos to
+//     serialize the output itself instead of letting pdfcpu's traversal decide
+//     the write set, the way internal/linearize already does; that is byb-yul.6.
+//
+//   - AN OUTPUT api.Validate REFUSES, ON 28 OF 4,899 (0.57%). This one is
+//     CARRIED, not introduced: of the 12 documents checked, 12 had an input that
+//     already fails the same validator. Open deliberately skips validation (see
+//     its comment), so byblos accepts documents pdfcpu's validator refuses --
+//     an unsupported page transition, a /Named action pdfcpu does not know, a
+//     /Resources missing the ColorSpace subdict its content names, a date of
+//     "D:20010031211931" -- and the export carries the offending object through.
+//     Nothing here makes a valid document invalid.
+//
 // OUTPUT IS NOT BYTE-STABLE. Object numbers fall out of the order objects are
 // first reached, and pdfcpu's writer is not deterministic either: measured over
 // 90 documents, the same selection written twice in one process gave 0
