@@ -207,3 +207,83 @@ func TestStraightenTreatsUnreadableProvenanceAsUnstraightened(t *testing.T) {
 		t.Errorf("recorded record = %+v, %v; want Straightened.Deg = 2.5", rec, err)
 	}
 }
+
+// TestStraightenAcceptsAnAngleOutsideOneTurn pins what the design deliberately
+// does NOT refuse (section 2, "What validate rejects"). An angle past +-180 is
+// legal: the rotation matrix takes it modulo 360 by construction, so 363.2 and
+// 3.2 are the same page. This is unlike PageSource.Rotate, whose refusal exists
+// because the value is written into the file verbatim and pdfcpu then rejects
+// what it wrote.
+//
+// It is pinned rather than left to arithmetic because the spec makes it a
+// stated behaviour, and a later "tidy" that normalized or refused the angle
+// would change a documented contract while every other test stayed green.
+func TestStraightenAcceptsAnAngleOutsideOneTurn(t *testing.T) {
+	src := corpusDoc(t, "scan")
+	deg := func(d float64) float64 {
+		t.Helper()
+		var out bytes.Buffer
+		if err := BuildFromPages(&out, []PageSource{
+			{Source: bytes.NewReader(src), Page: 1, Straighten: &StraightenSpec{Deg: d}},
+		}); err != nil {
+			t.Fatalf("BuildFromPages(Deg: %v) error = %v", d, err)
+		}
+		return placementDegOf(t, out.Bytes())
+	}
+
+	for _, tc := range []struct{ over, want float64 }{
+		{363.2, 3.2},
+		{-356.8, 3.2},
+		{723.2, 3.2},
+	} {
+		if got := deg(tc.over); math.Abs(got-tc.want) > 1e-6 {
+			t.Errorf("Deg %v: PlacementDeg = %v, want %v -- one turn is not a difference",
+				tc.over, got, tc.want)
+		}
+	}
+}
+
+// TestStraightenCoversPageReportsTheAABBLie pins a WRONG answer, on purpose,
+// because it is a wrong answer byblos already gives and this feature makes
+// easier to reach.
+//
+// A rotated rectangle cannot cover an axis-aligned page: the four corner
+// triangles are empty. But CoversPage is p.Page.In(p.Bounds) (extract.go:241)
+// and Bounds is the AXIS-ALIGNED bounding box, which rotation GROWS by
+// |cos t| + |sin t|. So the box swallows the page and CoversPage answers true
+// with more confidence than before the correction, not less. 3.26% of the page
+// is genuinely uncovered at 2 degrees.
+//
+// That is byb-2mt exception 3, reachable today at any placement inside
+// maxSkewDeg and not introduced here. This test exists so that closing byb-2mt
+// -- which replaces the bounding-box test with a true-quadrilateral one --
+// FAILS here and is changed deliberately, rather than silently flipping a
+// behaviour the design spec describes.
+func TestStraightenCoversPageReportsTheAABBLie(t *testing.T) {
+	src := corpusDoc(t, "scan")
+	for _, deg := range []float64{0.6, 1.0, 1.9} {
+		var out bytes.Buffer
+		if err := BuildFromPages(&out, []PageSource{
+			{Source: bytes.NewReader(src), Page: 1, Straighten: &StraightenSpec{Deg: deg}},
+		}); err != nil {
+			t.Fatalf("BuildFromPages(Deg: %v) error = %v", deg, err)
+		}
+		r, err := ExtractPageRaster(bytes.NewReader(out.Bytes()), 1)
+		if err != nil {
+			t.Fatalf("Deg %v: ExtractPageRaster() error = %v; a correction inside "+
+				"maxSkewDeg must still extract", deg, err)
+		}
+		// The lie itself.
+		if !r.CoversPage() {
+			t.Errorf("Deg %v: CoversPage() = false, want true. If byb-2mt has landed, "+
+				"this test is now the thing that is wrong -- update it and the design "+
+				"spec's section 4 together", deg)
+		}
+		// And the evidence that it IS a lie: the box grew past the page it
+		// claims to cover, which a raster that really covered it never would.
+		if !r.Bounds.Eq(r.Page) && r.Bounds.In(r.Page) {
+			t.Errorf("Deg %v: bounds %v sit inside page %v; expected the AABB to "+
+				"GROW past the page under rotation", deg, r.Bounds, r.Page)
+		}
+	}
+}

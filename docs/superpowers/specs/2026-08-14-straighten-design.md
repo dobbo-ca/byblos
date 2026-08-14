@@ -224,10 +224,33 @@ The consequence, stated rather than discovered: the rotated content's corners fa
 box, and no viewer draws them. At the measured p90 of 0.6 degrees these are slivers. The page
 box becomes the user's crop when §6 lands, which is the decision that actually determines it.
 
-A rotated rectangle also cannot cover an axis-aligned one, so `CoversPage()` reports false on a
-straightened page. This is inherent to rotation and not a defect of this design. `classify`
-does not require a single-image page to cover the page box (`extract.go:712-745`, byb-b1.3's
-argument), so extraction is unaffected.
+A rotated rectangle cannot cover an axis-aligned one — the four corner triangles are empty.
+**`CoversPage()` nevertheless reports `true`, and that is a lie this design inherits rather than
+introduces.** Measured on this branch:
+
+```
+  deg=0     CoversPage=true   page=(0,0)-(612,792)  bounds=(0,0)-(612,792)
+  deg=0.6   CoversPage=true   page=(0,0)-(612,792)  bounds=(-4,-3)-(616,795)
+  deg=1.0   CoversPage=true   page=(0,0)-(612,792)  bounds=(-7,-5)-(619,797)
+  deg=1.9   CoversPage=true   page=(0,0)-(612,792)  bounds=(-13,-10)-(625,802)
+```
+
+`CoversPage` is `p.Page.In(p.Bounds)` (`extract.go:241`) and `Bounds` is the *axis-aligned
+bounding box* of the placed raster. Rotation grows that box by `|cos t| + |sin t|`, so the box
+swallows the page while the raster itself no longer reaches the corners. byblos therefore reports
+a straightened page as fully covered with more confidence than before, not less. The genuinely
+uncovered share is 3.26% of the page at 2 degrees.
+
+This is byb-2mt exception 3 — every geometry consumer models a rotated footprint as its bounding
+box — and it is reachable today at any placement within `maxSkewDeg`, with or without this
+feature. It is filed, not fixed here, because fixing it means replacing the bounding-box test
+with a true-quadrilateral test in four places and that is its own change with its own fixtures.
+
+`TestStraightenCoversPageReportsTheAABBLie` pins the behaviour as it actually is, and names
+byb-2mt, so that closing that bead changes this test deliberately rather than by surprise.
+
+`classify` does not require a single-image page to cover the page box (`extract.go:712-745`,
+byb-b1.3's argument), so extraction itself is unaffected either way.
 
 Growing the MediaBox was considered and rejected for now: it changes the page size every
 downstream consumer sees, and `internal/pdfdoc/pdfdoc.go:411-414` does not intersect CropBox
@@ -383,6 +406,23 @@ type PageStraighten struct {
    deep copies per field. It needs one for the new pointer, or `BuildFromPages` drops the record
    on export. It has no test named for it, and nothing in the tree enumerates `PageProvenance`
    fields reflectively — a missed carry-forward fails silently.
+
+### One asymmetry, left in on purpose
+
+`clonePageProvenance` deep-copies the `Straightened` pointer; the carry-forward in
+`RecordExtractionContext` assigns it directly. The two paths disagree, and that is deliberate
+rather than an oversight.
+
+The carry-forward's source, `old`, is read inside `RecordExtractionContext` and dropped when it
+returns, so exactly one holder of the pointer survives the call and the aliasing cannot be
+observed. A defensive copy there would be unreachable code that no test could exercise, which is
+worse than the asymmetry. `clonePageProvenance` genuinely needs its copy, because
+`BuildFromPages` can name one source page twice in a sequence and both output records would
+otherwise share it — which is the reason that function's doc comment already gives for every
+other field it copies.
+
+If `old` ever arrives from a caller rather than from a local read, this becomes a real aliasing
+bug and the copy must be added with it.
 
 ## 8. Letting a caller see the refusal coming
 
