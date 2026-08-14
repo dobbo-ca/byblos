@@ -214,5 +214,9 @@ func clonePageProvenance(in PageProvenance) PageProvenance {
 		}
 		out.Geometry = &g
 	}
+	if in.Straightened != nil {
+		s := *in.Straightened
+		out.Straightened = &s
+	}
 	return out
 }

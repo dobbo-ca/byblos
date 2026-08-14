@@ -584,6 +584,7 @@ type PageProvenance struct {
     Placement     []float64       // paint matrix recorded at write time; see PageRaster
     DroppedAnnots int             // annotations that painted but are not in the extracted raster
     Geometry      *PageGeometry   // raster/page boxes measured at write time (byb-b5.1)
+    Straightened  *PageStraighten // absolute correction applied; REPLACED not unioned (byb-16j.4)
 }
 
 type PageGeometry struct {
@@ -596,6 +597,10 @@ type PageGeometry struct {
 }
 
 func (g PageGeometry) CoversPage() bool
+
+type PageStraighten struct {
+    Deg float64 // degrees, positive CCW; same convention as StraightenSpec.Deg (byb-16j.4)
+}
 
 func ReadProvenance(r io.ReadSeeker) (*Provenance, error)
 func ReadProvenanceContext(ctx context.Context, r io.ReadSeeker) (*Provenance, error)

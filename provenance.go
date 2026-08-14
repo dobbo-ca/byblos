@@ -141,12 +141,17 @@ type Provenance struct {
 // histories. It is nil for every record this build did not measure and for
 // every record written before byb-b5.1 -- see PageGeometry's doc comment for
 // why that nilness must survive.
+// Straightened, when present, is the absolute rotation byblos has applied to
+// this page's content (byb-16j.4). See PageStraighten's own doc comment,
+// beside PageGeometry below, for why it is a pointer and why it is REPLACED
+// rather than unioned into Applied.
 type PageProvenance struct {
-	Applied       []string      `json:"applied,omitempty"`
-	Diverted      string        `json:"diverted,omitempty"`
-	Placement     []float64     `json:"placement,omitempty"`
-	DroppedAnnots int           `json:"dropped_annots,omitempty"`
-	Geometry      *PageGeometry `json:"geometry,omitempty"`
+	Applied       []string        `json:"applied,omitempty"`
+	Diverted      string          `json:"diverted,omitempty"`
+	Placement     []float64       `json:"placement,omitempty"`
+	DroppedAnnots int             `json:"dropped_annots,omitempty"`
+	Geometry      *PageGeometry   `json:"geometry,omitempty"`
+	Straightened  *PageStraighten `json:"straightened,omitempty"`
 }
 
 // PageGeometry is a page's raster and page boxes as measured at write time,
@@ -249,6 +254,23 @@ func (g PageGeometry) CoversPage() bool {
 		g.RasterBox[1] <= g.PageBox[1]+coverTolerancePt &&
 		g.RasterBox[2] >= g.PageBox[2]-coverTolerancePt &&
 		g.RasterBox[3] >= g.PageBox[3]-coverTolerancePt
+}
+
+// PageStraighten is the correction byblos applied to this page's content, in
+// StraightenSpec.Deg's signed convention (byb-16j.4): degrees, positive
+// counter-clockwise in PDF default user space.
+//
+// It is ABSOLUTE and is REPLACED, never accumulated -- which is why it cannot
+// live in Applied. unionSorted UNIONS, so two corrections of one page would
+// leave two contradictory angles in the record, and a union cannot express an
+// absolute value.
+//
+// It is a pointer for the reason PageGeometry is one (see that type's doc
+// comment above): a 0.0 degree correction is a real measurement, and
+// `omitzero` on a value type would make it serialize identically to "never
+// straightened".
+type PageStraighten struct {
+	Deg float64 `json:"deg"`
 }
 
 // buildCapabilities is what this build of Byblos can do. Every entry MUST also
@@ -432,8 +454,16 @@ func RecordExtractionContext(ctx context.Context, r io.ReadSeeker) (Provenance, 
 		if err != nil && rec.Diverted == "" {
 			return Provenance{}, fmt.Errorf("byblos: provenance: page %d: %w", n, err)
 		}
-		if old != nil && rec.Diverted == "" && n-1 < len(old.Pages) {
-			rec.Applied = unionSorted(old.Pages[n-1].Applied, rec.Applied)
+		if old != nil && n-1 < len(old.Pages) {
+			if rec.Diverted == "" {
+				rec.Applied = unionSorted(old.Pages[n-1].Applied, rec.Applied)
+			}
+			// Straightened is carried forward regardless of Diverted: it is
+			// not derivable from the document, and a page that diverts has
+			// its other fields zeroed by extractPage -- the same divert this
+			// marker exists to explain would otherwise destroy it (byb-16j.4
+			// section 7).
+			rec.Straightened = old.Pages[n-1].Straightened
 		}
 		p.Pages = append(p.Pages, rec)
 	}
