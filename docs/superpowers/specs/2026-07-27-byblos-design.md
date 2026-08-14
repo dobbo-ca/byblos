@@ -527,7 +527,17 @@ func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error
 // because those describe the page set or the page order. Output is not
 // byte-stable; content-address an export rather than rewriting a key.
 type PageSource = pdfdoc.PageSource // Source io.ReadSeeker; Page int (1-based);
-                                    // Rotate int, ABSOLUTE, one of 0/90/180/270
+                                    // Rotate int, ABSOLUTE, one of 0/90/180/270;
+                                    // Straighten *StraightenSpec, nil for none (byb-16j.4)
+
+// StraightenSpec is a lossless rotation of one page's content (byb-16j.4).
+// Deg is ABSOLUTE -- the angle from the ORIGINAL page, positive
+// counter-clockwise -- and is enforced as such: BuildFromPagesContext applies
+// Deg minus whatever the source page's provenance already records as
+// Straightened.Deg, defaulting to zero, and records the TOTAL. Crop is
+// [llx lly urx ury] in the source page's unrotated user space and is refused
+// when non-nil -- not implemented in this version.
+type StraightenSpec = pdfdoc.StraightenSpec
 
 func BuildFromPages(w io.Writer, pages []PageSource) error
 func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource) error
