@@ -338,6 +338,7 @@ const CapabilityJBIG2Generic = "jbig2-generic"    // provenance capability strin
 type ImageRef struct {
     Bounds        image.Rectangle // placement on the page, in points
     Placement     [6]float64      // paint matrix, [a b c d e f] (ISO 32000-1 8.3.3)
+    PlacementDeg  float64         // Placement's rotation, signed, degrees CCW: atan2(b, a)
     Width, Height int             // pixel dimensions
     Bitonal       bool
     Filter        string          // declared codec, e.g. "JBIG2Decode"; "" when none
