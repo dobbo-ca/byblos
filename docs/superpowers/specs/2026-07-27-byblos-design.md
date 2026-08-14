@@ -338,6 +338,7 @@ const CapabilityJBIG2Generic = "jbig2-generic"    // provenance capability strin
 type ImageRef struct {
     Bounds        image.Rectangle // placement on the page, in points
     Placement     [6]float64      // paint matrix, [a b c d e f] (ISO 32000-1 8.3.3)
+    PlacementDeg  float64         // Placement's rotation, signed, degrees CCW: atan2(b, a)
     Width, Height int             // pixel dimensions
     Bitonal       bool
     Filter        string          // declared codec, e.g. "JBIG2Decode"; "" when none
@@ -526,7 +527,17 @@ func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error
 // because those describe the page set or the page order. Output is not
 // byte-stable; content-address an export rather than rewriting a key.
 type PageSource = pdfdoc.PageSource // Source io.ReadSeeker; Page int (1-based);
-                                    // Rotate int, ABSOLUTE, one of 0/90/180/270
+                                    // Rotate int, ABSOLUTE, one of 0/90/180/270;
+                                    // Straighten *StraightenSpec, nil for none (byb-16j.4)
+
+// StraightenSpec is a lossless rotation of one page's content (byb-16j.4).
+// Deg is ABSOLUTE -- the angle from the ORIGINAL page, positive
+// counter-clockwise -- and is enforced as such: BuildFromPagesContext applies
+// Deg minus whatever the source page's provenance already records as
+// Straightened.Deg, defaulting to zero, and records the TOTAL. Crop is
+// [llx lly urx ury] in the source page's unrotated user space and is refused
+// when non-nil -- not implemented in this version.
+type StraightenSpec = pdfdoc.StraightenSpec
 
 func BuildFromPages(w io.Writer, pages []PageSource) error
 func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource) error
@@ -584,6 +595,7 @@ type PageProvenance struct {
     Placement     []float64       // paint matrix recorded at write time; see PageRaster
     DroppedAnnots int             // annotations that painted but are not in the extracted raster
     Geometry      *PageGeometry   // raster/page boxes measured at write time (byb-b5.1)
+    Straightened  *PageStraighten // absolute correction applied; REPLACED not unioned (byb-16j.4)
 }
 
 type PageGeometry struct {
@@ -596,6 +608,10 @@ type PageGeometry struct {
 }
 
 func (g PageGeometry) CoversPage() bool
+
+type PageStraighten struct {
+    Deg float64 // degrees, positive CCW; same convention as StraightenSpec.Deg (byb-16j.4)
+}
 
 func ReadProvenance(r io.ReadSeeker) (*Provenance, error)
 func ReadProvenanceContext(ctx context.Context, r io.ReadSeeker) (*Provenance, error)

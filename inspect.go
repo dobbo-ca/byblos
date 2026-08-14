@@ -74,8 +74,19 @@ import (
 // picks the images that will abort its call. The two fields answer different
 // questions: Bitonal is about the samples, this is about the write path.
 type ImageRef struct {
-	Bounds        image.Rectangle
-	Placement     [6]float64
+	Bounds    image.Rectangle
+	Placement [6]float64
+	// PlacementDeg is Placement's rotation about the page's axes, in degrees,
+	// positive COUNTER-CLOCKWISE -- atan2(b, a). It is the SIGNED angle, where
+	// skewDegrees (extract.go:71-75) is unsigned and cannot express a
+	// direction.
+	//
+	// It exists so a caller can see a straighten's consequence before asking
+	// for it: a correction of Deg leaves the placement at PlacementDeg + Deg,
+	// and placementReason (extract.go:800) diverts a page past maxSkewDeg =
+	// 2.0. The precedent is Substitutable -- a caller that cannot see a
+	// refusal coming cannot drive the primitive (byb-js5.2).
+	PlacementDeg  float64
 	Width, Height int    // pixel dimensions of the stored raster
 	Bitonal       bool   // 1 bit per component, or an image mask
 	Filter        string // the stored raster's declared codec; "" when it declares none
@@ -252,7 +263,11 @@ func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.
 	}
 	pi.TextChars = s.TextChars
 	for _, pl := range s.Images {
-		ref := ImageRef{Bounds: boxRect(pl.Box), Placement: [6]float64(pl.CTM)}
+		ref := ImageRef{
+			Bounds:       boxRect(pl.Box),
+			Placement:    [6]float64(pl.CTM),
+			PlacementDeg: placementDeg([6]float64(pl.CTM)),
+		}
 		if info, ok := d.ImageInfo(pl.ID); ok {
 			ref.Width = info.Width
 			ref.Height = info.Height
@@ -321,6 +336,13 @@ func rectOf(r pdfdoc.Rect) image.Rectangle {
 // and it is not asked here: a box with no extent on an axis still projects to an
 // empty rectangle. classify (extract.go) decides visibility with marks() before
 // any of this is reached.
+// placementDeg is ImageRef.PlacementDeg's computation: atan2(b, a) in degrees,
+// positive counter-clockwise in PDF default user space. See PlacementDeg's
+// doc comment for why this is signed, where skewDegrees is not.
+func placementDeg(m [6]float64) float64 {
+	return math.Atan2(m[1], m[0]) * 180 / math.Pi
+}
+
 func boxRect(b content.Box) image.Rectangle {
 	llx, urx := roundExtent(b.LLX, b.URX)
 	lly, ury := roundExtent(b.LLY, b.URY)

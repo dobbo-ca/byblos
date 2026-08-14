@@ -1,0 +1,27 @@
+{
+  "convention": "PDF default user space: origin lower-left, y up, angles positive CCW",
+  "tol": 1e-6,
+  "cases": [
+    {
+      "name": "flat-page-1.7deg",
+      "page":   {"cropbox": [0, 0, 612, 792], "rotate": 0},
+      "apply":  {"deg": -1.7},
+      "centre": [306, 396],
+      "expect": {"cm": [0.9995599, -0.0296662, 0.0296662, 0.9995599, -11.6131499, 9.2521661]}
+    },
+    {
+      "name": "rotate90-page-0.6deg",
+      "page":   {"cropbox": [0, 0, 612, 792], "rotate": 90},
+      "apply":  {"deg": -0.6},
+      "centre": [306, 396],
+      "expect": {"cm": [0.9999452, -0.0104718, 0.0104718, 0.9999452, -4.1300483, 3.2260789]}
+    },
+    {
+      "name": "identity",
+      "page":   {"cropbox": [0, 0, 612, 792], "rotate": 0},
+      "apply":  {"deg": 0},
+      "centre": [306, 396],
+      "expect": {"cm": [1, 0, 0, 1, 0, 0]}
+    }
+  ]
+}

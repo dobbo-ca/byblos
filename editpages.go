@@ -32,6 +32,12 @@ import (
 // second thing to keep in step.
 type PageSource = pdfdoc.PageSource
 
+// StraightenSpec is a lossless rotation of one page's content. Aliased from
+// the write seam for the same reason PageSource is (byb-16j.4); see its own
+// doc comment in internal/pdfdoc for the sign convention and the
+// absolute-not-delta contract BuildFromPagesContext enforces below.
+type StraightenSpec = pdfdoc.StraightenSpec
+
 // divertedNotRecorded is the PageProvenance.Diverted reason for a page byblos
 // did not process and has no record of -- typically a page imported from a
 // document that never went through byblos at all.
@@ -94,14 +100,35 @@ func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource)
 
 	// The record is assembled BEFORE the document is built, so that a source
 	// whose provenance cannot be read fails the call rather than producing a
-	// document with a record that silently describes the wrong pages.
-	record, err := buildRecord(ctx, pages)
+	// document with a record that silently describes the wrong pages. It also
+	// puts the OLD Straightened.Deg in hand at exactly the moment the
+	// enforced-absolute rule needs it (design spec section 2): deltas[i] is
+	// the increment straighten actually has to apply to page i, having
+	// already subtracted whatever that page's provenance recorded.
+	record, deltas, err := buildRecord(ctx, pages)
 	if err != nil {
 		return err
 	}
 
+	// pdfdoc.BuildFromPages knows nothing of provenance and applies whatever
+	// angle it is given; the absolute-vs-delta translation has to happen
+	// here, the one place that has both the caller's absolute request and
+	// the source's prior record. A copy, not a mutation of pages: the
+	// caller's slice and its Straighten pointers are not this call's to
+	// change.
+	adjusted := make([]PageSource, len(pages))
+	copy(adjusted, pages)
+	for i, p := range pages {
+		if p.Straighten == nil {
+			continue
+		}
+		delta := *p.Straighten
+		delta.Deg = deltas[i]
+		adjusted[i].Straighten = &delta
+	}
+
 	var built bytes.Buffer
-	if err := pdfdoc.BuildFromPages(&built, pages); err != nil {
+	if err := pdfdoc.BuildFromPages(&built, adjusted); err != nil {
 		return fmt.Errorf("byblos: BuildFromPages: %w", err)
 	}
 	if err := checkContext(ctx); err != nil {
@@ -113,12 +140,17 @@ func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource)
 	return nil
 }
 
-// buildRecord assembles the exported document's provenance from its sources'.
-func buildRecord(ctx context.Context, pages []PageSource) (Provenance, error) {
+// buildRecord assembles the exported document's provenance from its sources',
+// and the per-page straighten INCREMENT the enforced-absolute rule requires
+// (design spec section 2): deltas[i] is p.Straighten.Deg minus whatever page
+// i's source provenance already recorded as Straightened.Deg, defaulting to
+// zero for a source with no readable record -- the only safe default, being
+// what every document byblos has never seen looks like.
+func buildRecord(ctx context.Context, pages []PageSource) (rec Provenance, deltas []float64, err error) {
 	sources := map[io.ReadSeeker]*Provenance{}
 	for _, p := range pages {
 		if err := checkContext(ctx); err != nil {
-			return Provenance{}, err
+			return Provenance{}, nil, err
 		}
 		if p.Source == nil {
 			// pdfdoc.BuildFromPages refuses this with the message that names
@@ -147,17 +179,31 @@ func buildRecord(ctx context.Context, pages []PageSource) (Provenance, error) {
 	}
 	out.Capabilities = commonCapabilities(pages, sources)
 
-	for _, p := range pages {
-		rec := sources[p.Source]
+	deltas = make([]float64, len(pages))
+	for i, p := range pages {
+		src := sources[p.Source]
 		// A source with no record, or one whose Pages slice is too short to
 		// reach this page, cannot say what happened to it.
-		if rec == nil || p.Page < 1 || p.Page > len(rec.Pages) {
-			out.Pages = append(out.Pages, PageProvenance{Diverted: divertedNotRecorded})
-			continue
+		var pp PageProvenance
+		if src == nil || p.Page < 1 || p.Page > len(src.Pages) {
+			pp = PageProvenance{Diverted: divertedNotRecorded}
+		} else {
+			pp = clonePageProvenance(src.Pages[p.Page-1])
 		}
-		out.Pages = append(out.Pages, clonePageProvenance(rec.Pages[p.Page-1]))
+
+		if p.Straighten != nil {
+			old := 0.0
+			if pp.Straightened != nil {
+				old = pp.Straightened.Deg
+			}
+			deltas[i] = p.Straighten.Deg - old
+			pp.Applied = unionSorted(pp.Applied, []string{"straighten"})
+			pp.Straightened = &PageStraighten{Deg: p.Straighten.Deg}
+		}
+
+		out.Pages = append(out.Pages, pp)
 	}
-	return out, nil
+	return out, deltas, nil
 }
 
 // commonCapabilities is what EVERY contributing source's build could do.
@@ -213,6 +259,10 @@ func clonePageProvenance(in PageProvenance) PageProvenance {
 			g.ClipBox = &clip
 		}
 		out.Geometry = &g
+	}
+	if in.Straightened != nil {
+		s := *in.Straightened
+		out.Straightened = &s
 	}
 	return out
 }

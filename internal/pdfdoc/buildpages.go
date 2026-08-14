@@ -69,6 +69,7 @@ package pdfdoc
 import (
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
@@ -86,6 +87,10 @@ type PageSource struct {
 	// Rotate is the ABSOLUTE /Rotate to give the page: 0, 90, 180 or 270. It
 	// is not added to whatever the source page declares.
 	Rotate int
+	// Straighten is a lossless rotation of the page's content, nil for none.
+	// See StraightenSpec's doc comment for the sign convention and the
+	// absolute-not-delta contract (byb-16j.4).
+	Straighten *StraightenSpec
 }
 
 // BuildFromPages writes a document whose page i is pages[i].
@@ -114,6 +119,9 @@ func BuildFromPages(w io.Writer, pages []PageSource) (err error) {
 	}
 	ctx, err := buildContext(pages, sources)
 	if err != nil {
+		return err
+	}
+	if err := applyStraighten(ctx, pages); err != nil {
 		return err
 	}
 	if err := api.WriteContext(ctx, w); err != nil {
@@ -148,6 +156,26 @@ func validate(pages []PageSource) error {
 		default:
 			return fmt.Errorf("byblos/pdfdoc: build from pages: page %d asks for rotation %d, "+
 				"which is not one of 0, 90, 180, 270", i+1, p.Rotate)
+		}
+		if p.Straighten != nil {
+			// A non-finite Deg produces a `cm` of non-finite numbers, which
+			// pdfcpu writes and api.Validate then refuses -- the same shape of
+			// failure as /Rotate 45, caught here at the call rather than at
+			// the next reader. An angle outside (-180, 180] is NOT refused:
+			// the arithmetic takes it modulo 360 by construction (design spec
+			// section 2).
+			if math.IsNaN(p.Straighten.Deg) || math.IsInf(p.Straighten.Deg, 0) {
+				return fmt.Errorf("byblos/pdfdoc: build from pages: page %d straighten angle %v "+
+					"is not finite", i+1, p.Straighten.Deg)
+			}
+			// Crop is declared in the contract and not implemented in this
+			// version (design spec section 6); refusing it is what lets the
+			// field exist now without a caller silently getting a page that
+			// ignored it.
+			if p.Straighten.Crop != nil {
+				return fmt.Errorf("byblos/pdfdoc: build from pages: page %d straighten crop "+
+					"is not implemented", i+1)
+			}
 		}
 	}
 	return nil
@@ -411,7 +439,14 @@ func (m *migration) migratePage(d *doc, p PageSource, nr int) error {
 		if key == "Parent" {
 			continue
 		}
-		cp, err := m.copy(d, val)
+		copyField := m.copy
+		if key == "Contents" {
+			// See copyContentsField: a straighten wrap can mutate this
+			// field's array object in place, so it must never be the SAME
+			// migrated object two output pages share.
+			copyField = m.copyContentsField
+		}
+		cp, err := copyField(d, val)
 		if err != nil {
 			return fmt.Errorf("source page object %d /%s: %w", src, key, err)
 		}
@@ -506,6 +541,64 @@ func (m *migration) reference(d *doc, n int) (types.Object, error) {
 		return nil, nil
 	}
 	return m.migrate(d, n)
+}
+
+// copyContentsField migrates a page's /Contents field like m.copy does for
+// every other field, with one exception: when it is an indirect reference to
+// an ARRAY, that array is migrated FRESH for this page rather than shared
+// through migrate's memo.
+//
+// wrapIndirectContents (text.go) extends an indirect-ref-to-array /Contents
+// IN PLACE, through the xref table entry, because that is the only way to
+// reach an object xt.Dereference hands back by value. migrate's memoization
+// is keyed on the SOURCE object number, so two entries of one PageSource
+// slice naming the same source page -- two different output page dicts --
+// would otherwise both resolve /Contents to the identical migrated array
+// object, and straightening either page would silently apply BOTH pages'
+// wrappers to it. Giving each page its own array object here removes the
+// sharing that in-place mutation cannot survive; the array's own elements
+// still go through the ordinary memoized m.copy, so the underlying content
+// streams remain shared exactly as migratePage's own doc comment says they
+// must -- an indirect-ref-to-STREAM /Contents is unaffected by this function
+// for the same reason: WrapContent's stream case never mutates the stream in
+// place (text.go), so sharing it is safe.
+func (m *migration) copyContentsField(d *doc, val types.Object) (types.Object, error) {
+	var n int
+	switch v := val.(type) {
+	case types.IndirectRef:
+		n = v.ObjectNumber.Value()
+	case *types.IndirectRef:
+		n = v.ObjectNumber.Value()
+	default:
+		return m.copy(d, val)
+	}
+	if m.tree[srcObj{d: d, n: n}] {
+		return nil, nil
+	}
+	o, err := d.ctx.XRefTable.Dereference(refTo(n))
+	if err != nil {
+		return nil, fmt.Errorf("object %d: %w", n, err)
+	}
+	arr, ok := o.(types.Array)
+	if !ok {
+		return m.copy(d, val)
+	}
+	out := make(types.Array, len(arr))
+	for i, e := range arr {
+		cp, err := m.copy(d, e)
+		if err != nil {
+			return nil, fmt.Errorf("object %d[%d]: %w", n, i, err)
+		}
+		out[i] = cp
+	}
+	nr, err := m.dest.InsertObject(nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.set(nr, out); err != nil {
+		return nil, err
+	}
+	return refTo(nr), nil
 }
 
 // migrate copies the source object src.n of document src.d into the output, once.
