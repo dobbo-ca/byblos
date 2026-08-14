@@ -294,9 +294,15 @@ func Open(rs io.ReadSeeker) (d Doc, err error) {
 // attributes yields a page dict that looks entirely plausible and is silently
 // the wrong page.
 //
-// Rewriting the parsed dictionary is enough, and it is confined to this
-// in-memory context: pdfcpu re-reads the object from the same xref table on
-// every call, and Byblos never writes this context back out.
+// Rewriting the parsed dictionary is enough: pdfcpu re-reads the object from
+// the same xref table on every call, so every later read sees the repair.
+//
+// This comment used to end "and Byblos never writes this context back out",
+// which the write half made false. Write serializes THIS context (write.go),
+// and the repair is load-bearing for it rather than incidental: on the
+// 'indirect-kids' corpus document a bare read-then-write yields 594 bytes and
+// zero pages, with a nil error and a clean re-read. Because Write is a method
+// on the doc Open returns, no caller can reach the writer around this.
 func normalizePageTree(xt *model.XRefTable, ref types.IndirectRef, seen map[int]bool) {
 	objNr := ref.ObjectNumber.Value()
 	if seen[objNr] {

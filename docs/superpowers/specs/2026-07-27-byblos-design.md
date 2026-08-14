@@ -26,6 +26,7 @@ the OCR half of `ocrmypdf`. Byblos removes the rest except `unpaper`, deferred
 | G1 | Eliminate Kleio's PDF-side binary dependencies: `ghostscript`, `jbig2enc`, `pngquant`, `poppler`, `img2pdf` |
 | G2 | Keep compression quality competitive with the `ocrmypdf` pipeline it replaces |
 | G3 | Make processed documents **upgradeable**: when Byblos gains a capability, identify precisely which stored documents would benefit |
+| G4 | Materialise a new document from a **page sequence**: pages drawn from one or more sources, in a given order, at a given rotation (see the 2026-08-13 amendment below) |
 
 "No binary dependencies" means no executables to invoke and no shared libraries
 to link — not "no Go modules". A Go module compiles into the binary and does not
@@ -40,6 +41,89 @@ takes pure-Go module dependencies where a mature one exists.
 - **Orchestration policy.** The compression preset ladder, born-digital rules,
   validation gate, and retry policy stay in Kleio.
 - **PDF/A conversion.** Deferred; see `FUTURE.md`.
+
+### Amendment 2026-08-13: page editing is a new goal (byb-yul), not an extension of an existing one
+
+Byblos's write surface has so far been strictly *within* a page: replace an image
+XObject's bytes, append a content stream, add a font resource
+(`internal/pdfdoc/pdfdoc.go:225-233`). Page editing is the first operation that
+changes a document's **structure** — the page tree, the page count, and for an
+import the object graph across two documents. That is a different class of
+capability, so G4 names it rather than letting G1 grow to cover it.
+
+**G4 is one function.** `BuildFromPages` takes an ordered list of
+`(source, page, rotation)` and writes a new document. Deleting a page is omitting
+it from the list, reordering is ordering the list, inserting is naming a
+different source, and rotating is a field. §4 declares it.
+
+**Byblos never mutates a stored document.** `byb-yul` decided model (B), the *edit
+list*: Kleio keeps the stored PDF whole and immutable and stores the sequence;
+export materialises a new document from it. Two alternatives were rejected on
+measurement and must not be revived. Splitting a document into one PDF per page
+costs a born-digital median of 1.35× storage and up to 12.82× — three embedded
+font programs accounted for 98.5% of one 69-page split — and, worse than the size,
+`api.MergeRaw` **cannot reassemble more than 101 pages at all**: it nests the page
+tree one level per appended file against a depth-100 limit, measured exactly at
+n=101 ok and n=102 refused. Mutating the stored PDF in place is rejected because
+`compressed.pdf` may be the only copy once Kleio's retention policy has discarded
+the original, so a write that fails halfway destroys the document.
+
+**This is not excluded by the "orchestration policy" non-goal above.** That
+non-goal enumerates itself — preset ladder, born-digital rules, validation gate,
+retry policy — and every item is a *policy*. G4 is a *capability*. Rotating a page
+is a primitive; deciding that page 4 should be rotated is policy and stays in
+Kleio. Kleio owns the edit list; Byblos owns the function that materialises it.
+This is the same split `substitute.go:9-13` already draws for font substitution.
+
+**G4 owes G3 an obligation, and it is easy to get silently wrong.**
+`Provenance.Pages` is positional and carries no page identity — index *i*
+describes page *i*+1 (`provenance.go:331-341`). A sequence that omits or reorders
+pages must carry each page's record to its **new** index. Leaving the slice alone
+shifts every later record onto the wrong page, which degrades G3 from "identify
+precisely" to "identify wrongly" — worse than recording nothing. A page imported
+from another source has no record to carry, and the zero `PageProvenance` will not
+do: `provenance.go:337-339` says it "is indistinguishable to any reader from a
+page that was handled and had nothing applied". Such a page gets a `Diverted`
+reason outside the extraction vocabulary, which `anyPageDiverted`
+(`upgrade.go:240`) matches by exact string and therefore leaves inert — the honest
+state for a page Byblos did not process.
+
+**Output is never linearized, and must say so.** `BuildFromPages` writes a
+delinearized document and records `Provenance.Optimized = "rewritten-delinearized"`,
+which is the vocabulary `capabilityRules["linearize"]` (`upgrade.go:164`) reads to
+nominate the document for re-linearization. Leaving the field stale is the exact
+failure §3 forbids, and it is measured to happen if pdfcpu's own paths are used:
+after `api.Rotate` a linearized document reports `/Linearized=false` while
+`Optimized` still says `"rewritten-linearized"`, and `UpgradeCandidates` returns
+`[]`. Re-linearizing inside the call is not the fix — `pdfdoc.Linearize` re-opens
+from scratch (`linearize.go:64-66`) — so the composition is
+`BuildFromPages` → `Optimize{Linearize: true}`.
+
+**An export is not a superset of its input, and that is deliberate.**
+`BuildFromPages` builds a fresh page tree under a fresh catalog, so it drops
+catalog-level metadata: outlines, page labels, the structure tree, form fields,
+named destinations, article threads, optional-content configuration. The
+alternative — carrying the first source's catalog forward — was rejected on a
+census of the pinned sample, because those entries describe the page **set** or
+the page **order** and an edit invalidates them silently. Of the 5,063 multi-page
+documents, 61.9% carry at least one: `/PageLabels` on 35.5%, `/StructTreeRoot` on
+23.7%, `/Outlines` on 21.7%, `/OpenAction` on 12.4%, `/AcroForm` on 11.7%,
+`/Names` on 9.1%. Carrying a stale entry is a worse failure than dropping it, and
+pdfcpu's own `api.Collect` and `api.RemovePages` drop the outline tree too
+(measured: 5 objects to 0). What Byblos re-derives per page instead — the
+inherited attributes, the rotation, and the provenance record — is what §4 and the
+G3 obligation above specify.
+
+**Output is not byte-stable, and nothing may assume it is.** Measured over 90
+documents: the same bytes and the same selection, twice in one process, gave 0
+byte-identical outputs and 73 differing in length, with the first divergence at
+byte 60 — object renumbering, not a trailer `/ID`. Byblos has no determinism
+guarantee for PDF writes anywhere else either. Kleio must therefore treat an
+export as **content-addressed output, written once and never rewritten**: two
+writes of one edit list at a single S3 key hand a client mid-download a torn
+object and invalidate both ETag caching and any checksum taken over the exported
+bytes. Byte-determinism is a separate and much larger promise, and this spec does
+not make it.
 
 ---
 
@@ -421,6 +505,26 @@ type BuildPage struct {
 func BuildPDF(w io.Writer, pages []BuildPage) error
 func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error
 
+// --- page editing (G4) ---
+//
+// BuildFromPages (byb-yul.4) materialises a NEW document from a page sequence.
+// Delete is omitting a page, reorder is ordering the sequence, insert is naming
+// a different Source, and rotate is a field — so all four operations are this
+// one call, and no stored document is ever mutated.
+//
+// It carries each page's provenance record to its NEW index (the G3 obligation
+// in §1's 2026-08-13 amendment), gives a page it has no record for a Diverted
+// reason outside the extraction vocabulary, and records
+// Optimized = "rewritten-delinearized". It DROPS catalog-level metadata —
+// outlines, page labels, the structure tree, form fields, named destinations —
+// because those describe the page set or the page order. Output is not
+// byte-stable; content-address an export rather than rewriting a key.
+type PageSource = pdfdoc.PageSource // Source io.ReadSeeker; Page int (1-based);
+                                    // Rotate int, ABSOLUTE, one of 0/90/180/270
+
+func BuildFromPages(w io.Writer, pages []PageSource) error
+func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource) error
+
 // ReplaceImages (byb-fp6) substitutes image streams in an EXISTING document,
 // keyed by 1-based page, leaving everything else as it was. It refuses an image
 // carrying /SMask, /Mask or /ImageMask, and writes no provenance: the caller
@@ -689,4 +793,6 @@ translation would still shell out to all of them.
 - **JBIG2 lossless generic region only.** Lossy symbol matching is rejected on
   data-integrity grounds, not deferred for effort.
 - **Capability-based provenance**, stored in the PDF and mirrored in Kleio.
+- **Page editing materialises, never mutates.** The stored PDF is immutable;
+  Kleio holds an edit list and an export builds a new document from it (G4).
 - **Apache-2.0**, reimplemented from specifications rather than ported.
