@@ -145,6 +145,40 @@ func ScanJPEG() []byte {
 	return w.finish(cat)
 }
 
+// ScanImageMask is a one-page PDF whose only image XObject is an /ImageMask
+// stencil: 1 bit per sample, no /ColorSpace, painted in the current fill colour
+// (ISO 32000-1 section 8.9.6.2).
+//
+// It is a standalone fixture rather than a member of All(), for the reason the
+// "Known gap" note on jbig2() gives: a stencil is not extractable, so putting it
+// in the corpus every extraction test walks would add a document that can only
+// ever produce a failure. Nothing here extracts it.
+//
+// It exists for byb-js5.2. ImageRef.Bitonal is "1 bit per component OR an image
+// mask", so a caller picking bilevel candidates for a JBIG2 substitution by
+// Bitonal alone selects exactly the images ReplaceImages refuses. This is the
+// document that shows the two fields answering different questions.
+func ScanImageMask() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	// A stencil is painted in the fill colour, so the content stream sets one;
+	// without it the page paints black on black and says nothing.
+	body := fmt.Sprintf("q 0 0 0 rg %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)
+
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img, cont))
+	w.fillStream(cont, "", []byte(body))
+	// No /ColorSpace: table 89 forbids one on a stencil, and /BitsPerComponent
+	// may only be 1.
+	w.fillStream(img, fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d"+
+		" /ImageMask true /BitsPerComponent 1", ScanImageW, ScanImageH),
+		bilevelPixels(ScanImageW, ScanImageH))
+	return w.finish(cat)
+}
+
 // ScanSMaskJPEG is a one-page PDF whose image XObject is a DCTDecode stream
 // carrying an /SMask -- the case a recompression pass must skip, since
 // ReplaceImage refuses /SMask outright (write.go).
