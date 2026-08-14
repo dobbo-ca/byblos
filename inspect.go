@@ -56,6 +56,23 @@ import (
 // stream that is a direct object, which ISO 32000-1 section 7.3.8.1 forbids
 // and which ReplaceImages therefore refuses; such a stream has no
 // cross-reference entry to write a substitution back to.
+//
+// Substitutable reports whether ReplaceImages will accept this ObjNr. It is
+// false for the four cases the write seam refuses (internal/pdfdoc/write.go:
+// 205-212): an /SMask or a /Mask, whose transparency is keyed to the samples
+// being replaced; an /ImageMask stencil, whose dictionary is a different shape;
+// and a direct object, which is the negative-ObjNr case above.
+//
+// IT EXISTS BECAUSE ReplaceImages IS ALL-OR-NOTHING. The first refusal aborts
+// the whole call and nothing is written (substitute.go), so a caller building a
+// substitution map has to be able to see a refusal coming rather than discover
+// it as an error string after the batch is discarded (byb-js5.2).
+//
+// READ IT BESIDE Bitonal, NOT INSTEAD OF IT. Bitonal is "1 bit per component OR
+// an image mask", and an image mask is exactly what the seam refuses — so a
+// caller selecting bilevel candidates for a JBIG2 substitution by Bitonal alone
+// picks the images that will abort its call. The two fields answer different
+// questions: Bitonal is about the samples, this is about the write path.
 type ImageRef struct {
 	Bounds        image.Rectangle
 	Placement     [6]float64
@@ -63,6 +80,7 @@ type ImageRef struct {
 	Bitonal       bool   // 1 bit per component, or an image mask
 	Filter        string // the stored raster's declared codec; "" when it declares none
 	ObjNr         int    // the image XObject's PDF object number
+	Substitutable bool   // ReplaceImages will accept this image; see below
 }
 
 // PageInfo describes one page.
@@ -241,6 +259,12 @@ func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.
 			ref.Bitonal = info.BPC == 1 || info.ImageMask
 			ref.Filter = info.Filter
 			ref.ObjNr = info.ObjNr
+			// The four refusals internal/pdfdoc/write.go:205-212 makes, read
+			// off the same ImageInfo that supplies Bitonal above. A negative
+			// ObjNr is a direct object, which has no cross-reference entry to
+			// write a substitution back to.
+			ref.Substitutable = info.ObjNr >= 0 &&
+				!info.SMask && !info.Mask && !info.ImageMask
 		}
 		pi.Images = append(pi.Images, ref)
 	}

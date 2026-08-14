@@ -987,11 +987,13 @@ func jbig2Payload() []byte {
 // is the corpus's only bitonal image (ImageRef.Bitonal true) and its only
 // undecodable codec (ErrUnsupportedImageCodec).
 //
-// Known gap: no corpus document sets /ImageMask true, the other disjunct of
-// ImageRef.Bitonal. A stencil mask is not extractable at all — pdfcpu's
-// ExtractImage rejects it with "invalid components/bpc 0/1" — so covering that
-// disjunct would mean adding a document that can only ever produce a failure.
-// It belongs with the real-world-scans follow-up, not here.
+// Known gap, now half closed: no document in All() sets /ImageMask true, the
+// other disjunct of ImageRef.Bitonal. A stencil mask is not extractable at all —
+// pdfcpu's ExtractImage rejects it with "invalid components/bpc 0/1" — so
+// putting one in the corpus every extraction test walks would add a document
+// that can only ever produce a failure. ScanImageMask (images.go) is that
+// document as a STANDALONE fixture instead, for the tests that need the disjunct
+// without extracting it (byb-js5.2).
 func jbig2() []byte {
 	w := newWriter()
 	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()

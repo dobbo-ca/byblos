@@ -347,6 +347,12 @@ type ImageRef struct {
                                   // what lets a caller re-encode it once rather than
                                   // once per page. Negative for a direct object, which
                                   // ReplaceImages refuses.
+    Substitutable bool            // ReplaceImages will accept this ObjNr: not an /SMask,
+                                  // /Mask or /ImageMask, and not a direct object. The call
+                                  // is all-or-nothing, so a caller has to pre-filter its
+                                  // substitution map. Read it BESIDE Bitonal, which is
+                                  // "1 bpc OR an image mask" and so selects images the
+                                  // seam refuses (byb-js5.2).
 }
 
 type PageInfo struct {
