@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -364,6 +365,13 @@ func (d *doc) newContentStream(ops []byte) (*types.IndirectRef, error) {
 // xt.FindTableEntryForIndRef, because xt.Dereference hands back the table
 // entry's own Object and assigning through a local variable after append
 // (which may reallocate) does not reach back into the map.
+//
+// Mutating the array object in place is safe only because
+// migration.copyContentsField (buildpages.go) guarantees this array is not
+// shared with any other output page: two output page dicts naming the same
+// source page would otherwise resolve /Contents to the identical migrated
+// array object, and this function's in-place extension would apply both
+// pages' wrappers to that one shared array.
 func wrapIndirectContents(xt *model.XRefTable, pd types.Dict, ref types.IndirectRef, before, after types.IndirectRef) error {
 	target, err := xt.Dereference(ref)
 	if err != nil {
@@ -425,7 +433,15 @@ func (d *doc) contentDepth(n int) (depth int, err error) {
 		return 0, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
 	}
 
-	depth, unbalanced := contentQDepth(cur)
+	depth, unbalanced, lexErr := contentQDepth(cur)
+	if lexErr != nil {
+		// A stream this lexer cannot fully tokenize cannot be proven
+		// balanced either -- the "unbalanced" reading it would otherwise
+		// report is only the prefix read before the error, and a later
+		// surplus Q past that point would pass silently. Refuse rather than
+		// guess; a wrapper that only half-applies is worse than a refusal.
+		return 0, fmt.Errorf("byblos/pdfdoc: page %d: content: %w", n, lexErr)
+	}
 	if unbalanced || depth != 0 {
 		return depth, fmt.Errorf("byblos/pdfdoc: page %d: %w", n, ErrUnbalancedContent)
 	}
@@ -445,12 +461,20 @@ func (d *doc) contentDepth(n int) (depth int, err error) {
 // state this stream never pushed, and it is possible for depth to still
 // read zero at the end (a Q followed by a q washes the count back out),
 // which is why the caller must check both return values.
-func contentQDepth(src []byte) (depth int, sawSurplusQ bool) {
+//
+// A non-nil error means the lexer could not tokenize the whole stream (a
+// stray ')' or '>', an unterminated string, ...); depth and sawSurplusQ then
+// describe only the prefix read before the error, not the whole stream, and
+// the caller must not treat that prefix as though it were the end.
+func contentQDepth(src []byte) (depth int, sawSurplusQ bool, err error) {
 	l := content.NewLexer(src)
 	for {
-		tok, err := l.Next()
-		if err != nil {
-			return depth, sawSurplusQ
+		tok, lerr := l.Next()
+		if lerr != nil {
+			if errors.Is(lerr, io.EOF) {
+				return depth, sawSurplusQ, nil
+			}
+			return depth, sawSurplusQ, lerr
 		}
 		if tok.Kind != content.KindKeyword {
 			continue

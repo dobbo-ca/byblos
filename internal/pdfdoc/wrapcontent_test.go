@@ -327,6 +327,29 @@ func TestWrapContentRefusesUnbalancedContent(t *testing.T) {
 	}
 }
 
+// TestWrapContentRefusesWhenContentFailsToLex pins that a content stream the
+// lexer cannot fully parse is REFUSED rather than silently accepted.
+// contentQDepth (text.go) used to return on the first lexer error exactly as
+// it does on a clean io.EOF, reporting whatever depth it had read so far as
+// though the stream ended there -- so a genuinely malformed stream (here, one
+// starting with a stray ')' that internal/content's lexer cannot tokenize at
+// all) read as depth 0, balanced, and WrapContent wrapped it. A wrapper that
+// only half-applies is worse than a refusal (text.go's own ErrUnbalancedContent
+// doc comment).
+func TestWrapContentRefusesWhenContentFailsToLex(t *testing.T) {
+	d := openCorpus(t, "scan")
+	// A stray ')' is not valid content-stream syntax (lexer.go:124) and the
+	// lexer reports an error on the very first token, before ever seeing
+	// whether the rest of the stream is balanced.
+	ops := []byte(") Q\n612 0 0 792 0 0 cm /Im0 Do\n")
+	s := newStream(t, d.(*doc).ctx.XRefTable, ops)
+	setContentsIndirectStream(t, d, 1, s)
+
+	if err := d.WrapContent(1, []byte(beforeOps), []byte(afterOps)); err == nil {
+		t.Fatal("WrapContent on unparseable content: want an error, got nil")
+	}
+}
+
 // api.Validate must accept every shape WrapContent produces.
 func TestWrapContentValidates(t *testing.T) {
 	for _, shape := range []string{"array", "indirect stream", "indirect array", "nil"} {

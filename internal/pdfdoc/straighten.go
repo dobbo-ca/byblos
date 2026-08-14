@@ -67,7 +67,15 @@ func applyStraighten(ctx *model.Context, pages []PageSource) error {
 		m := rotationMatrix(p.Straighten.Deg, cx, cy)
 		before := []byte(fmt.Sprintf("q\n%.10f %.10f %.10f %.10f %.10f %.10f cm\n",
 			m.a, m.b, m.c, m.d, m.e, m.f))
-		after := []byte("Q\n")
+		// Leading "\n": pdfcpu's PageContent (and every reader) concatenates
+		// /Contents array members with no separator, so this wrapper's own
+		// "Q" would otherwise fuse with whatever byte the LAST existing
+		// stream happens to end on -- a real shape ("...Do Q" with no
+		// trailing newline) that made a straightened export unreadable on
+		// its own re-straighten. "before" needs no matching fix: it already
+		// ends in "\n" from the cm line above, and it is prepended before
+		// the existing content rather than appended after it.
+		after := []byte("\nQ\n")
 		if err := d.WrapContent(n, before, after); err != nil {
 			return fmt.Errorf("byblos/pdfdoc: build from pages: page %d: straighten: %w", n, err)
 		}

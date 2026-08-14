@@ -121,6 +121,61 @@ func TestStraightenOnAlreadyStraightenedSourceAppliesTheDifference(t *testing.T)
 	})
 }
 
+// TestStraightenRecordsAppliedCapability pins design spec section 7's other
+// route: Applied must gain the bare "straighten" capability, so
+// anyPageApplied("straighten") (upgrade.go) works. Straightened alone is not
+// enough -- Applied is the field every existing capability check reads.
+func TestStraightenRecordsAppliedCapability(t *testing.T) {
+	var out bytes.Buffer
+	if err := BuildFromPages(&out, []PageSource{
+		{Source: bytes.NewReader(corpusDoc(t, "scan")), Page: 1, Straighten: &StraightenSpec{Deg: 1.7}},
+	}); err != nil {
+		t.Fatalf("BuildFromPages() error = %v", err)
+	}
+	rec, err := ReadProvenance(bytes.NewReader(out.Bytes()))
+	if err != nil || rec == nil || len(rec.Pages) != 1 {
+		t.Fatalf("ReadProvenance() = %+v, %v", rec, err)
+	}
+	found := false
+	for _, a := range rec.Pages[0].Applied {
+		if a == "straighten" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Applied = %v, want it to contain %q", rec.Pages[0].Applied, "straighten")
+	}
+	if !anyPageApplied("straighten")(rec) {
+		t.Errorf("anyPageApplied(%q) = false on a straightened record", "straighten")
+	}
+}
+
+// TestStraightenDoesNotMutateTheCallersPageSources pins editpages.go's own
+// claim (BuildFromPagesContext's doc comment): "A copy, not a mutation of
+// pages: the caller's slice and its Straighten pointers are not this call's
+// to change." A caller that reuses one []PageSource across a retry sends the
+// same absolute Deg again; if BuildFromPages rewrote it to the increment
+// actually applied, that retry would silently apply the increment as if it
+// were the absolute angle.
+func TestStraightenDoesNotMutateTheCallersPageSources(t *testing.T) {
+	spec := &StraightenSpec{Deg: 3.2}
+	pages := []PageSource{
+		{Source: bytes.NewReader(corpusDoc(t, "scan")), Page: 1, Straighten: spec},
+	}
+
+	var out bytes.Buffer
+	if err := BuildFromPages(&out, pages); err != nil {
+		t.Fatalf("BuildFromPages() error = %v", err)
+	}
+
+	if pages[0].Straighten != spec {
+		t.Errorf("BuildFromPages replaced the caller's Straighten pointer")
+	}
+	if spec.Deg != 3.2 {
+		t.Errorf("BuildFromPages mutated the caller's StraightenSpec.Deg to %v, want the original 3.2 untouched", spec.Deg)
+	}
+}
+
 // TestStraightenTreatsUnreadableProvenanceAsUnstraightened pins the safe
 // default: a source whose provenance value exists but fails to parse must be
 // treated exactly like a source with no record at all, applying the FULL
