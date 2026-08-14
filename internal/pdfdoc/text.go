@@ -265,6 +265,209 @@ func (d *doc) AppendContent(n int, ops []byte) (err error) {
 	return nil
 }
 
+// ErrUnbalancedContent reports a content stream whose q/Q nesting does not
+// come back to zero, in either direction. A surplus Q pops a state
+// WrapContent's own "before" wrapper pushed, so everything painted after
+// that point in the stream is silently NOT rotated -- a page that comes out
+// half-corrected, with no error. A surplus q is merely malformed. Both are
+// refused, because a wrapper that only half-applies is worse than a refusal.
+var ErrUnbalancedContent = errors.New("byblos/pdfdoc: unbalanced q/Q in content stream")
+
+// WrapContent brackets page n's whole content with before and after, as two
+// new streams. No existing stream is decoded or rewritten: s1 s2 s3 stay
+// byte for byte what they were, and the new streams are appended (not
+// merged) at either end of /Contents.
+//
+// Unlike AppendContent, this needs no netCTM inverse: a prepend is the
+// outermost transform by construction, so before and after run exactly as
+// given, and the trailing "Q" a caller writes into after restores whatever
+// state before's own "q" pushed -- it works even when the existing content
+// leaves a stray cm outside any q/Q pair, because before/after never look at
+// the existing content's net transform at all.
+//
+// contentDepth refuses first (ErrUnbalancedContent): an unbalanced q/Q in
+// the existing content would pop or leave open the state before's own q
+// pushed, so the wrap would only half-apply.
+func (d *doc) WrapContent(n int, before, after []byte) (err error) {
+	defer catchPanic(fmt.Sprintf("wrap content on page %d", n), &err)
+	xt := d.ctx.XRefTable
+
+	pd, _, _, err := xt.PageDict(n, false)
+	if err != nil {
+		return fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
+	}
+	if pd == nil {
+		return fmt.Errorf("byblos/pdfdoc: page %d has no dictionary", n)
+	}
+
+	if _, err := d.contentDepth(n); err != nil {
+		return fmt.Errorf("byblos/pdfdoc: page %d: %w", n, err)
+	}
+
+	beforeRef, err := d.newContentStream(before)
+	if err != nil {
+		return fmt.Errorf("byblos/pdfdoc: page %d: before stream: %w", n, err)
+	}
+	afterRef, err := d.newContentStream(after)
+	if err != nil {
+		return fmt.Errorf("byblos/pdfdoc: page %d: after stream: %w", n, err)
+	}
+
+	switch c := pd["Contents"].(type) {
+	case types.IndirectRef:
+		if err := wrapIndirectContents(xt, pd, c, *beforeRef, *afterRef); err != nil {
+			return fmt.Errorf("byblos/pdfdoc: page %d: %w", n, err)
+		}
+	case *types.IndirectRef:
+		if err := wrapIndirectContents(xt, pd, *c, *beforeRef, *afterRef); err != nil {
+			return fmt.Errorf("byblos/pdfdoc: page %d: %w", n, err)
+		}
+	case types.Array:
+		wrapped := make(types.Array, 0, len(c)+2)
+		wrapped = append(wrapped, *beforeRef)
+		wrapped = append(wrapped, c...)
+		wrapped = append(wrapped, *afterRef)
+		pd["Contents"] = wrapped
+	case nil:
+		// No content to rotate, but the wrapper is still written so the
+		// record and the file agree: a caller that asked for a straighten
+		// gets one, even on an empty page.
+		pd["Contents"] = types.Array{*beforeRef, *afterRef}
+	default:
+		// ISO 32000-1 7.3.8.1: every stream shall be an indirect object, so a
+		// direct types.StreamDict in /Contents is malformed. Matches
+		// AppendContent and ReplaceImage's posture on a direct image stream.
+		return fmt.Errorf("byblos/pdfdoc: page %d has a direct /Contents stream, which is malformed", n)
+	}
+	return nil
+}
+
+// newContentStream writes ops as a new, encoded content stream object and
+// returns its indirect reference.
+func (d *doc) newContentStream(ops []byte) (*types.IndirectRef, error) {
+	xt := d.ctx.XRefTable
+	sd, err := xt.NewStreamDictForBuf(ops)
+	if err != nil {
+		return nil, fmt.Errorf("new content stream: %w", err)
+	}
+	if err := sd.Encode(); err != nil {
+		return nil, fmt.Errorf("encode content stream: %w", err)
+	}
+	return xt.IndRefForNewObject(*sd)
+}
+
+// wrapIndirectContents handles /Contents as an indirect reference, which ISO
+// 32000-1 table 30 allows to resolve to either a stream or an array of
+// streams. Those are not interchangeable -- see appendToIndirectContents,
+// which names the identical trap for AppendContent's single-ended case: an
+// indirect reference to an ARRAY must be extended in place, through
+// xt.FindTableEntryForIndRef, because xt.Dereference hands back the table
+// entry's own Object and assigning through a local variable after append
+// (which may reallocate) does not reach back into the map.
+func wrapIndirectContents(xt *model.XRefTable, pd types.Dict, ref types.IndirectRef, before, after types.IndirectRef) error {
+	target, err := xt.Dereference(ref)
+	if err != nil {
+		return fmt.Errorf("dereference /Contents: %w", err)
+	}
+	switch t := target.(type) {
+	case types.Array:
+		entry, found := xt.FindTableEntryForIndRef(&ref)
+		if !found || entry == nil {
+			return fmt.Errorf("/Contents array has no cross-reference entry")
+		}
+		wrapped := make(types.Array, 0, len(t)+2)
+		wrapped = append(wrapped, before)
+		wrapped = append(wrapped, t...)
+		wrapped = append(wrapped, after)
+		entry.Object = wrapped
+	case types.StreamDict:
+		pd["Contents"] = types.Array{before, ref, after}
+	default:
+		return fmt.Errorf("/Contents indirect reference resolves to %T, not a stream or array", target)
+	}
+	return nil
+}
+
+// contentDepth returns the net q/Q nesting page n's content leaves behind.
+//
+// A page with no /Contents, or one that decodes to zero bytes (see
+// verifyEmptyContent), leaves no nesting and returns (0, nil).
+//
+// Any imbalance -- a final depth that is not zero, OR a Q ever seen with no
+// q left open to match it, even if later q's bring the running count back to
+// zero -- returns ErrUnbalancedContent. The second case is why this cannot
+// just check the final count: "Q q" ends net-zero but its leading Q pops
+// whatever state was in effect before this stream ran, which is exactly the
+// state WrapContent's own "before" wrapper would have just pushed.
+func (d *doc) contentDepth(n int) (depth int, err error) {
+	defer catchPanic(fmt.Sprintf("content depth on page %d", n), &err)
+	xt := d.ctx.XRefTable
+
+	pd, _, _, err := xt.PageDict(n, false)
+	if err != nil {
+		return 0, fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
+	}
+	if pd == nil {
+		return 0, fmt.Errorf("byblos/pdfdoc: page %d has no dictionary", n)
+	}
+	if _, ok := pd.Find("Contents"); !ok {
+		return 0, nil
+	}
+
+	cur, err := xt.PageContent(pd, n)
+	switch {
+	case errors.Is(err, model.ErrNoContent):
+		if verr := d.verifyEmptyContent(pd["Contents"]); verr != nil {
+			return 0, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, verr)
+		}
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
+	}
+
+	depth, unbalanced := contentQDepth(cur)
+	if unbalanced || depth != 0 {
+		return depth, fmt.Errorf("byblos/pdfdoc: page %d: %w", n, ErrUnbalancedContent)
+	}
+	return depth, nil
+}
+
+// contentQDepth walks src the way netCTM does -- lexing with internal/content
+// rather than splitting on whitespace, for the same reason netCTM gives: a
+// naive split miscounts anything that looks like an operator inside a
+// literal string or an inline image's binary payload. It answers a different
+// question than netCTM (nesting, not the resulting matrix), so it is a
+// second pass over the same lexer rather than a second lexer -- two lexers
+// that disagree about what counts as a q or a Q is the bug this guards
+// against.
+//
+// sawSurplusQ reports a Q seen while depth was already zero: that Q pops
+// state this stream never pushed, and it is possible for depth to still
+// read zero at the end (a Q followed by a q washes the count back out),
+// which is why the caller must check both return values.
+func contentQDepth(src []byte) (depth int, sawSurplusQ bool) {
+	l := content.NewLexer(src)
+	for {
+		tok, err := l.Next()
+		if err != nil {
+			return depth, sawSurplusQ
+		}
+		if tok.Kind != content.KindKeyword {
+			continue
+		}
+		switch string(tok.Text) {
+		case "q":
+			depth++
+		case "Q":
+			if depth == 0 {
+				sawSurplusQ = true
+				continue
+			}
+			depth--
+		}
+	}
+}
+
 // appendToIndirectContents handles /Contents as an indirect reference. ISO
 // 32000-1 table 30 allows that reference to resolve to either a stream (the
 // common case) or, just as legally, an array of streams -- and those are not

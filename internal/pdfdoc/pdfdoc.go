@@ -230,6 +230,9 @@ type Doc interface {
 	// context.
 	AddFontResource(n int, f TrueTypeFont) (name string, err error)
 	AppendContent(n int, ops []byte) error
+	// WrapContent brackets page n's whole content with before and after, as
+	// two new streams; see text.go.
+	WrapContent(n int, before, after []byte) error
 }
 
 type doc struct {
