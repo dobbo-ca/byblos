@@ -256,3 +256,26 @@ func TestBuildFromPagesRefusalsReachTheCaller(t *testing.T) {
 }
 
 var _ io.Writer = (*bytes.Buffer)(nil)
+
+// clonePageProvenance deep-copies ClipBox explicitly and would silently
+// SHARE RasterQuad if the same treatment were missed for it (byb-2mt): a
+// mutation through the export would reach back into the source, breaking the
+// type's own doc comment promise that the exported record shares no slice
+// with the source's.
+func TestClonePageProvenanceSharesNoRasterQuadPointer(t *testing.T) {
+	in := PageProvenance{Geometry: &PageGeometry{RasterQuad: &[8]float64{1, 2, 3, 4, 5, 6, 7, 8}}}
+	out := clonePageProvenance(in)
+	if out.Geometry == nil || out.Geometry.RasterQuad == nil {
+		t.Fatal("clonePageProvenance() dropped RasterQuad")
+	}
+	if out.Geometry.RasterQuad == in.Geometry.RasterQuad {
+		t.Fatal("clonePageProvenance() shares the RasterQuad pointer with its input; want a deep copy")
+	}
+	if *out.Geometry.RasterQuad != *in.Geometry.RasterQuad {
+		t.Errorf("out.Geometry.RasterQuad = %v; want %v", *out.Geometry.RasterQuad, *in.Geometry.RasterQuad)
+	}
+	out.Geometry.RasterQuad[0] = 99
+	if in.Geometry.RasterQuad[0] == 99 {
+		t.Fatal("mutating the export's RasterQuad reached back into the source")
+	}
+}

@@ -158,6 +158,15 @@ type PageRaster struct {
 	Bounds image.Rectangle // where the raster lands
 	Page   image.Rectangle // the page's CropBox
 
+	// RasterQuad is the placement's true quadrilateral -- the unit square
+	// mapped through its CTM, in ring order (0,0) (1,0) (1,1) (0,1), in the
+	// same unrounded PDF-space points Bounds's corners were rounded from --
+	// or nil when the placement carries no rotation or shear (axisAligned),
+	// which makes it the same shape as Bounds and not worth a second field
+	// for. CoversPage uses it to tell a rotation-inflated bounding box from
+	// the page it only appears to cover (byb-2mt).
+	RasterQuad *[8]float64
+
 	// ObjNr is the PDF object number of the image XObject this raster came
 	// from -- the same handle ImageRef.ObjNr carries from Inspect, and exactly
 	// what ReplaceImages keys its substitution map on (substitute.go:28-35,
@@ -238,11 +247,35 @@ type PageRaster struct {
 // an empty receiver, so without this the zero PageRaster — what every error
 // return hands back — would report itself as a full-page scan, and a caller
 // that read CoversPage before err would never notice.
+// The RasterQuad conjunct, when present, is checked against the rounded
+// integer Page rectangle rather than an unrounded float -- PageRaster carries
+// no unrounded page box to check it against instead. Rounding widens the
+// (0.5, 1.0] pt fork PageGeometry.CoversPage's doc comment already records
+// between this method and that one: on a fractional CropBox the effective
+// slack here can reach 1.5pt rather than coverTolerancePt's 1.0. This is not
+// hypothetical: corpus.ScanFractionalCropBox at a 0.4pt offset, straightened
+// 0.2deg, is a reproduced instance
+// (TestRecordExtractionCoversPageForkIsSafeDirectionOnly) -- false here, true
+// on the equivalent PageGeometry. The direction stays the one worth having:
+// this method's rounding only ever makes it MORE conservative, never less, so
+// a caller trusting a live "false" here is not later contradicted by a "true"
+// on the record.
 func (p PageRaster) CoversPage() bool {
 	if p.Page.Empty() {
 		return false
 	}
-	return p.Page.In(p.Bounds)
+	if !p.Page.In(p.Bounds) {
+		return false
+	}
+	if p.RasterQuad == nil {
+		return true
+	}
+	q := content.Quad(*p.RasterQuad)
+	pageBox := content.Box{
+		LLX: float64(p.Page.Min.X), LLY: float64(p.Page.Min.Y),
+		URX: float64(p.Page.Max.X), URY: float64(p.Page.Max.Y),
+	}
+	return q.ContainsBox(pageBox, coverTolerancePt)
 }
 
 // ExtractPageRaster returns the single raster of the given 1-based page.
@@ -522,6 +555,10 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		Bounds: boxRect(placement.Box),
 		Page:   rectOf(p.CropBox),
 	}
+	if !axisAligned(placement.CTM) {
+		q := [8]float64(placement.CTM.UnitSquareQuad())
+		out.RasterQuad = &q
+	}
 	// The declared depth, from the same dictionary fact classify already took
 	// and inspect.go turns into ImageRef.Bitonal. Keep the two predicates
 	// identical: a page's PageRaster.Bitonal and its ImageRef.Bitonal must
@@ -567,6 +604,13 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		cb := normalizedBox(placement.Clip.LLX, placement.Clip.LLY, placement.Clip.URX, placement.Clip.URY)
 		geom.ClipBox = &cb
 	}
+	// RasterQuad, like PageProvenance.Placement above, is populated only for
+	// a placement that carries rotation or shear: an axis-aligned one has no
+	// true shape RasterBox does not already state.
+	if !axisAligned(placement.CTM) {
+		q := [8]float64(placement.CTM.UnitSquareQuad())
+		geom.RasterQuad = &q
+	}
 	rec := PageProvenance{
 		Applied:       []string{"extract-raster"},
 		DroppedAnnots: out.DroppedAnnots,
@@ -576,7 +620,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	// (PageProvenance's doc comment). The off-diagonal terms are exactly what
 	// skewDegrees reads, and classify has already rejected anything past
 	// maxSkewDeg, so what survives here is a scanner deskew.
-	if m := placement.CTM; m[1] != 0 || m[2] != 0 {
+	if m := placement.CTM; !axisAligned(m) {
 		rec.Placement = m[:]
 	}
 	countExtracted(out.CoversPage())
@@ -754,6 +798,20 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 		if !covers(s.Images[top].Box, page) {
 			return 0, "multiple-images"
 		}
+		// covers above is deliberately left AABB-only: byb-2mt's own
+		// TestStraightenCoversPageIsFalseUnderRotation shows a rotated
+		// placement's TRUE quadrilateral falls short of covering an
+		// axis-aligned page by several points at even a fraction of a
+		// degree -- far past coverTolerancePt -- which a lone raster
+		// tolerates (byb-b1.3: it is never asked to cover the page) but
+		// which would divert every rotated STACK, including the identical-
+		// matrix dedup shape 16,241 measured Internet Archive pages have,
+		// the moment Straighten (or scanner deskew) puts any rotation on
+		// it. contains below is the site that actually needs the true
+		// shape: it asks whether the under-layer's real ink sits inside the
+		// top's, and rotation cannot manufacture a false "yes" there the
+		// way it can for whole-page coverage.
+		topCTM := s.Images[top].CTM
 		// 16,241 measured Internet Archive pages paint two page-covering images
 		// at the identical CTM, the second hiding the first. That reduces to one
 		// raster only while the top layer really is an opaque cover over
@@ -764,6 +822,17 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 		for _, under := range s.Images[:top] {
 			if !contains(s.Images[top].Box, under.Box) {
 				return 0, "multiple-images"
+			}
+			// Quad-vs-quad, not quad-vs-box: under.Box is the UNDER layer's
+			// own bounding box, so a rotated top can never contain a rotated
+			// under-layer's BOX even at the identical matrix. Comparing true
+			// quadrilaterals instead keeps the 16,241-page identical-matrix
+			// stack above extracting -- for identical matrices the two quads
+			// are the same quad, every vertex on the boundary at distance 0.
+			if !axisAligned(topCTM) {
+				if !topCTM.UnitSquareQuad().ContainsQuad(under.CTM.UnitSquareQuad(), coverTolerancePt) {
+					return 0, "multiple-images"
+				}
 			}
 		}
 	}
@@ -789,6 +858,43 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 // CTM and needs no extra field on Placement.
 func clipNarrowed(p content.Placement) bool {
 	return p.Clip != nil && p.Box != p.CTM.UnitSquareBox()
+}
+
+// axisAligned reports whether m carries no rotation or shear: both
+// off-diagonal terms are exactly zero. It is the single definition of that
+// predicate, shared by every site that needs to know whether a placement's
+// true quadrilateral can differ from its axis-aligned Box -- classify's
+// covers/contains and inkHidden geometry checks, and the extractPage site
+// that decides whether to record PageProvenance.Placement -- for the same
+// reason clipNarrowed's own doc comment gives: two copies of one predicate
+// must not drift.
+func axisAligned(m content.Matrix) bool {
+	return m[1] == 0 && m[2] == 0
+}
+
+// sameRotation reports whether a and b turn their x-axis the same way: same
+// direction, negligible angle between them. It compares directions rather
+// than angles so it never has to unwrap atan2 -- the (a[0],a[1]) and
+// (b[0],b[1]) row vectors' cross product, normalised by their lengths, is the
+// sine of the angle between them, and near enough to that angle itself for
+// the tiny separations this is asked about.
+//
+// Used only by inkHidden (byb-2mt): a path's Box is an axis-aligned bounding
+// box of its true, possibly rotated shape, so Box's own corners are real
+// points of the path only when the path was not rotated relative to the
+// raster it is being tested against. Straighten rotates an entire page's
+// content stream by one shared matrix (internal/pdfdoc/straighten.go), so a
+// background wash and the raster painted over it turn by the exact same
+// angle -- sameRotation is what tells that case apart from a path and an
+// image rotated independently of each other.
+func sameRotation(a, b content.Matrix) bool {
+	an, bn := math.Hypot(a[0], a[1]), math.Hypot(b[0], b[1])
+	if an == 0 || bn == 0 {
+		return false
+	}
+	cross := a[0]*b[1] - a[1]*b[0]
+	dot := a[0]*b[0] + a[1]*b[1]
+	return dot > 0 && math.Abs(cross)/(an*bn) < 1e-6
 }
 
 // placementReason reports why a placement cannot stand as the page's raster, or
@@ -990,7 +1096,7 @@ func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo fu
 		if p.Strokes() {
 			tol = paintTolerancePt
 		}
-		if !inkHidden(ink, p.Index, tol, imgs, imageInfo) {
+		if !inkHidden(ink, p.CTM, p.Index, tol, imgs, imageInfo) {
 			return false
 		}
 	}
@@ -1001,7 +1107,8 @@ func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo fu
 // contains it. order is the ink's position in the shared painting order, and tol
 // is how far the ink may stray outside a placement and still count as hidden —
 // paintFillTolerancePt or paintTolerancePt, which the caller picks by operator.
-func inkHidden(ink content.Box, order int, tol float64, imgs []content.Placement, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
+// inkCTM is the graphics matrix the path was painted under (content.Paint.CTM).
+func inkHidden(ink content.Box, inkCTM content.Matrix, order int, tol float64, imgs []content.Placement, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
 	for _, img := range imgs {
 		if img.Index < order || !opaqueCover(img, imageInfo) {
 			continue
@@ -1010,7 +1117,28 @@ func inkHidden(ink content.Box, order int, tol float64, imgs []content.Placement
 			ink.LLY >= img.Box.LLY-tol &&
 			ink.URX <= img.Box.URX+tol &&
 			ink.URY <= img.Box.URY+tol {
-			return true
+			// The AABB test alone over-forgives a rotated cover: rotation
+			// cuts four corner triangles off img's true quadrilateral that
+			// its bounding box does not, and ink sitting in one of those
+			// triangles can pass the AABB test while never actually being
+			// under the raster (byb-2mt). Skipped for an axis-aligned img,
+			// where Box already IS the true shape.
+			//
+			// It is ALSO skipped when the ink was painted under the same
+			// rotation as img (sameRotation): ink.Box is itself only ever an
+			// AABB, so when the path it bounds was rotated by the same
+			// transform as img -- a page-covering wash under the same
+			// Straighten as the raster above it, corpus fixture
+			// "background-wash" -- ink.Box's own corners are not real points
+			// of the path either, and testing them against img's true quad
+			// compounds two approximations into a false "not hidden". When
+			// ink and img do NOT share a rotation (the corner-triangle case
+			// byb-2mt exists to catch: ink painted axis-aligned, img rotated
+			// on its own), ink.Box's corners genuinely are its corners, and
+			// the quad test is sound.
+			if axisAligned(img.CTM) || sameRotation(inkCTM, img.CTM) || img.CTM.UnitSquareQuad().ContainsBox(ink, tol) {
+				return true
+			}
 		}
 	}
 	return false

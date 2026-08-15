@@ -206,6 +206,49 @@ func TestRecordExtractionNormalizesAReversedCropBox(t *testing.T) {
 	}
 }
 
+// PageRaster.CoversPage and PageGeometry.CoversPage CAN disagree once
+// RasterQuad is in play (byb-2mt review finding F5): PageRaster tests the
+// quad against a page box already rounded to integers, PageGeometry against
+// the unrounded CropBox, and on a fractional CropBox the rounding can cost
+// PageRaster coverage PageGeometry still sees. corpus.ScanFractionalCropBox
+// at a 0.4pt offset, straightened 0.2deg, is a real, reproduced instance --
+// not a hypothetical -- of exactly that fork.
+//
+// The direction is what matters: this must never flip the other way.
+// PageRaster is the operational answer (it decides what a caller receives);
+// PageGeometry is the persisted record. A caller trusting PageRaster.
+// CoversPage() == false must never find out later, from the record, that the
+// page really was covered -- that would mean the record is more permissive
+// than the live decision, so a re-processing run starting from the record
+// could act on a page as covered when the original extraction did not.
+func TestRecordExtractionCoversPageForkIsSafeDirectionOnly(t *testing.T) {
+	src := corpus.ScanFractionalCropBox(0.4)
+	var out bytes.Buffer
+	if err := BuildFromPages(&out, []PageSource{
+		{Source: bytes.NewReader(src), Page: 1, Straighten: &StraightenSpec{Deg: 0.2}},
+	}); err != nil {
+		t.Fatalf("BuildFromPages() error = %v", err)
+	}
+	raster, err := ExtractPageRaster(bytes.NewReader(out.Bytes()), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster() error = %v", err)
+	}
+	rec, err := RecordExtraction(bytes.NewReader(out.Bytes()))
+	if err != nil {
+		t.Fatalf("RecordExtraction() error = %v", err)
+	}
+	if len(rec.Pages) != 1 || rec.Pages[0].Geometry == nil {
+		t.Fatalf("Pages = %+v; want one page with a Geometry", rec.Pages)
+	}
+	rasterCovers, geomCovers := raster.CoversPage(), rec.Pages[0].Geometry.CoversPage()
+	if !rasterCovers && !geomCovers {
+		t.Fatalf("test setup: raster=%v geom=%v, want a genuine fork (raster=false, geom=true) to test the direction of", rasterCovers, geomCovers)
+	}
+	if rasterCovers && !geomCovers {
+		t.Errorf("CoversPage() forked the dangerous way: PageRaster = true, PageGeometry = false")
+	}
+}
+
 // A successfully extracted page must carry exactly Applied: ["extract-raster"]
 // -- neither over-claiming a per-page capability it never exercised (the same
 // over-claim TestRecordExtractionClaimsOnlyExtractRaster's comment argues

@@ -407,6 +407,7 @@ type PageRaster struct {
     Image         image.Image
     Bounds        image.Rectangle // where the raster lands, in points
     Page          image.Rectangle // the page box, in points
+    RasterQuad    *[8]float64     // true quadrilateral (ring order); nil when axis-aligned (byb-2mt)
     ObjNr         int             // ImageRef.ObjNr this raster came from; the ReplaceImages key
     DroppedAnnots int             // annotations that paint and are not in Image
     Bitonal       bool            // source DECLARED 1 bpc or /ImageMask; never a pixel test
@@ -599,12 +600,15 @@ type PageProvenance struct {
 }
 
 type PageGeometry struct {
-    RasterBox [4]float64  // [llx lly urx ury], PDF default user space, points
-    PageBox   [4]float64  // same order; NOT Placement's [a b c d e f] matrix order
-    ClipBox   *[4]float64 // same order (byb-b1.12). Set only when a clip NARROWED the
-                          // placement below its unclipped raster box; nil otherwise. It
-                          // carries its own presence bit because a zero box inside a
-                          // non-nil Geometry already means "measured, and degenerate".
+    RasterBox  [4]float64  // [llx lly urx ury], PDF default user space, points
+    PageBox    [4]float64  // same order; NOT Placement's [a b c d e f] matrix order
+    ClipBox    *[4]float64 // same order (byb-b1.12). Set only when a clip NARROWED the
+                           // placement below its unclipped raster box; nil otherwise. It
+                           // carries its own presence bit because a zero box inside a
+                           // non-nil Geometry already means "measured, and degenerate".
+    RasterQuad *[8]float64 // true quadrilateral, ring order (0,0)(1,0)(1,1)(0,1);
+                           // nil when the placement is axis-aligned or the record
+                           // predates byb-2mt.
 }
 
 func (g PageGeometry) CoversPage() bool

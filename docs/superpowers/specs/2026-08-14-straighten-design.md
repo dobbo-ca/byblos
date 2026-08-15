@@ -225,8 +225,8 @@ box, and no viewer draws them. At the measured p90 of 0.6 degrees these are sliv
 box becomes the user's crop when §6 lands, which is the decision that actually determines it.
 
 A rotated rectangle cannot cover an axis-aligned one — the four corner triangles are empty.
-**`CoversPage()` nevertheless reports `true`, and that is a lie this design inherits rather than
-introduces.** Measured on this branch:
+**`CoversPage()` used to report `true` anyway; byb-2mt (below, §13) has since fixed it.** Measured
+on this branch before byb-2mt landed:
 
 ```
   deg=0     CoversPage=true   page=(0,0)-(612,792)  bounds=(0,0)-(612,792)
@@ -235,19 +235,26 @@ introduces.** Measured on this branch:
   deg=1.9   CoversPage=true   page=(0,0)-(612,792)  bounds=(-13,-10)-(625,802)
 ```
 
-`CoversPage` is `p.Page.In(p.Bounds)` (`extract.go:241`) and `Bounds` is the *axis-aligned
-bounding box* of the placed raster. Rotation grows that box by `|cos t| + |sin t|`, so the box
-swallows the page while the raster itself no longer reaches the corners. byblos therefore reports
-a straightened page as fully covered with more confidence than before, not less. The genuinely
-uncovered share is 3.26% of the page at 2 degrees.
+`CoversPage` was a plain `p.Page.In(p.Bounds)` (`extract.go:241`) and `Bounds` is the
+*axis-aligned bounding box* of the placed raster. Rotation grows that box by `|cos t| + |sin t|`,
+so the box swallows the page while the raster itself no longer reaches the corners. byblos
+therefore reported a straightened page as fully covered with more confidence than before, not
+less. The genuinely uncovered share is 3.26% of the page at 2 degrees.
 
-This is byb-2mt exception 3 — every geometry consumer models a rotated footprint as its bounding
-box — and it is reachable today at any placement within `maxSkewDeg`, with or without this
-feature. It is filed, not fixed here, because fixing it means replacing the bounding-box test
-with a true-quadrilateral test in four places and that is its own change with its own fixtures.
+This was byb-2mt exception 3 — every geometry consumer modelled a rotated footprint as its
+bounding box — reachable at any placement within `maxSkewDeg`, with or without this feature.
+byb-2mt replaced the bounding-box test with a true-quadrilateral test (`content.Quad`,
+`internal/content/walk.go`) at the four sites that needed it: `inkHidden`, the `contains` check
+inside `classify`'s stacked-page arm, `PageRaster.CoversPage`, and `PageGeometry.CoversPage`. The
+`covers` check beside `contains` was deliberately left AABB-only — a rotated placement's true
+quad falls short of covering the page by several points at even a fraction of a degree, past any
+tolerance already in the package, which would divert every rotated *stack* (including `internal/corpus`'s `stacked` fixture, the
+16,241-page identical-matrix dedup shape) the moment it carries any rotation at all; see
+`extract.go`'s comment on `covers` in `classify` for the full argument.
 
-`TestStraightenCoversPageReportsTheAABBLie` pins the behaviour as it actually is, and names
-byb-2mt, so that closing that bead changes this test deliberately rather than by surprise.
+`TestStraightenCoversPageIsFalseUnderRotation` (renamed from
+`TestStraightenCoversPageReportsTheAABBLie`) now pins the corrected behaviour: `CoversPage()` is
+`false` under rotation and `true` only for an axis-aligned placement.
 
 `classify` does not require a single-image page to cover the page box (`extract.go:712-745`,
 byb-b1.3's argument), so extraction itself is unaffected either way.
@@ -621,15 +628,26 @@ Both came out of testing whether a rotated placement survives the pipeline. It d
 identity re-encode rendering pixel-identical under poppler. What does not survive is byblos's
 *description* of the page.
 
-**AABB blindness — byb-2mt (P2 bug, reachable today).** Every geometry consumer models a rotated
-footprint as its axis-aligned bounding box. `inkHidden` (`extract.go:1004-1017`) judges ink in
-the corner triangles hidden, so the page passes as clean and the ink is dropped from the
-returned raster — measured at 2152 of 2500 dark pixels omitted at 10 degrees, with no divert and
-no error. `covers`/`opaqueCover` on a stack (`extract.go:750-768`) let a rotated top discard an
-under-layer, and **no fixture in the tree exercises that at all**. Both are reachable today at
-2 degrees or less, and under any sheared placement, independently of this work.
+**AABB blindness — byb-2mt (fixed).** Every geometry consumer used to model a rotated footprint
+as its axis-aligned bounding box. `inkHidden` (`extract.go:1004-1017`) judged ink in the corner
+triangles hidden, so the page passed as clean and the ink was dropped from the returned raster —
+measured at 2152 of 2500 dark pixels omitted at 10 degrees, with no divert and no error. `contains`
+on a stack (`extract.go:750-768`) let a rotated top discard an under-layer whose own bounding box
+(not its true shape) happened to sit inside the top's. Both were reachable at 2 degrees or less,
+and under any sheared placement.
 
-**Shear and rotation are conflated — byb-06n (P2, blocked by byb-2mt).** `skewDegrees` returns
+byb-2mt closed both, plus `PageRaster.CoversPage` and `PageGeometry.CoversPage`, by adding
+`content.Quad` (`internal/content/walk.go`) — the placement's true quadrilateral, tested with the
+same half-plane algorithm at every site, conjoined with the existing AABB test rather than
+replacing it, and skipped entirely for an axis-aligned placement. The `covers` check inside the
+same stacked-page arm was deliberately left AABB-only (see §4's revision above): unlike
+`contains`, which asks whether one placement's ink sits inside another's, `covers` asks whether a
+rotated placement's true shape reaches an axis-aligned page's corners, which byb-2mt's own fix for
+`CoversPage` establishes it structurally cannot once rotated past roughly a tenth of a degree.
+Fixing `covers` the same way would have diverted every rotated stack, including the
+`stacked` corpus fixture this section's first paragraph measured surviving the pipeline.
+
+**Shear and rotation are conflated — byb-06n (P2, no longer blocked now byb-2mt has landed).** `skewDegrees` returns
 bit-identical `5.000000` for a
 rigid 5-degree turn and for a 10-degree shear; `math.Abs` at `extract.go:72-73` destroys the
 sign of `b` versus `c`, which is the only information separating them. They are separable by

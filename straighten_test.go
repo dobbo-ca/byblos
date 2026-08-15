@@ -243,25 +243,21 @@ func TestStraightenAcceptsAnAngleOutsideOneTurn(t *testing.T) {
 	}
 }
 
-// TestStraightenCoversPageReportsTheAABBLie pins a WRONG answer, on purpose,
-// because it is a wrong answer byblos already gives and this feature makes
-// easier to reach.
+// TestStraightenCoversPageIsFalseUnderRotation pins byb-2mt's fix for what
+// this test used to name the AABB lie: a rotated rectangle cannot cover an
+// axis-aligned page -- the four corner triangles rotation cuts off are empty
+// -- but CoversPage used to be a plain p.Page.In(p.Bounds), and Bounds is the
+// AXIS-ALIGNED bounding box, which rotation GROWS by |cos t| + |sin t|. The
+// box used to swallow the page and CoversPage answered true with more
+// confidence than before the correction, not less; 3.26% of the page is
+// genuinely uncovered at 2 degrees.
 //
-// A rotated rectangle cannot cover an axis-aligned page: the four corner
-// triangles are empty. But CoversPage is p.Page.In(p.Bounds) (extract.go:241)
-// and Bounds is the AXIS-ALIGNED bounding box, which rotation GROWS by
-// |cos t| + |sin t|. So the box swallows the page and CoversPage answers true
-// with more confidence than before the correction, not less. 3.26% of the page
-// is genuinely uncovered at 2 degrees.
-//
-// That is byb-2mt exception 3, reachable today at any placement inside
-// maxSkewDeg and not introduced here. This test exists so that closing byb-2mt
-// -- which replaces the bounding-box test with a true-quadrilateral one --
-// FAILS here and is changed deliberately, rather than silently flipping a
-// behaviour the design spec describes.
-func TestStraightenCoversPageReportsTheAABBLie(t *testing.T) {
+// CoversPage now also tests the placement's true quadrilateral (RasterQuad),
+// so a rotated placement -- reachable at any angle inside maxSkewDeg, not
+// only through Straighten -- correctly reports false.
+func TestStraightenCoversPageIsFalseUnderRotation(t *testing.T) {
 	src := corpusDoc(t, "scan")
-	for _, deg := range []float64{0.6, 1.0, 1.9} {
+	for _, deg := range []float64{0, 0.6, 1.0, 1.9} {
 		var out bytes.Buffer
 		if err := BuildFromPages(&out, []PageSource{
 			{Source: bytes.NewReader(src), Page: 1, Straighten: &StraightenSpec{Deg: deg}},
@@ -273,17 +269,45 @@ func TestStraightenCoversPageReportsTheAABBLie(t *testing.T) {
 			t.Fatalf("Deg %v: ExtractPageRaster() error = %v; a correction inside "+
 				"maxSkewDeg must still extract", deg, err)
 		}
-		// The lie itself.
-		if !r.CoversPage() {
-			t.Errorf("Deg %v: CoversPage() = false, want true. If byb-2mt has landed, "+
-				"this test is now the thing that is wrong -- update it and the design "+
-				"spec's section 4 together", deg)
+		if deg == 0 {
+			// The axis-aligned no-regression pin: an unrotated placement has
+			// no RasterQuad at all, and CoversPage must still say true.
+			if !r.CoversPage() {
+				t.Errorf("Deg 0: CoversPage() = false, want true (axis-aligned, no rotation to fail on)")
+			}
+			continue
 		}
-		// And the evidence that it IS a lie: the box grew past the page it
+		if r.CoversPage() {
+			t.Errorf("Deg %v: CoversPage() = true, want false: a rotated placement's "+
+				"true quadrilateral cannot cover an axis-aligned page", deg)
+		}
+		// The evidence this used to be a lie: the AABB grew past the page it
 		// claims to cover, which a raster that really covered it never would.
+		// This was never the lie itself -- it is the evidence -- and stays true.
 		if !r.Bounds.Eq(r.Page) && r.Bounds.In(r.Page) {
 			t.Errorf("Deg %v: bounds %v sit inside page %v; expected the AABB to "+
 				"GROW past the page under rotation", deg, r.Bounds, r.Page)
 		}
+	}
+
+	// The PageGeometry half: RecordExtraction over the same rotated bytes
+	// must agree that the page is not covered, and must have measured a
+	// RasterQuad to base that on.
+	var out bytes.Buffer
+	if err := BuildFromPages(&out, []PageSource{
+		{Source: bytes.NewReader(src), Page: 1, Straighten: &StraightenSpec{Deg: 1.9}},
+	}); err != nil {
+		t.Fatalf("BuildFromPages(Deg: 1.9) error = %v", err)
+	}
+	rec, err := RecordExtraction(bytes.NewReader(out.Bytes()))
+	if err != nil || len(rec.Pages) != 1 || rec.Pages[0].Geometry == nil {
+		t.Fatalf("RecordExtraction() = %+v, %v, want one page with Geometry", rec, err)
+	}
+	geom := rec.Pages[0].Geometry
+	if geom.RasterQuad == nil {
+		t.Error("Geometry.RasterQuad = nil, want a measured quad for a rotated placement")
+	}
+	if geom.CoversPage() {
+		t.Error("Geometry.CoversPage() = true, want false: a rotated placement's true quadrilateral cannot cover an axis-aligned page")
 	}
 }

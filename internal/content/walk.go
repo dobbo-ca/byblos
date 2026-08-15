@@ -56,6 +56,99 @@ func (m Matrix) UnitSquareBox() Box {
 	}
 }
 
+// Quad is a quadrilateral's four vertices, x then y, in ring order:
+// (0,0) (1,0) (1,1) (0,1) mapped through some matrix. Unlike Box, it is not
+// axis-aligned -- a rotated matrix leaves it a true parallelogram rather than
+// collapsing it to a bounding box.
+type Quad [8]float64
+
+// UnitSquareQuad returns the unit square's four corners mapped through m, in
+// ring order. An image XObject always occupies the unit square in its own
+// space (ISO 32000-1 8.9.5.2), so this is exactly where the image's true
+// outline lands -- UnitSquareBox is the same mapping with the ring order lost
+// to an axis-aligned box.
+func (m Matrix) UnitSquareQuad() Quad {
+	x0, y0 := m.Apply(0, 0)
+	x1, y1 := m.Apply(1, 0)
+	x2, y2 := m.Apply(1, 1)
+	x3, y3 := m.Apply(0, 1)
+	return Quad{x0, y0, x1, y1, x2, y2, x3, y3}
+}
+
+// shoelace returns twice q's signed area: positive for a counter-clockwise
+// ring, negative for clockwise, zero for a degenerate (collinear or
+// zero-area) one.
+func (q Quad) shoelace() float64 {
+	var twoA float64
+	for i := 0; i < 4; i++ {
+		j := (i + 1) % 4
+		twoA += q[2*i]*q[2*j+1] - q[2*j]*q[2*i+1]
+	}
+	return twoA
+}
+
+// containsPoints reports whether every point in pts (x,y pairs) lies inside
+// q, allowing each up to tol points of perpendicular distance outside an
+// edge. It is the one half-plane test the box and quad containment wrappers
+// below both build on.
+//
+// A zero-area q (collinear or coincident vertices) contains nothing: at page
+// scale |2*area| is on the order of 1e6 pt^2, so an exact-zero result is
+// float noise only when the quad was already degenerate, and false matches
+// the package's other degenerate guards.
+//
+// The winding direction is measured, not assumed. A reflected matrix (a
+// mirrored placement) produces a clockwise ring, and testing against a fixed
+// counter-clockwise assumption would invert every mirror's containment
+// answer.
+func (q Quad) containsPoints(pts []float64, tol float64) bool {
+	twoA := q.shoelace()
+	if twoA == 0 {
+		return false
+	}
+	s := 1.0
+	if twoA < 0 {
+		s = -1.0
+	}
+	for i := 0; i < 4; i++ {
+		j := (i + 1) % 4
+		px, py := q[2*i], q[2*i+1]
+		ex, ey := q[2*j]-px, q[2*j+1]-py
+		l := math.Hypot(ex, ey)
+		if l == 0 {
+			return false
+		}
+		for k := 0; k+1 < len(pts); k += 2 {
+			tx, ty := pts[k], pts[k+1]
+			cross := ex*(ty-py) - ey*(tx-px)
+			// Dividing by l turns cross (a scaled area) into a perpendicular
+			// distance in points, which is what makes tol mean points rather
+			// than something that scales with the edge's length.
+			if s*cross/l < -tol {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ContainsBox reports whether b's four corners all lie inside q, within tol
+// points.
+func (q Quad) ContainsBox(b Box, tol float64) bool {
+	return q.containsPoints([]float64{
+		b.LLX, b.LLY,
+		b.URX, b.LLY,
+		b.URX, b.URY,
+		b.LLX, b.URY,
+	}, tol)
+}
+
+// ContainsQuad reports whether o's four vertices all lie inside q, within tol
+// points.
+func (q Quad) ContainsQuad(o Quad, tol float64) bool {
+	return q.containsPoints(o[:], tol)
+}
+
 // XObject is a resolved /XObject resource. ID is caller-assigned identity
 // echoed back in Placement.ID; pdfdoc uses the PDF object number, so that an
 // image named Im0 inside a form is never confused with the page's own Im0.
@@ -142,6 +235,13 @@ type Paint struct {
 	// raster's -- the two differ whenever a Form /BBox trims one and not the
 	// other. Box is deliberately NOT narrowed by it; see Ink.
 	Clip *Box
+	// CTM is the graphics-state matrix in effect when the path was painted.
+	// Box is only ever an axis-aligned bounding box of the path's true (possibly
+	// rotated) shape, so a caller comparing Box against a rotated placement's
+	// true quadrilateral needs to know whether this path shares that rotation
+	// (byb-2mt): if it does, Box's corners are not real points of the path and
+	// testing them against the quad is a category error (see inkHidden).
+	CTM Matrix
 }
 
 // Ink is the part of the path that can deposit marks: Box intersected with the
@@ -557,7 +657,7 @@ func recordPaint(s *Scan, path *pathBox, gs gstate, op string) {
 	s.order++
 	s.Paints = append(s.Paints, Paint{
 		Op: op, Box: box, Fill: gs.fill, Stroke: gs.stroke, Index: s.order,
-		Clip: gs.clip,
+		Clip: gs.clip, CTM: gs.ctm,
 	})
 }
 

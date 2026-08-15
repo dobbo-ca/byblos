@@ -258,6 +258,10 @@ func clonePageProvenance(in PageProvenance) PageProvenance {
 			clip := *in.Geometry.ClipBox
 			g.ClipBox = &clip
 		}
+		if in.Geometry.RasterQuad != nil {
+			quad := *in.Geometry.RasterQuad
+			g.RasterQuad = &quad
+		}
 		out.Geometry = &g
 	}
 	if in.Straightened != nil {
