@@ -71,7 +71,6 @@ import (
 	"io"
 	"math"
 
-	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -100,7 +99,41 @@ type PageSource struct {
 // output is a new document every time; no Source is modified.
 //
 // It writes nothing to w unless the whole document was built.
-func BuildFromPages(w io.Writer, pages []PageSource) (err error) {
+func BuildFromPages(w io.Writer, pages []PageSource) error {
+	return BuildFromPagesWithProperties(w, pages, nil)
+}
+
+// BuildFromPagesWithProperties is BuildFromPages, with properties merged into
+// the output's Info dictionary as part of the SAME build and the SAME write
+// (byb-yul.6, Correction 5).
+//
+// THIS IS WHY IT EXISTS, RATHER THAN A CALLER STAMPING PROPERTIES ON
+// AFTERWARDS. BuildFromPagesContext (editpages.go) used to build the
+// document here and then pipe the bytes through WriteProperties for its
+// provenance record -- and WriteProperties goes through pdfcpu's own
+// read-validate-optimize-write pass, the SAME catalog-traversal writer this
+// package's own writer exists to replace. Measured: every dangling-reference
+// shape buildpages.go's package comment describes came BACK on that second
+// pass, even when the first pass was this package's self-write. Folding the
+// properties into the one build this package already does removes the
+// second pass -- and the bug it reintroduces -- entirely, rather than
+// swapping its write half for this package's own (which was measured to
+// regress the output size of an unrelated, widely-shared caller: Optimize's
+// delinearize-and-rewrite path pipes an ALREADY re-written document, often
+// already using compressed object streams, through WriteProperties for its
+// own provenance stamp, and this package's writer never emits object
+// streams -- +48% on one pdfcpu test fixture, enough to trip Optimize's
+// never-larger-than-input fallback and silently stop delinearizing it).
+// BuildFromPages' own context has no such document to preserve: it is built
+// fresh, object stream or not, every time.
+//
+// properties is encoded exactly the way pdfcpu's own PropertiesAdd encodes
+// it (types.EscapedUTF16String), so ReadProperties -- unchanged, and still
+// pdfcpu's own reader -- decodes it back exactly as it always has. A key
+// already claimed by carryInfo's allowlist or by the /Producer stamp is
+// silently overwritten by properties, last-write-wins; nothing today passes
+// one of those keys here.
+func BuildFromPagesWithProperties(w io.Writer, pages []PageSource, properties map[string]string) (err error) {
 	defer catchPanic("build from pages", &err)
 
 	if err := validate(pages); err != nil {
@@ -117,14 +150,14 @@ func BuildFromPages(w io.Writer, pages []PageSource) (err error) {
 				"out of range 1..%d", i+1, p.Page, n)
 		}
 	}
-	ctx, err := buildContext(pages, sources)
+	ctx, err := buildContext(pages, sources, properties)
 	if err != nil {
 		return err
 	}
 	if err := applyStraighten(ctx, pages); err != nil {
 		return err
 	}
-	if err := api.WriteContext(ctx, w); err != nil {
+	if err := writeDocument(w, ctx.XRefTable); err != nil {
 		return fmt.Errorf("byblos/pdfdoc: build from pages: write: %w", err)
 	}
 	return nil
@@ -262,7 +295,7 @@ type migration struct {
 // hostile file is a stack overflow the process cannot recover from.
 const maxMigrationDepth = 256
 
-func buildContext(pages []PageSource, sources map[io.ReadSeeker]*doc) (*model.Context, error) {
+func buildContext(pages []PageSource, sources map[io.ReadSeeker]*doc, properties map[string]string) (*model.Context, error) {
 	xt, err := pdfcpu.CreateXRefTableWithRootDict()
 	if err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: build from pages: new catalog: %w", err)
@@ -332,7 +365,92 @@ func buildContext(pages []PageSource, sources map[io.ReadSeeker]*doc) (*model.Co
 	if err := m.carryInfo(sources); err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: build from pages: %w", err)
 	}
+	// OUTSIDE carryInfo's early returns (Correction 6): carryInfo gives up
+	// entirely on a multi-source export or a source with no /Info, and doing
+	// the producer stamp only inside it was measured to reach 90.5% of
+	// single-source exports and ZERO multi-source ones. Every export gets a
+	// /Producer, carried info or not, one source or many.
+	if err := m.stampProducer(); err != nil {
+		return nil, fmt.Errorf("byblos/pdfdoc: build from pages: producer: %w", err)
+	}
+	if err := m.setProperties(properties); err != nil {
+		return nil, fmt.Errorf("byblos/pdfdoc: build from pages: properties: %w", err)
+	}
 	return pdfcpu.CreateContext(xt, defaultConfig()), nil
+}
+
+// ensureInfoDict returns the output's Info dictionary, creating an empty one
+// if carryInfo left none -- which it does whenever the export has no single
+// defensible source to carry a title from (its own doc comment). Producer
+// and properties both need a dictionary to land in regardless.
+func (m *migration) ensureInfoDict() (types.Dict, error) {
+	if m.dest.Info != nil {
+		nr := m.dest.Info.ObjectNumber.Value()
+		e, ok := m.dest.FindTableEntry(nr, 0)
+		if !ok || e == nil {
+			return nil, fmt.Errorf("output info object %d has no cross-reference entry", nr)
+		}
+		d, ok := e.Object.(types.Dict)
+		if !ok {
+			return nil, fmt.Errorf("output info object %d is a %T, not a dictionary", nr, e.Object)
+		}
+		return d, nil
+	}
+	nr, err := m.dest.InsertObject(nil)
+	if err != nil {
+		return nil, err
+	}
+	d := types.Dict{}
+	if err := m.set(nr, d); err != nil {
+		return nil, err
+	}
+	ref := refTo(nr)
+	m.dest.Info = &ref
+	return d, nil
+}
+
+// stampProducer gives every export a /Producer naming what wrote it. pdfcpu's
+// own ensureInfoDict does this whenever IT holds the pen; now that this
+// package's own writer does, the document should say so instead of claiming
+// pdfcpu wrote it, or saying nothing. Unlike pdfcpu's version, this does not
+// stamp /CreationDate or /ModDate: buildpages.go's package comment already
+// promises the output is not byte-stable across object numbering, and a
+// clock reading would make two builds of the identical sequence differ for
+// no reason connected to their content.
+func (m *migration) stampProducer() error {
+	d, err := m.ensureInfoDict()
+	if err != nil {
+		return err
+	}
+	d["Producer"] = types.StringLiteral(producer)
+	return nil
+}
+
+// setProperties merges properties into the output's Info dictionary, encoded
+// exactly the way pdfcpu's own pdfcpu.PropertiesAdd encodes them, so
+// ReadProperties -- unchanged, and still pdfcpu's own reader -- decodes them
+// back exactly as it always has (byb-yul.6, Correction 5). This is what lets
+// BuildFromPagesWithProperties fold a caller's provenance record into the one
+// build and the one write this package already does, instead of a second
+// read-validate-optimize-write pass through pdfcpu's writer to add it
+// afterwards -- seeing BuildFromPagesWithProperties' own doc comment for why
+// that second pass is not just redundant but actively wrong.
+func (m *migration) setProperties(properties map[string]string) error {
+	if len(properties) == 0 {
+		return nil
+	}
+	d, err := m.ensureInfoDict()
+	if err != nil {
+		return err
+	}
+	for k, v := range properties {
+		s, err := types.EscapedUTF16String(v)
+		if err != nil {
+			return fmt.Errorf("property %q: %w", k, err)
+		}
+		d[k] = types.StringLiteral(*s)
+	}
+	return nil
 }
 
 // infoCarried are the information-dictionary entries an export inherits.

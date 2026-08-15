@@ -189,6 +189,14 @@ func maskVolatileFields(data []byte) []byte {
 // file, so the fixture also pins the file byblos produces and not only the
 // arithmetic (design spec section 9) -- and the checked-in copy cannot drift
 // out from under contract.json unnoticed.
+//
+// RE-PINNED for byb-yul.6: BuildFromPages now writes its own bytes (884 ->
+// 700) instead of pdfcpu's -- no /ID, no pdfcpu-authored /CreationDate or
+// /ModDate (maskVolatileFields below is now a no-op on this file, kept for
+// the day something else in the pipeline reintroduces either), and a
+// /Producer naming byblos instead of pdfcpu. Deliberate, not a silent
+// regeneration: verified stable across 20 regenerations of the identical
+// input (byte-identical every time) before being checked in.
 func TestContractPDFMatchesWhatByblosWrites(t *testing.T) {
 	c := loadContract(t)
 	tc := c.Cases[0]
