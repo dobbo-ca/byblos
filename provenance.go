@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
@@ -233,27 +234,55 @@ type PageProvenance struct {
 // value collides with a real, if degenerate, measurement (the paragraph
 // above). That is the reason ClipBox needs its own presence bit rather than
 // being inferred by comparing RasterBox to something.
+// RasterQuad is the placement's true quadrilateral -- the unit square mapped
+// through its CTM, in ring order (0,0) (1,0) (1,1) (0,1) -- carrying its own
+// presence bit for the same reason ClipBox does: nil for a placement with no
+// rotation or shear (axisAligned), where the quad is the same shape as
+// RasterBox and not worth a second field for, and nil for every record
+// written before byb-2mt. CoversPage below uses it to tell a
+// rotation-inflated RasterBox from the page it only appears to cover.
+//
+// The same short-array hazard the paragraph above documents for ClipBox
+// applies here too: a short raster_quad array zero-fills the missing
+// elements rather than erroring. A zero-filled tail leaves at least one pair
+// of coincident vertices, tripping containsPoints' zero-length-edge guard
+// (internal/content) rather than its zero-area one -- the truncated quad is
+// not generally zero-area -- so CoversPage answers false on it rather than a
+// wrong true; a partial record reads as "does not cover" rather than a
+// fabricated measurement.
 type PageGeometry struct {
-	RasterBox [4]float64  `json:"raster_box"`
-	PageBox   [4]float64  `json:"page_box"`
-	ClipBox   *[4]float64 `json:"clip_box,omitempty"`
+	RasterBox  [4]float64  `json:"raster_box"`
+	PageBox    [4]float64  `json:"page_box"`
+	ClipBox    *[4]float64 `json:"clip_box,omitempty"`
+	RasterQuad *[8]float64 `json:"raster_quad,omitempty"`
 }
 
-// CoversPage reports whether RasterBox fills PageBox, within coverTolerancePt.
-// It mirrors PageRaster.CoversPage's guard against a degenerate box: a PageBox
-// with zero or negative width or height -- including one with its corners
-// swapped -- is covered by nothing, because a plain containment check would
-// otherwise answer true for an empty or inverted box (image.Rectangle.In does,
-// for an empty receiver), which would make an unmeasured or degenerate record
-// report itself as a full-page scan.
+// CoversPage reports whether RasterBox fills PageBox, within coverTolerancePt,
+// and -- when RasterQuad is present -- whether the placement's true
+// quadrilateral does too.
+//
+// It mirrors PageRaster.CoversPage's guard against a degenerate box: a
+// PageBox with zero or negative width or height -- including one with its
+// corners swapped -- is covered by nothing, because a plain containment check
+// would otherwise answer true for an empty or inverted box (image.Rectangle.In
+// does, for an empty receiver), which would make an unmeasured or degenerate
+// record report itself as a full-page scan.
 func (g PageGeometry) CoversPage() bool {
 	if g.PageBox[2] <= g.PageBox[0] || g.PageBox[3] <= g.PageBox[1] {
 		return false
 	}
-	return g.RasterBox[0] <= g.PageBox[0]+coverTolerancePt &&
+	if !(g.RasterBox[0] <= g.PageBox[0]+coverTolerancePt &&
 		g.RasterBox[1] <= g.PageBox[1]+coverTolerancePt &&
 		g.RasterBox[2] >= g.PageBox[2]-coverTolerancePt &&
-		g.RasterBox[3] >= g.PageBox[3]-coverTolerancePt
+		g.RasterBox[3] >= g.PageBox[3]-coverTolerancePt) {
+		return false
+	}
+	if g.RasterQuad == nil {
+		return true
+	}
+	q := content.Quad(*g.RasterQuad)
+	pageBox := content.Box{LLX: g.PageBox[0], LLY: g.PageBox[1], URX: g.PageBox[2], URY: g.PageBox[3]}
+	return q.ContainsBox(pageBox, coverTolerancePt)
 }
 
 // PageStraighten is the correction byblos applied to this page's content, in

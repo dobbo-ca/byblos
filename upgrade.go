@@ -77,6 +77,15 @@ var capabilityRules = map[string]func(*Provenance) bool{
 	//     ratio; that is the earlier, smaller run. The figures here are
 	//     recomputed from the same 166,423-page results the 7 below comes
 	//     from, so both sides of this comparison share a denominator.)
+	//   - NOT REMEASURED SINCE byb-2mt. Both CoversPage methods now conjoin a
+	//     true-quadrilateral check where a rotated placement carries one
+	//     (RasterQuad), and a rotated placement's true quad falls short of the
+	//     page by several points at any angle above about 0.15deg -- see
+	//     PageRaster.CoversPage's own doc comment. That only ever pushes MORE
+	//     pages to covers_page=false, never fewer, so 63.7% is now a lower
+	//     bound on the real figure, not a fresh measurement. It does not weaken
+	//     the volume argument above -- a higher true figure argues the same
+	//     direction harder -- so this is named rather than re-run.
 	//   - The gain is zero: extract.go's ExtractPageRaster doc comment records
 	//     that every other arm of classify has already established no
 	//     text/path/shading/inline-image/unresolved-XObject marks the page, and

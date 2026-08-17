@@ -388,6 +388,86 @@ func TestPageProvenanceGeometryClipBoxZeroValueIsNotOmitted(t *testing.T) {
 	}
 }
 
+// A record written before byb-2mt -- Geometry present, no "raster_quad" key
+// at all -- must decode with RasterQuad nil, the same as an axis-aligned
+// placement measured by this build. CoversPage must still answer from
+// RasterBox/PageBox alone, unchanged.
+func TestPageProvenanceDecodesGeometryWithoutRasterQuad(t *testing.T) {
+	const legacy = `{"applied":["extract-raster"],"geometry":{"raster_box":[0,0,612,792],"page_box":[0,0,612,792]}}`
+	var out PageProvenance
+	if err := json.Unmarshal([]byte(legacy), &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if out.Geometry == nil {
+		t.Fatal("Geometry = nil; want geometry present")
+	}
+	if out.Geometry.RasterQuad != nil {
+		t.Errorf("RasterQuad = %v; want nil for a record written before byb-2mt", out.Geometry.RasterQuad)
+	}
+	if !out.Geometry.CoversPage() {
+		t.Error("CoversPage() = false; want true for a legacy record whose RasterBox exactly fills PageBox")
+	}
+}
+
+// A short "raster_quad" array zero-fills the missing elements rather than
+// erroring, the same short-array hazard PageGeometry's doc comment already
+// documents for ClipBox. The zero-filled tail leaves the third and fourth
+// vertices coincident at the origin -- {1,2, 3,0, 0,0, 0,0} has shoelace area
+// -3, not zero -- so it is containsPoints' zero-length-edge guard, not its
+// zero-area one, that must answer false here rather than fabricate a
+// measurement.
+func TestPageProvenanceGeometryShortRasterQuadZeroFillsAndCoversPageIsFalse(t *testing.T) {
+	const short = `{"raster_box":[0,0,612,792],"page_box":[0,0,612,792],"raster_quad":[1,2,3]}`
+	var out PageGeometry
+	if err := json.Unmarshal([]byte(short), &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	want := [8]float64{1, 2, 3, 0, 0, 0, 0, 0}
+	if out.RasterQuad == nil || *out.RasterQuad != want {
+		t.Errorf("RasterQuad = %v; want zero-filled %v", out.RasterQuad, want)
+	}
+	if out.CoversPage() {
+		t.Error("CoversPage() = true; want false: a zero-filled raster_quad tail leaves a zero-length edge and covers nothing")
+	}
+}
+
+// A measured quad round-trips through JSON under the "raster_quad" key.
+func TestPageProvenanceGeometryRasterQuadRoundTrips(t *testing.T) {
+	in := PageProvenance{Geometry: &PageGeometry{
+		RasterBox:  [4]float64{0, 0, 612, 792},
+		PageBox:    [4]float64{0, 0, 612, 792},
+		RasterQuad: &[8]float64{0, 0, 612, 0, 612, 792, 0, 792},
+	}}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"raster_quad"`)) {
+		t.Errorf("Marshal() = %s; want a \"raster_quad\" key", raw)
+	}
+	var out PageProvenance
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if out.Geometry == nil || out.Geometry.RasterQuad == nil {
+		t.Fatalf("Geometry = %+v; want a non-nil RasterQuad", out.Geometry)
+	}
+	if *out.Geometry.RasterQuad != *in.Geometry.RasterQuad {
+		t.Errorf("RasterQuad = %v; want %v", *out.Geometry.RasterQuad, *in.Geometry.RasterQuad)
+	}
+}
+
+// RasterQuad omits from the wire entirely when nil, the same as ClipBox.
+func TestPageProvenanceGeometryOmitsRasterQuadWhenAxisAligned(t *testing.T) {
+	raw, err := json.Marshal(&PageGeometry{RasterBox: [4]float64{0, 0, 612, 792}, PageBox: [4]float64{0, 0, 612, 792}})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if bytes.Contains(raw, []byte(`"raster_quad"`)) {
+		t.Errorf("Marshal(PageGeometry{RasterQuad: nil}) = %s; want no \"raster_quad\" key", raw)
+	}
+}
+
 // PageGeometry.CoversPage applies its own 1.0pt tolerance over the exact
 // floats a writer measured, and mirrors PageRaster.CoversPage's guard against
 // a degenerate box -- but PageRaster.CoversPage itself uses no tolerance; see

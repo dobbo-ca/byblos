@@ -496,6 +496,28 @@ func scanReversedCropBox() []byte {
 	return w.finish(cat)
 }
 
+// ScanFractionalCropBox is scan(0) with an explicit /CropBox offset by frac
+// points from the MediaBox on every edge -- byb-2mt's review found
+// PageGeometry.CoversPage and PageRaster.CoversPage can disagree on a
+// fractional CropBox once RasterQuad is in play (PageRaster rounds the page
+// box to integers before testing the quad against it; PageGeometry does
+// not), and this is what reproduces that.
+func ScanFractionalCropBox(frac float64) []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /CropBox [%g %g %g %g]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt,
+		frac, frac, float64(PageWidthPt)-frac, float64(PageHeightPt)-frac,
+		img, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillStream(img, imageDict(ScanImageW, ScanImageH), grayPixels(ScanImageW, ScanImageH, 1))
+	return w.finish(cat)
+}
+
 // stampedScan is the natural-DPI placement carrying a /Stamp in the 43.6 point
 // strip the raster does not reach.
 //
