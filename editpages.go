@@ -18,6 +18,7 @@ package byblos
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -86,10 +87,21 @@ func BuildFromPages(w io.Writer, pages []PageSource) error {
 // each page of the record (byb-xyn).
 //
 // CANCELLATION LATENCY: EFFECTIVELY THE WHOLE CALL, and for the same reason
-// BuildPDFContext gives. The checked boundaries bracket the two pdfcpu passes --
-// the migration walk and the provenance write -- and both are single
-// uninterruptible passes over every object of every source. Budget for the whole
-// build. A cancelled call writes nothing to w. See context.go.
+// BuildPDFContext gives. The checked boundary brackets the migration walk and
+// its own write, which is now the ONE pdfcpu WRITE pass this makes --
+// pdfdoc's BuildFromPagesWithProperties folds the provenance record into the
+// same build instead of a second read-validate-optimize-write pass afterwards
+// (byb-yul.6, Correction 5; see its own doc comment for why that second pass
+// is not just redundant but actively wrong). A second, READ-ONLY pass still
+// runs below: pdfdoc.Validate, over the buffered output, restoring the gate
+// the old second WRITE pass used to provide as a side effect of piping the
+// bytes through api.AddProperties' own ReadValidateAndOptimize. Without it,
+// a source pdfcpu's validator refuses -- an unsupported /PresSteps, a
+// malformed date, a bad /ShowBookmarks -- built and wrote silently, with a
+// nil error, once Correction 5 took the old validating pass away (found in
+// review). Validate only reads; it does not reintroduce the dangling-
+// reference bug a second WRITE pass caused. Budget for the whole build. A
+// cancelled call writes nothing to w. See context.go.
 func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource) error {
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -127,14 +139,28 @@ func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource)
 		adjusted[i].Straighten = &delta
 	}
 
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("byblos: BuildFromPages: marshal provenance: %w", err)
+	}
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
 	var built bytes.Buffer
-	if err := pdfdoc.BuildFromPages(&built, adjusted); err != nil {
+	if err := pdfdoc.BuildFromPagesWithProperties(&built, adjusted, map[string]string{provenanceKey: string(data)}); err != nil {
 		return fmt.Errorf("byblos: BuildFromPages: %w", err)
 	}
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	if err := WriteProvenanceContext(ctx, bytes.NewReader(built.Bytes()), w, record); err != nil {
+	// See BuildFromPagesContext's own doc comment: this is the gate Correction
+	// 5's removal of the second WRITE pass silently dropped. Refuse here,
+	// same as HEAD did, rather than hand the caller bytes pdfcpu's own
+	// (relaxed) validator refuses.
+	if err := pdfdoc.Validate(bytes.NewReader(built.Bytes())); err != nil {
+		return fmt.Errorf("byblos: BuildFromPages: %w", err)
+	}
+	if _, err := w.Write(built.Bytes()); err != nil {
 		return fmt.Errorf("byblos: BuildFromPages: %w", err)
 	}
 	return nil

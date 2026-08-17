@@ -255,6 +255,64 @@ func TestBuildFromPagesRefusalsReachTheCaller(t *testing.T) {
 	}
 }
 
+// TestBuildFromPagesContextRefusesADocumentPdfcpuWouldRefuse is the
+// regression for byb-yul.6 Correction 5's own bug (found in adversarial
+// review): folding the provenance write into BuildFromPagesWithProperties's
+// one build removed the second read-validate-optimize-write pass that used
+// to run afterwards -- and with it, the ONLY validation BuildFromPagesContext
+// ever had, since that pass was api.AddProperties, which validates
+// internally as a side effect of writing. Nothing replaced the gate, so an
+// export whose migrated page dictionary carries a page-level entry pdfcpu's
+// (relaxed) validator refuses -- /PresSteps is unconditionally "not
+// supported" regardless of its content (pdfcpu validate/page.go) -- built
+// successfully with a nil error and wrote invalid bytes to the caller.
+func TestBuildFromPagesContextRefusesADocumentPdfcpuWouldRefuse(t *testing.T) {
+	src := presStepsPageDoc()
+	var buf bytes.Buffer
+	err := BuildFromPagesContext(context.Background(), &buf, []PageSource{
+		{Source: bytes.NewReader(src), Page: 1},
+	})
+	if err == nil {
+		t.Fatal("BuildFromPagesContext accepted a page carrying /PresSteps, " +
+			"which pdfcpu's own validator unconditionally refuses")
+	}
+	if !strings.Contains(err.Error(), "PresSteps") {
+		t.Errorf("error = %q, want it to name PresSteps (pdfcpu's validator error)", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a refused build wrote %d bytes; it must write none", buf.Len())
+	}
+}
+
+// presStepsPageDoc is a minimal, hand-assembled one-page PDF whose page
+// dictionary carries /PresSteps -- a field BuildFromPages' migration copies
+// verbatim (migratePage's generic field loop has no special case for it) and
+// pdfcpu's validator refuses outright, regardless of the value.
+func presStepsPageDoc() []byte {
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /MediaBox [0 0 612 792] " +
+			"/Resources << >> /PresSteps << /S /Fly >> >>",
+		"<< /Length 0 >>\nstream\n\nendstream",
+	}
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	offsets := make([]int, len(objs))
+	for i, o := range objs {
+		offsets[i] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
+	}
+	start := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objs)+1)
+	for _, off := range offsets {
+		fmt.Fprintf(&b, "%010d 00000 n \n", off)
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n",
+		len(objs)+1, start)
+	return b.Bytes()
+}
+
 var _ io.Writer = (*bytes.Buffer)(nil)
 
 // clonePageProvenance deep-copies ClipBox explicitly and would silently

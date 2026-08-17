@@ -203,6 +203,91 @@ func TestBuildFromPagesDropsTheInfoDictWhenSourcesDisagree(t *testing.T) {
 	}
 }
 
+// TestBuildFromPagesStampsProducerEvenWithoutACarriedInfoDict is Correction 6:
+// the producer stamp used to live only inside carryInfo, which gives up on
+// anything but a single source with its own /Info -- so a multi-source
+// export, or a single source with no /Info at all, got no /Producer either.
+// It has to reach both.
+func TestBuildFromPagesStampsProducerEvenWithoutACarriedInfoDict(t *testing.T) {
+	t.Run("two_sources", func(t *testing.T) {
+		a, b := titledDoc("First"), titledDoc("Second")
+		_, out := build(t, []PageSource{
+			{Source: bytes.NewReader(a), Page: 1},
+			{Source: bytes.NewReader(b), Page: 1},
+		})
+		info := infoOf(t, out)
+		v, ok := info["Producer"].(types.StringLiteral)
+		if !ok || v.Value() == "" {
+			t.Errorf("/Producer = %v, want a non-empty string even though no /Title was carried", info["Producer"])
+		}
+	})
+	t.Run("no_source_info", func(t *testing.T) {
+		_, out := build(t, []PageSource{{Source: booklet(t), Page: 1}})
+		info := infoOf(t, out)
+		v, ok := info["Producer"].(types.StringLiteral)
+		if !ok || v.Value() == "" {
+			t.Errorf("/Producer = %v, want a non-empty string", info["Producer"])
+		}
+	})
+}
+
+// TestBuildFromPagesWithPropertiesRoundTrips is Correction 5's own test:
+// BuildFromPagesWithProperties folds a property into the ONE build and the
+// ONE write this package does, and ReadProperties -- unmodified, still
+// pdfcpu's own reader -- has to decode it back exactly, proving the encoding
+// (types.EscapedUTF16String, the same pdfcpu.PropertiesAdd itself uses) is
+// right and not just plausible-looking.
+func TestBuildFromPagesWithPropertiesRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	pages := []PageSource{{Source: booklet(t), Page: 1}}
+	// A value outside ASCII, so a wrong encoding (plain bytes instead of
+	// UTF-16BE-with-BOM) would be caught rather than coincidentally surviving.
+	want := `{"note":"café"}`
+	if err := BuildFromPagesWithProperties(&buf, pages, map[string]string{"byblos-test-key": want}); err != nil {
+		t.Fatalf("BuildFromPagesWithProperties: %v", err)
+	}
+	out := buf.Bytes()
+	if err := Validate(bytes.NewReader(out)); err != nil {
+		t.Fatalf("the built document does not validate: %v", err)
+	}
+	assertNoDanglingRefs(t, out)
+
+	got, err := ReadProperties(bytes.NewReader(out))
+	if err != nil {
+		t.Fatalf("ReadProperties: %v", err)
+	}
+	if got["byblos-test-key"] != want {
+		t.Errorf("byblos-test-key = %q, want %q", got["byblos-test-key"], want)
+	}
+
+	// The round trip above is NOT the encoding check its own comment claims:
+	// pdfcpu's reader round-trips a plain-UTF-8 StringLiteral just as
+	// happily as an escaped-UTF-16BE one (found in adversarial review --
+	// mutating setProperties to types.StringLiteral(v) still passed). Assert
+	// the RAW dict value instead: it has to be exactly what
+	// types.EscapedUTF16String produces, the same encoder pdfcpu's own
+	// PropertiesAdd uses, before ReadProperties' decoding has a chance to
+	// paper over a wrong one.
+	info := infoOf(t, out)
+	raw, ok := info["byblos-test-key"].(types.StringLiteral)
+	if !ok {
+		t.Fatalf("Info[byblos-test-key] is a %T, not a string literal", info["byblos-test-key"])
+	}
+	wantEncoded, err := types.EscapedUTF16String(want)
+	if err != nil {
+		t.Fatalf("types.EscapedUTF16String: %v", err)
+	}
+	if raw.Value() != *wantEncoded {
+		t.Errorf("raw Info dict value = %q, want the UTF-16BE-with-BOM encoding %q",
+			raw.Value(), *wantEncoded)
+	}
+	// Nothing about folding the property into the one build should cost the
+	// producer stamp Correction 6 promises on every export.
+	if v, ok := info["Producer"].(types.StringLiteral); !ok || v.Value() == "" {
+		t.Errorf("/Producer = %v, want a non-empty string", info["Producer"])
+	}
+}
+
 // build runs BuildFromPages and returns a Doc over what it wrote, having first
 // put the bytes through pdfcpu's validator.
 //
@@ -241,31 +326,13 @@ func build(t *testing.T, pages []PageSource) (Doc, []byte) {
 // should be.
 func assertNoDanglingRefs(t *testing.T, out []byte) {
 	t.Helper()
-	ctx, err := api.ReadContext(bytes.NewReader(out), defaultConfig())
+	hits, err := DanglingRefs(out)
 	if err != nil {
 		t.Fatalf("re-reading the built document: %v", err)
 	}
-	xt := ctx.XRefTable
-	defined := map[int]bool{}
-	for objNr, e := range xt.Table {
-		if e != nil && !e.Free {
-			defined[objNr] = true
-		}
-	}
-	for objNr := range defined {
-		if objNr == 0 {
-			continue
-		}
-		o, err := xt.Dereference(types.IndirectRef{ObjectNumber: types.Integer(objNr)})
-		if err != nil || o == nil {
-			continue
-		}
-		for _, target := range refsOf(o) {
-			if !defined[target] {
-				t.Errorf("object %d references object %d, which the document does not define",
-					objNr, target)
-			}
-		}
+	for _, h := range hits {
+		t.Errorf("object %d references object %d, which the document does not define",
+			h.Object, h.Target)
 	}
 }
 
