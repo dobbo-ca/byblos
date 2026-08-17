@@ -212,6 +212,9 @@ type Doc interface {
 	// ImageInfo returns the dictionary facts for an image resolved by XObject,
 	// keyed by the ID that XObject returned.
 	ImageInfo(id int) (ImageInfo, bool)
+	// EncryptInfo reports whether this document carries an /Encrypt
+	// dictionary, and its /P, /V, /R when so. See encryptinfo.go.
+	EncryptInfo() EncryptInfo
 	// RawImage renders an image previously resolved by XObject and returns its
 	// bytes and the file type pdfcpu inferred. The id is the one XObject
 	// returned; an id this document has not resolved is an error.
