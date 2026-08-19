@@ -79,10 +79,23 @@ type RasterRefusal struct {
 
 // Error returns the wrapped chain's message, unchanged from what this call
 // returned before RasterRefusal existed.
-func (e *RasterRefusal) Error() string { return e.err.Error() }
+//
+// A HAND-BUILT RasterRefusal HAS NO CHAIN AND MUST NOT PANIC. The wrapped
+// error is unexported, so a consumer writing a test for its own refusal
+// handling can only construct the exported fields; that is a legitimate use
+// and it would otherwise nil-panic here. Such a value reports its reason and
+// nothing else, and errors.Is finds no sentinel on it -- which is honest,
+// because there is none.
+func (e *RasterRefusal) Error() string {
+	if e.err == nil {
+		return "byblos: page raster refused: " + e.Reason
+	}
+	return e.err.Error()
+}
 
 // Unwrap exposes the sentinel and any cause beneath it, so errors.Is on
-// ErrNotSingleRaster and ErrUnsupportedImageCodec still answers.
+// ErrNotSingleRaster and ErrUnsupportedImageCodec still answers. It is nil for
+// a hand-built value; see Error.
 func (e *RasterRefusal) Unwrap() error { return e.err }
 
 // refuse records the divert and wraps err with its reason. Every refusal site

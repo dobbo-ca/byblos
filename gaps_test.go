@@ -68,6 +68,24 @@ func TestRasterRefusalCarriesTheReason(t *testing.T) {
 	}
 }
 
+// A consumer testing its own refusal handling can only build the exported
+// fields, because the wrapped chain is unexported. That has to work rather
+// than nil-panic: kleio's preview handler has exactly this test.
+func TestRasterRefusalHandBuiltDoesNotPanic(t *testing.T) {
+	ref := &RasterRefusal{Page: 3, Reason: "vector-paint", Class: "not-single-raster"}
+	if got := ref.Error(); !strings.Contains(got, "vector-paint") {
+		t.Errorf("Error() = %q; want it to name the reason it was given", got)
+	}
+	if err := errors.Unwrap(ref); err != nil {
+		t.Errorf("Unwrap() = %v; a hand-built refusal wraps nothing and must say so", err)
+	}
+	// Honest, and worth pinning so nobody "fixes" it by defaulting the chain
+	// to a sentinel: a value byblos did not produce carries no sentinel.
+	if errors.Is(ref, ErrNotSingleRaster) {
+		t.Error("a hand-built refusal reports ErrNotSingleRaster; it has no chain to report it from")
+	}
+}
+
 // The sentinels are what kleio's 422-vs-500 split branches on today, and
 // RasterRefusal must not have moved them out of reach.
 func TestRasterRefusalKeepsTheSentinelsReachable(t *testing.T) {
