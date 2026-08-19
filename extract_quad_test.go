@@ -10,7 +10,7 @@ import (
 // bounding-box test with a true-quadrilateral one at the covers/contains and
 // vector-ink sites. The matrix is exactly what byblos's own Straighten emits
 // for StraightenSpec{Deg: 1.9} on a 612x792 page -- not invented, and not
-// 2.0 degrees, because writing that at %.4f perturbs it past maxSkewDeg and
+// 2.0 degrees, because writing that at %.4f perturbs it past MaxSkewDeg and
 // classify diverts "rotated-placement" instead, silencing every fixture here.
 const rotated1p9 = "611.6635 20.2910 -26.2589 791.5646 13.2977 -9.9278"
 
@@ -160,7 +160,7 @@ func straightenedMatrixString(t *testing.T, deg float64) string {
 // The end-to-end half of fixture 4: the real corpus document 16,241 measured
 // Internet Archive pages are shaped like (internal/corpus/corpus.go:208,
 // extract.go:171-176 and :756) must still extract after a straighten pass
-// that leaves the placement rotated within maxSkewDeg. An uncorrected design
+// that leaves the placement rotated within MaxSkewDeg. An uncorrected design
 // that tested quad-vs-box at the contains site breaks this document.
 func TestExtractStackedStraightenedStillExtracts(t *testing.T) {
 	src := corpusDoc(t, "stacked")

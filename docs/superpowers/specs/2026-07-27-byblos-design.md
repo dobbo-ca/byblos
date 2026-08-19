@@ -400,6 +400,31 @@ var ErrNotSingleRaster = errors.New("byblos: page is not a single raster")
 // cannot decode: JBIG2, JPEG 2000, or CMYK re-rendered as TIFF by pdfcpu.
 var ErrUnsupportedImageCodec = errors.New("byblos: page raster uses an image codec byblos cannot decode")
 
+// RasterRefusal carries the refusal reason as a TYPE rather than as a text
+// suffix on the message (gap G4). Every refusal from ExtractPageRaster is one,
+// reachable with errors.As; the message and the errors.Is chain are unchanged,
+// so ErrNotSingleRaster, ErrUnsupportedImageCodec and any *NotImplemented
+// still answer exactly as before. Reason is the fine-grained decision
+// ("vector-paint", "multiple-images", "mrc-layers", "unsupported-codec-jbig2",
+// ...); Class is what divertClass maps it to and what PageProvenance.Diverted
+// records, which collapses unrecognised reasons to "not-single-raster".
+// Neither is a closed set.
+type RasterRefusal struct {
+    Page   int    // 1-based page that was refused
+    Reason string // fine-grained refusal reason
+    Class  string // coarse divert class, as recorded in PageProvenance.Diverted
+}
+
+func (e *RasterRefusal) Error() string
+func (e *RasterRefusal) Unwrap() error
+
+// MaxSkewDeg is how far a placement's axes may lie from the page's before the
+// image is treated as rotated or sheared -- and therefore also the straighten
+// envelope a StraightenSpec.Deg has to stay inside to keep extracting.
+// Exported so an editor's slider clamp cannot drift from the divert
+// threshold (gap G3).
+const MaxSkewDeg = 2.0
+
 // PageRaster is the raster and where it sits. byb-b1.3 measured 132 pages
 // whose raster is placed at its own resolution on a nominal page box and does
 // not fill it; those pages extract, so the caller has to be able to tell.
@@ -542,6 +567,16 @@ type StraightenSpec = pdfdoc.StraightenSpec
 
 func BuildFromPages(w io.Writer, pages []PageSource) error
 func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource) error
+
+// ValidatePages is the half of BuildFromPages' refusal that needs no document
+// (gap G2): non-empty sequence, every page has a Source, every Rotate is one
+// of 0/90/180/270, every Straighten.Deg is finite, no Straighten carries a
+// Crop. It opens nothing and reads from no Source, so a request handler can
+// afford it and return 422 instead of queueing an export that fails later.
+// It CANNOT check that PageSource.Page exists in its source, nor that the
+// source is unencrypted -- both need the document open. A nil return means
+// "nothing structural is wrong", not "this will build".
+func ValidatePages(pages []PageSource) error
 
 // ReplaceImages (byb-fp6) substitutes image streams in an EXISTING document,
 // keyed by 1-based page, leaving everything else as it was. It refuses an image

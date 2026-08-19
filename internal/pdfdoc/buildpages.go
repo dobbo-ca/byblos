@@ -136,7 +136,7 @@ func BuildFromPages(w io.Writer, pages []PageSource) error {
 func BuildFromPagesWithProperties(w io.Writer, pages []PageSource, properties map[string]string) (err error) {
 	defer catchPanic("build from pages", &err)
 
-	if err := validate(pages); err != nil {
+	if err := ValidatePages(pages); err != nil {
 		return err
 	}
 	sources, err := openSources(pages)
@@ -163,7 +163,11 @@ func BuildFromPagesWithProperties(w io.Writer, pages []PageSource, properties ma
 	return nil
 }
 
-// validate rejects what cannot be resolved without opening a document.
+// ValidatePages rejects what cannot be resolved without opening a document.
+//
+// EXPORTED FOR A PRE-BUILD CHECK (gap G2). byblos.ValidatePages is a caller's
+// only way to learn that an edit list is unbuildable without paying for the
+// build; see that wrapper for what this check does NOT cover.
 //
 // The rotation check is not defensive tidiness. pdfcpu writes /Rotate 45 and
 // /Rotate -90 with a nil error, and the 45 case produces a file pdfcpu itself
@@ -176,7 +180,7 @@ func BuildFromPagesWithProperties(w io.Writer, pages []PageSource, properties ma
 // [0,360), so a declared -90 reads back as 270, and it does not guarantee a
 // multiple of 90 -- a declared 45 reads back as 45. A caller round-tripping
 // through it must still be told when the value it got cannot be written.
-func validate(pages []PageSource) error {
+func ValidatePages(pages []PageSource) error {
 	if len(pages) == 0 {
 		return fmt.Errorf("byblos/pdfdoc: build from pages: no pages")
 	}
