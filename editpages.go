@@ -74,6 +74,20 @@ const divertedNotRecorded = "source-unrecorded"
 //
 // It never reads from any Source, so a PageSource whose reader is not yet
 // positioned, or not yet fetched, still validates.
+//
+// A CALLER THAT HAS NO SOURCES YET STILL HAS TO SUPPLY NON-NIL ONES. The
+// nil-Source refusal is a real build precondition and stays, so a handler
+// validating an edit list it has not fetched the documents for passes any
+// non-nil reader -- one shared empty bytes.Reader for the whole list is
+// enough, because nothing here touches it:
+//
+//	var unfetched = bytes.NewReader(nil)
+//	// ... p.Source = unfetched for every page ...
+//	if err := byblos.ValidatePages(pages); err != nil { /* 422 */ }
+//
+// That is deliberate rather than an oversight. Dropping the check would make
+// this function's answer differ from the build's, and the ONE property worth
+// having here is that the two cannot disagree.
 func ValidatePages(pages []PageSource) error {
 	return pdfdoc.ValidatePages(pages)
 }
