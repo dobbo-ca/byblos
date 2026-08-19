@@ -93,7 +93,7 @@ func inWord(px, py float64, w, h, margin, lineH, lineGap, wordW, wordGap int) bo
 func TestRecoversKnownAngle(t *testing.T) {
 	const tol = 4 * fineStep
 	// 0.13 is the median placement deskew byb-divert measured over govdocs1, and
-	// 1.09 is the widest; both are in the table because maxSkewDeg was set at 2.0
+	// 1.09 is the widest; both are in the table because MaxSkewDeg was set at 2.0
 	// to clear them and the census turns on whether content skew behaves the same
 	// way. 12 is past anything Chris asked for and inside the search rail.
 	for _, want := range []float64{-12, -7, -2.5, -1.09, -0.5, -0.13, 0, 0.13, 0.5, 1.09, 2.5, 7, 12} {

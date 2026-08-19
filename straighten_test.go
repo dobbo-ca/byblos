@@ -253,7 +253,7 @@ func TestStraightenAcceptsAnAngleOutsideOneTurn(t *testing.T) {
 // genuinely uncovered at 2 degrees.
 //
 // CoversPage now also tests the placement's true quadrilateral (RasterQuad),
-// so a rotated placement -- reachable at any angle inside maxSkewDeg, not
+// so a rotated placement -- reachable at any angle inside MaxSkewDeg, not
 // only through Straighten -- correctly reports false.
 func TestStraightenCoversPageIsFalseUnderRotation(t *testing.T) {
 	src := corpusDoc(t, "scan")
@@ -267,7 +267,7 @@ func TestStraightenCoversPageIsFalseUnderRotation(t *testing.T) {
 		r, err := ExtractPageRaster(bytes.NewReader(out.Bytes()), 1)
 		if err != nil {
 			t.Fatalf("Deg %v: ExtractPageRaster() error = %v; a correction inside "+
-				"maxSkewDeg must still extract", deg, err)
+				"MaxSkewDeg must still extract", deg, err)
 		}
 		if deg == 0 {
 			// The axis-aligned no-regression pin: an unrotated placement has

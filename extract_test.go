@@ -551,8 +551,8 @@ func TestSkewDegreesOnTheMeasuredPage(t *testing.T) {
 	if math.Abs(got-0.0577) > 0.0005 {
 		t.Errorf("skewDegrees = %v degrees; the measured page is 0.0577", got)
 	}
-	if got > maxSkewDeg {
-		t.Errorf("skewDegrees = %v exceeds maxSkewDeg %v; the measured page still diverts", got, maxSkewDeg)
+	if got > MaxSkewDeg {
+		t.Errorf("skewDegrees = %v exceeds MaxSkewDeg %v; the measured page still diverts", got, MaxSkewDeg)
 	}
 }
 
@@ -602,7 +602,7 @@ func TestClassify(t *testing.T) {
 		// these pages are single page-covering rasters and must extract.
 		{name: "median scanner deskew", scan: &contentScan{Images: deskewedPlacement(0.13)}},
 		{name: "the widest deskew measured", scan: &contentScan{Images: deskewedPlacement(1.09)}},
-		{name: "a rotation exactly at the tolerance", scan: &contentScan{Images: deskewedPlacement(maxSkewDeg)}},
+		{name: "a rotation exactly at the tolerance", scan: &contentScan{Images: deskewedPlacement(MaxSkewDeg)}},
 		{name: "a rotation past the tolerance", scan: &contentScan{Images: deskewedPlacement(2.5)}, want: "rotated-placement"},
 		// A shear is not a rotation: the x axis is square to the page and the y
 		// axis is not. Checking only one axis would let it through as clean.

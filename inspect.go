@@ -83,7 +83,7 @@ type ImageRef struct {
 	//
 	// It exists so a caller can see a straighten's consequence before asking
 	// for it: a correction of Deg leaves the placement at PlacementDeg + Deg,
-	// and placementReason (extract.go:800) diverts a page past maxSkewDeg =
+	// and placementReason (extract.go:800) diverts a page past MaxSkewDeg =
 	// 2.0. The precedent is Substitutable -- a caller that cannot see a
 	// refusal coming cannot drive the primitive (byb-js5.2).
 	PlacementDeg  float64

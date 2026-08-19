@@ -27,13 +27,13 @@ package byblos
 //
 // # The decisive column, and why it is |content skew| and not anything else
 //
-// maxSkewDeg (extract.go) is 2.0, and placementReason diverts any placement
+// MaxSkewDeg (extract.go) is 2.0, and placementReason diverts any placement
 // whose axes lie further than that from the page's. Straightening a page by the
 // LOSSLESS content-matrix route turns the content by the negative of the angle
 // the reader sees, which leaves the placement sitting at exactly the CONTENT
 // skew that was taken out. So:
 //
-//	a page whose content skew exceeds maxSkewDeg cannot take the lossless
+//	a page whose content skew exceeds MaxSkewDeg cannot take the lossless
 //	route -- byblos would stop recognising its own output -- and must be
 //	resampled instead.
 //

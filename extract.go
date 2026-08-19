@@ -41,6 +41,74 @@ var ErrNotSingleRaster = errors.New("byblos: page is not a single raster")
 // work. Byblos names the case instead.
 var ErrUnsupportedImageCodec = errors.New("byblos: page raster uses an image codec byblos cannot decode")
 
+// RasterRefusal names, in a type rather than in prose, why ExtractPageRaster
+// refused a page (gap G4).
+//
+// IT CHANGES NOTHING ABOUT THE ERROR'S TEXT OR ITS CHAIN. Error returns the
+// message the wrapped chain always produced, and Unwrap keeps ErrNotSingleRaster,
+// ErrUnsupportedImageCodec and any *NotImplemented reachable by errors.Is and
+// errors.As exactly as before. It only adds a way to read the reason WITHOUT
+// parsing that message:
+//
+//	var ref *byblos.RasterRefusal
+//	if errors.As(err, &ref) { ... ref.Reason ... }
+//
+// Kleio's preview handler forwarded err.Error() verbatim into a 422 body
+// because the fine reason existed only as a text suffix, which made every
+// wording change here a silent break of the tile a user sees.
+//
+// REASON IS FINE-GRAINED AND CLASS IS COARSE, and they are not the same
+// vocabulary. Reason is what classify (or the codec switch) actually decided:
+// "vector-paint", "multiple-images", "mrc-layers", "unsupported-codec-jbig2",
+// and the rest. Class is what divertClass maps that to, which is what
+// PageProvenance.Diverted records and what UpgradeCandidates matches on — it
+// collapses every unrecognised reason to "not-single-raster". Branch on Class
+// to decide whether a future byblos could recover the page; show Reason to a
+// human. Neither is a closed set: byb-z8j owns the vocabulary and adds to it,
+// so treat an unknown value as "some other refusal" rather than failing.
+type RasterRefusal struct {
+	// Page is the 1-based page number that was refused.
+	Page int
+	// Reason is the fine-grained refusal reason.
+	Reason string
+	// Class is the coarse divert class recorded in PageProvenance.Diverted.
+	Class string
+
+	err error
+}
+
+// Error returns the wrapped chain's message, unchanged from what this call
+// returned before RasterRefusal existed.
+//
+// A HAND-BUILT RasterRefusal HAS NO CHAIN AND MUST NOT PANIC. The wrapped
+// error is unexported, so a consumer writing a test for its own refusal
+// handling can only construct the exported fields; that is a legitimate use
+// and it would otherwise nil-panic here. Such a value reports its reason and
+// nothing else, and errors.Is finds no sentinel on it -- which is honest,
+// because there is none.
+func (e *RasterRefusal) Error() string {
+	if e.err == nil {
+		return "byblos: page raster refused: " + e.Reason
+	}
+	return e.err.Error()
+}
+
+// Unwrap exposes the sentinel and any cause beneath it, so errors.Is on
+// ErrNotSingleRaster and ErrUnsupportedImageCodec still answers. It is nil for
+// a hand-built value; see Error.
+func (e *RasterRefusal) Unwrap() error { return e.err }
+
+// refuse records the divert and wraps err with its reason. Every refusal site
+// in extractPage goes through here, so the reason a caller reads by type and
+// the reason the provenance record carries cannot disagree.
+func refuse(page int, reason string, err error) (*PageRaster, PageProvenance, error) {
+	countDivert(reason)
+	class := divertClass(reason)
+	return nil, PageProvenance{Diverted: class}, &RasterRefusal{
+		Page: page, Reason: reason, Class: class, err: err,
+	}
+}
+
 // coverTolerancePt is how far a placement may fall short of the page box and
 // still count as page-covering. One point at 300 DPI is about four pixels.
 //
@@ -49,7 +117,7 @@ var ErrUnsupportedImageCodec = errors.New("byblos: page raster uses an image cod
 // on real scans, revisit it here before revisiting the design.
 const coverTolerancePt = 1.0
 
-// maxSkewDeg is how far a placement's axes may lie from the page's before the
+// MaxSkewDeg is how far a placement's axes may lie from the page's before the
 // image is treated as rotated or sheared.
 //
 // It is an angle rather than a matrix entry for a reason recorded in byb-b1.2:
@@ -58,7 +126,14 @@ const coverTolerancePt = 1.0
 // degrees — so it rejected all 147 sub-degree scanner deskews in the
 // measurement. Two degrees clears the widest of them (1.09) with room to spare
 // and stays nowhere near a quarter turn.
-const maxSkewDeg = 2.0
+//
+// IT IS EXPORTED BECAUSE IT IS ALSO THE STRAIGHTEN ENVELOPE, and a consumer
+// that hardcodes it drifts (gap G3). A StraightenSpec.Deg wider than this
+// leaves a placement byblos then diverts as rotated, so an editor offering a
+// straighten slider has to clamp to the same number this file diverts on.
+// Kleio hardcoded 2.0 in its slider while this was unexported; read it from
+// here instead.
+const MaxSkewDeg = 2.0
 
 // skewDegrees returns how far the placement's axes lie from the page's axes, in
 // degrees, taking the larger of the two: zero for an axis-aligned placement, the
@@ -294,7 +369,7 @@ func (p PageRaster) CoversPage() bool {
 // is the raster as stored; applying /Rotate is the caller's business.
 //
 // Orientation within content space is a narrower promise: the returned raster
-// is the page as it reads, to within maxSkewDeg. Scanner deskew lives inside
+// is the page as it reads, to within MaxSkewDeg. Scanner deskew lives inside
 // that tolerance — a bulk scanner writes a fraction of a degree into the
 // placement matrix and leaves the pixels raw — so those pages extract as stored,
 // with the residual affine recorded in ImageRef.Placement and, at write time, in
@@ -401,8 +476,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 
 	idx, reason := classify(p.CropBox, scan, d.ImageInfo)
 	if reason != "" {
-		countDivert(reason)
-		return nil, PageProvenance{Diverted: divertClass(reason)}, fmt.Errorf("%w: %s", ErrNotSingleRaster, reason)
+		return refuse(page, reason, fmt.Errorf("%w: %s", ErrNotSingleRaster, reason))
 	}
 
 	placement := scan.Images[idx]
@@ -425,8 +499,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// pdfcpu declined to identify". Naming a missing capability this site
 		// cannot actually identify would be worse than naming none.
 		if errors.Is(err, pdfdoc.ErrUnsupportedCodec) {
-			countDivert("unsupported-codec")
-			return nil, PageProvenance{Diverted: divertClass("unsupported-codec")}, fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err)
+			return refuse(page, "unsupported-codec", fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err))
 		}
 		countFailure()
 		return nil, PageProvenance{}, err
@@ -462,17 +535,14 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// back over an archive for nothing.
 		globals, gerr := d.RawImageGlobals(placement.ID)
 		if gerr != nil {
-			countDivert("unsupported-codec-jbig2")
-			return nil, PageProvenance{Diverted: divertClass("unsupported-codec-jbig2")},
-				fmt.Errorf("%w: jbig2: %v", ErrUnsupportedImageCodec, gerr)
+			return refuse(page, "unsupported-codec-jbig2",
+				fmt.Errorf("%w: jbig2: %v", ErrUnsupportedImageCodec, gerr))
 		}
 		img, err = decodeJBIG2Placement(data, globals, d.ImageInfo, placement.ID)
 		if err != nil {
 			// No fileType interpolation here, unlike the sibling sites: every
 			// error this branch can produce already opens with "jbig2:", so
 			// adding it again would read "jbig2: jbig2: ...".
-			countDivert("unsupported-codec-jbig2")
-			prov := PageProvenance{Diverted: divertClass("unsupported-codec-jbig2")}
 			// THE DIVERT REASON CANNOT SAY THIS AND THE ERROR CAN. Both arms
 			// record "unsupported-codec-jbig2" -- byb-z8j owns the reason
 			// vocabulary and this site does not add to it -- but a coding mode
@@ -485,13 +555,15 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 			// Measured over the pinned sample at 23a3470: 37 pages reach here,
 			// 36 for a coding mode and 1 for damage.
 			if errors.Is(err, ErrUnsupportedJBIG2Feature) {
-				return nil, prov, fmt.Errorf("%w: %v (%w)", ErrUnsupportedImageCodec, err, &NotImplemented{
-					Capability: "decode-jbig2",
-					Why:        "the stream uses a JBIG2 coding mode this build does not decode",
-					Issue:      capabilityIssue["decode-jbig2"],
-				})
+				return refuse(page, "unsupported-codec-jbig2",
+					fmt.Errorf("%w: %v (%w)", ErrUnsupportedImageCodec, err, &NotImplemented{
+						Capability: "decode-jbig2",
+						Why:        "the stream uses a JBIG2 coding mode this build does not decode",
+						Issue:      capabilityIssue["decode-jbig2"],
+					}))
 			}
-			return nil, prov, fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err)
+			return refuse(page, "unsupported-codec-jbig2",
+				fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err))
 		}
 	case "jpx":
 		// As above for the opaque bytes, and unlike jbig2 there is no byblos
@@ -509,13 +581,12 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// arm could be reporting a property of. Every jpx page that reaches this
 		// line does so for the same reason and a future build recovers all of
 		// them together, which is exactly what *NotImplemented means.
-		countDivert("unsupported-codec-jpx")
-		return nil, PageProvenance{Diverted: divertClass("unsupported-codec-jpx")},
+		return refuse(page, "unsupported-codec-jpx",
 			fmt.Errorf("%w: jpx (%w)", ErrUnsupportedImageCodec, &NotImplemented{
 				Capability: "decode-jpx",
 				Why:        "byblos has no JPEG2000 code in either direction and x/image ships no decoder",
 				Issue:      capabilityIssue["decode-jpx"],
-			})
+			}))
 	default:
 		img, _, err = image.Decode(bytes.NewReader(data))
 	}
@@ -547,8 +618,8 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// because internal/jbig2 draws the line itself and says so with
 		// ErrUnsupportedFeature. Give a decoder here the same sentinel (byb-2bx)
 		// and this arm can name its capability the same way.
-		countDivert("unsupported-codec-" + fileType)
-		return nil, PageProvenance{Diverted: divertClass("unsupported-codec-" + fileType)}, fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err)
+		return refuse(page, "unsupported-codec-"+fileType,
+			fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err))
 	}
 	out := &PageRaster{
 		Image:  img,
@@ -619,7 +690,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	// Empty for an axis-aligned placement, which is almost every page
 	// (PageProvenance's doc comment). The off-diagonal terms are exactly what
 	// skewDegrees reads, and classify has already rejected anything past
-	// maxSkewDeg, so what survives here is a scanner deskew.
+	// MaxSkewDeg, so what survives here is a scanner deskew.
 	if m := placement.CTM; !axisAligned(m) {
 		rec.Placement = m[:]
 	}
@@ -908,7 +979,7 @@ func placementReason(p content.Placement) string {
 	// A sub-degree rotation here is scanner deskew, and the raster underneath it
 	// is the raw skewed scan: the page is one page-covering raster and extracts,
 	// with the matrix recorded in ImageRef.Placement (byb-b1.2).
-	if skewDegrees(m) > maxSkewDeg {
+	if skewDegrees(m) > MaxSkewDeg {
 		return "rotated-placement"
 	}
 	// The off-diagonal terms do not pin orientation. A negative scale mirrors

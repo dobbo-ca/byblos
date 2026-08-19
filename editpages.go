@@ -54,6 +54,44 @@ type StraightenSpec = pdfdoc.StraightenSpec
 // applied", which is a claim about this page that byblos cannot make.
 const divertedNotRecorded = "source-unrecorded"
 
+// ValidatePages reports whether BuildFromPages would refuse pages before it
+// opened a single source (gap G2).
+//
+// IT IS THE CHECK A REQUEST HANDLER CAN AFFORD. Kleio accepts an edit list at
+// PUT time and materialises it later, in a worker, off a queue — so a list
+// BuildFromPages refuses surfaces as a failed export minutes later rather than
+// as a 422 the editor can show. This is the half of that refusal that needs no
+// document, no download and no build: the sequence is non-empty, every page
+// names a Source, every Rotate is one of 0/90/180/270, every Straighten.Deg is
+// finite, and no Straighten carries a Crop (still not implemented; gap G1).
+//
+// WHAT IT CANNOT CHECK, AND THIS IS THE HALF THAT MATTERS MOST IN PRACTICE:
+// whether PageSource.Page exists in its source. That needs the source's page
+// count, which needs the document open — Inspect answers it, and a consumer
+// storing a page count of its own can answer it without byblos at all. A nil
+// return here is therefore "nothing structural is wrong", not "this will
+// build". An encrypted source is likewise only refused at build time.
+//
+// It never reads from any Source, so a PageSource whose reader is not yet
+// positioned, or not yet fetched, still validates.
+//
+// A CALLER THAT HAS NO SOURCES YET STILL HAS TO SUPPLY NON-NIL ONES. The
+// nil-Source refusal is a real build precondition and stays, so a handler
+// validating an edit list it has not fetched the documents for passes any
+// non-nil reader -- one shared empty bytes.Reader for the whole list is
+// enough, because nothing here touches it:
+//
+//	var unfetched = bytes.NewReader(nil)
+//	// ... p.Source = unfetched for every page ...
+//	if err := byblos.ValidatePages(pages); err != nil { /* 422 */ }
+//
+// That is deliberate rather than an oversight. Dropping the check would make
+// this function's answer differ from the build's, and the ONE property worth
+// having here is that the two cannot disagree.
+func ValidatePages(pages []PageSource) error {
+	return pdfdoc.ValidatePages(pages)
+}
+
 // BuildFromPages writes a document whose page i is pages[i], and a provenance
 // record that describes it.
 //
