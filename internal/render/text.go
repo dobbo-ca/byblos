@@ -17,8 +17,10 @@ import (
 // fetch; parsing (x/image/font/sfnt) happens here because the outlines could
 // not usefully cross the seam.
 type Font struct {
-	// Program is the raw /FontFile2 sfnt bytes. A program sfnt cannot parse
-	// makes every glyph skip cleanly; the widths below still advance.
+	// Program is the raw font program: /FontFile2 sfnt bytes, or (stage 4d)
+	// /FontFile3 /Subtype /Type1C bare-CFF bytes, told apart by their
+	// headers. A program neither stage can parse makes every glyph skip
+	// cleanly; the widths below still advance.
 	Program []byte
 	// FirstChar and Widths mirror the font dict's /FirstChar and /Widths, in
 	// thousandths of text space (ISO 32000-1 9.2.4). A code outside the array
@@ -32,7 +34,7 @@ type Font struct {
 // font's shows entirely, advance included -- with no Font there are no
 // /Widths to advance by -- where a supplied-but-unparsable Program (see
 // textFont) keeps its widths advancing. Either way a non-embedded font, a
-// Type1/CFF program (stages 4d-4f), or an unresolved name must not stop the
+// Type1 PFB program (stages 4e-4f), or an unresolved name must not stop the
 // rest of the page.
 type FontFor func(name string) (Font, bool)
 
@@ -71,16 +73,25 @@ func (r *renderer) resolveFont(name string) *textFont {
 	// whole glyphs ('x' and 'H', the OS/2 metrics fallback), so a hostile
 	// compound bomb must be caught FIRST -- see glyf.go. A program whose
 	// glyphs cannot all be bounded degrades to widths-only exactly like an
-	// unparsable one: CFF flavour (stages 4d-4f), a collection, malformed
-	// tables, or an expansion past the path budget. Past that gate,
-	// sfnt.Parse bounds its own remaining work against the hostile shapes it
-	// was fuzzed for, and a parse failure degrades the same way, never an
-	// error.
-	if g := parseGlyfIndex(src.Program); g != nil && g.boundedBy(maxPathPoints) {
-		if f, err := sfnt.Parse(src.Program); err == nil {
+	// unparsable one: a collection, malformed tables, or an expansion past
+	// the path budget. Past that gate, sfnt.Parse bounds its own remaining
+	// work against the hostile shapes it was fuzzed for, and a parse failure
+	// degrades the same way, never an error.
+	parse := func(program []byte) {
+		if f, err := sfnt.Parse(program); err == nil {
 			tf.fnt = f
 			tf.upem = float64(f.UnitsPerEm())
 		}
+	}
+	if g := parseGlyfIndex(src.Program); g != nil {
+		if g.boundedBy(maxPathPoints) {
+			parse(src.Program)
+		}
+	} else if otf := cffToSFNT(src.Program); otf != nil {
+		// Stage 4d: a bare CFF (/FontFile3 /Subtype /Type1C), gated and
+		// wrapped by cff.go into the container sfnt parses. Anything else --
+		// Type1 PFB (stage 4e), garbage -- leaves otf nil: widths-only.
+		parse(otf)
 	}
 	r.fontsBy[name] = tf
 	return tf
@@ -209,9 +220,10 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 			c1 := point{p0.x + 2*(q.x-p0.x)/3, p0.y + 2*(q.y-p0.y)/3}
 			c2 := point{end.x + 2*(q.x-end.x)/3, end.y + 2*(q.y-end.y)/3}
 			err = pth.curveTo(r, c1, c2, end)
-			// No SegmentOpCubeTo case: sfnt emits cubics only for CFF
-			// outlines, which resolveFont does not admit (no glyf index);
-			// stage 4d restores it.
+		case sfnt.SegmentOpCubeTo:
+			// Stage 4d: sfnt emits cubics for CFF outlines, already in the
+			// form the 4a flattener speaks.
+			err = pth.curveTo(r, pt(seg.Args[0]), pt(seg.Args[1]), pt(seg.Args[2]))
 		}
 		if err != nil {
 			return err

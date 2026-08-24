@@ -34,8 +34,10 @@
 // sampled nearest-neighbor under the CTM; the caller supplies the DECODED
 // pixels (see ImageFor). Stage 4c adds text: the full text state machinery
 // (BT/ET, Tf, Td/TD/Tm/T*, TL/Tc/Tw/Tz/Ts/Tr, Tj/TJ/'/") and embedded
-// TrueType glyph outlines (see text.go). Form XObjects, shading and inline
-// images are later stages and are ignored here.
+// TrueType glyph outlines (see text.go). Stage 4d adds bare-CFF (Type1C)
+// glyph outlines by wrapping the CFF for the same sfnt machinery -- the
+// spike outcome and the charstring work gate are documented in cff.go. Form
+// XObjects, shading and inline images are later stages and are ignored here.
 //
 // WHY STAGE 4c MIRRORS walk.go's TEXT OPERATORS instead of consuming
 // content.Walk's TextShows: Walk records where each show STARTED (one Trm
