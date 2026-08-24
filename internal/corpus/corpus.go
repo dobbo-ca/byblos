@@ -412,7 +412,7 @@ func InlineImageScan() []byte {
 		" /Contents %d 0 R >>", pages, PageWidthPt, PageHeightPt, cont))
 	pixel := grayPixels(1, 1, 5)
 	content := fmt.Sprintf("q %d 0 0 %d 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID ",
-		PageWidthPt, PageHeightPt) + string(pixel) + " EI Q\n"
+		PageWidthPt, PageHeightPt) + string(pixel) + "EI Q\n"
 	w.fillStream(cont, "", []byte(content))
 	return w.finish(cat)
 }

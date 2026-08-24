@@ -309,9 +309,15 @@ type Scan struct {
 	// lands on top. Form XObjects are walked where they are invoked, so a
 	// placement inside a form sits between the placements around the Do that
 	// reached it. Classification reads occlusion straight off this order.
-	Images    []Placement
-	TextChars int // bytes shown by Tj, TJ, ' and "
-	TextOps   int // number of text-showing operators
+	Images []Placement
+	// InlineImages is a BI ... EI placement per InlineImgs, kept separate from
+	// Images so the many callers that treat Images as "the page's image
+	// XObjects" (extract.go's classify, optimize.go's recompress,
+	// byblos-ctm-census, byblos-annots) are unaffected by byb-js5.6: Inspect
+	// merges the two back into paint order via Index, but nothing else has to.
+	InlineImages []Placement
+	TextChars    int // bytes shown by Tj, TJ, ' and "
+	TextOps      int // number of text-showing operators
 	// InkedTextOps counts only the text-showing operators that were in a
 	// rendering mode which actually paints glyphs. Almost all text on a scanned
 	// page is an invisible OCR layer (3 Tr) and deposits nothing; classification
@@ -501,7 +507,7 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 				box = intersectBox(*gs.clip, box)
 			}
 			s.order++
-			s.Images = append(s.Images, Placement{
+			s.InlineImages = append(s.InlineImages, Placement{
 				CTM: gs.ctm, Box: box, Clip: gs.clip, Opaque: gs.opaque,
 				Index: s.order, Inline: true,
 			})

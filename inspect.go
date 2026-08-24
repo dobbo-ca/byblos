@@ -6,6 +6,7 @@ import (
 	"image"
 	"io"
 	"math"
+	"sort"
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
@@ -270,27 +271,32 @@ func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.
 		s = &content.Scan{}
 	}
 	pi.TextChars = s.TextChars
-	for _, pl := range s.Images {
+	// Images and InlineImages are kept separate on Scan so classify and the
+	// other Scan.Images consumers don't see inline images (walk.go); Inspect
+	// is the one caller that wants both, back in paint order by Index.
+	placements := make([]content.Placement, 0, len(s.Images)+len(s.InlineImages))
+	placements = append(placements, s.Images...)
+	placements = append(placements, s.InlineImages...)
+	sort.Slice(placements, func(i, j int) bool { return placements[i].Index < placements[j].Index })
+	for _, pl := range placements {
 		ref := ImageRef{
 			Bounds:       boxRect(pl.Box),
 			Placement:    [6]float64(pl.CTM),
 			PlacementDeg: placementDeg([6]float64(pl.CTM)),
 			Inline:       pl.Inline,
 		}
-		if !pl.Inline {
-			if info, ok := d.ImageInfo(pl.ID); ok {
-				ref.Width = info.Width
-				ref.Height = info.Height
-				ref.Bitonal = info.BPC == 1 || info.ImageMask
-				ref.Filter = info.Filter
-				ref.ObjNr = info.ObjNr
-				// The four refusals internal/pdfdoc/write.go:205-212 makes, read
-				// off the same ImageInfo that supplies Bitonal above. A negative
-				// ObjNr is a direct object, which has no cross-reference entry to
-				// write a substitution back to.
-				ref.Substitutable = info.ObjNr >= 0 &&
-					!info.SMask && !info.Mask && !info.ImageMask
-			}
+		if info, ok := d.ImageInfo(pl.ID); ok {
+			ref.Width = info.Width
+			ref.Height = info.Height
+			ref.Bitonal = info.BPC == 1 || info.ImageMask
+			ref.Filter = info.Filter
+			ref.ObjNr = info.ObjNr
+			// The four refusals internal/pdfdoc/write.go:205-212 makes, read
+			// off the same ImageInfo that supplies Bitonal above. A negative
+			// ObjNr is a direct object, which has no cross-reference entry to
+			// write a substitution back to.
+			ref.Substitutable = info.ObjNr >= 0 &&
+				!info.SMask && !info.Mask && !info.ImageMask
 		}
 		pi.Images = append(pi.Images, ref)
 	}
