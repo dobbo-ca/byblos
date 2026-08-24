@@ -416,7 +416,13 @@ func (d *doc) Page(n int) (p *Page, err error) {
 	}
 	p.CropBox = p.MediaBox
 	if inh.CropBox != nil {
-		p.CropBox = rectOf(inh.CropBox)
+		// ISO 32000-1 7.7.3.3: the CropBox is to be intersected with the
+		// MediaBox, not taken verbatim -- poppler does this too. An empty
+		// intersection (the two boxes don't overlap at all) falls back to
+		// the MediaBox rather than reporting a degenerate page.
+		if cb, ok := intersectRect(rectOf(inh.CropBox), p.MediaBox); ok {
+			p.CropBox = cb
+		}
 	}
 
 	// A page with no /Contents is legal and empty, and so is a page whose
@@ -811,6 +817,21 @@ func (d *doc) number(o types.Object) (float64, bool) {
 
 func rectOf(r *types.Rectangle) Rect {
 	return Rect{LLX: r.LL.X, LLY: r.LL.Y, URX: r.UR.X, URY: r.UR.Y}
+}
+
+// intersectRect returns the overlap of a and b, and false if they don't
+// overlap at all.
+func intersectRect(a, b Rect) (Rect, bool) {
+	r := Rect{
+		LLX: max(a.LLX, b.LLX),
+		LLY: max(a.LLY, b.LLY),
+		URX: min(a.URX, b.URX),
+		URY: min(a.URY, b.URY),
+	}
+	if r.LLX >= r.URX || r.LLY >= r.URY {
+		return Rect{}, false
+	}
+	return r, true
 }
 
 // --- dereferencing dictionary readers ---------------------------------------
