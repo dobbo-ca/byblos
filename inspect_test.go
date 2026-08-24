@@ -498,3 +498,34 @@ func TestInspectReportsTheDeclaredImageFilter(t *testing.T) {
 		})
 	}
 }
+
+// TestInspectReportsAnInlineImage is byb-js5.6: a page whose only raster is a
+// BI ... EI inline image used to be invisible to Inspect (Images was empty),
+// which measured as 1,235 of the pinned sample's 169,376 pages -- not a
+// theoretical gap.
+func TestInspectReportsAnInlineImage(t *testing.T) {
+	pages, err := Inspect(bytes.NewReader(corpus.InlineImageScan()))
+	if err != nil {
+		t.Fatalf("Inspect(InlineImageScan) error = %v", err)
+	}
+	if len(pages) != 1 {
+		t.Fatalf("got %d pages; want 1", len(pages))
+	}
+	p := pages[0]
+	if len(p.Images) != 1 {
+		t.Fatalf("Images = %+v; want exactly one", p.Images)
+	}
+	img := p.Images[0]
+	if !img.Inline {
+		t.Error("Inline = false; want true for a BI ... EI placement")
+	}
+	if img.Bounds != fullPage {
+		t.Errorf("image Bounds = %v; want %v (page-covering)", img.Bounds, fullPage)
+	}
+	if img.Substitutable {
+		t.Error("Substitutable = true; an inline image has no cross-reference entry to write back to")
+	}
+	if img.ObjNr != 0 || img.Width != 0 || img.Height != 0 || img.Filter != "" {
+		t.Errorf("inline ImageRef carries object-derived fields: %+v; want all zero", img)
+	}
+}

@@ -395,6 +395,28 @@ func bornDigital() []byte {
 	return w.finish(cat)
 }
 
+// InlineImageScan is a one-page document whose only raster is a BI ... ID ...
+// EI inline image (ISO 32000-1 8.9.7), page-covering and with no image
+// XObject anywhere in the page's /Resources. byb-js5.6: 1,235 of the pinned
+// sample's 169,376 pages are shaped exactly like this -- an inline image with
+// no XObject image alongside it -- which byblos.Inspect could not see before
+// that bead. It is not registered in All() because every write-path test
+// iterates the corpus and this document carries no XObject for those tests to
+// exercise; read-path tests reach for it by name, as NoMediaBox does.
+func InlineImageScan() []byte {
+	w := newWriter()
+	cat, pages, page, cont := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Contents %d 0 R >>", pages, PageWidthPt, PageHeightPt, cont))
+	pixel := grayPixels(1, 1, 5)
+	content := fmt.Sprintf("q %d 0 0 %d 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID ",
+		PageWidthPt, PageHeightPt) + string(pixel) + "EI Q\n"
+	w.fillStream(cont, "", []byte(content))
+	return w.finish(cat)
+}
+
 func scan(rotate int) []byte {
 	return scanPlaced(fmt.Sprintf("%d 0 0 %d 0 0", PageWidthPt, PageHeightPt), rotate)
 }

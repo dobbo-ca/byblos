@@ -6,6 +6,7 @@ import (
 	"image"
 	"io"
 	"math"
+	"sort"
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
@@ -92,6 +93,14 @@ type ImageRef struct {
 	Filter        string // the stored raster's declared codec; "" when it declares none
 	ObjNr         int    // the image XObject's PDF object number
 	Substitutable bool   // ReplaceImages will accept this image; see below
+	// Inline reports a BI ... ID ... EI operator (ISO 32000-1 8.9.7) rather
+	// than a Do naming an image XObject. It has no cross-reference entry, so
+	// Width, Height, Filter and ObjNr are always zero and Substitutable is
+	// always false -- there is no object for ReplaceImages to write back to.
+	// A page whose only raster is inline was invisible to Inspect before
+	// byb-js5.6; measured over the pinned sample it is not a theoretical gap:
+	// 1,235 of 169,376 pages carry an inline image and no XObject image.
+	Inline bool
 }
 
 // PageInfo describes one page.
@@ -262,11 +271,19 @@ func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.
 		s = &content.Scan{}
 	}
 	pi.TextChars = s.TextChars
-	for _, pl := range s.Images {
+	// Images and InlineImages are kept separate on Scan so classify and the
+	// other Scan.Images consumers don't see inline images (walk.go); Inspect
+	// is the one caller that wants both, back in paint order by Index.
+	placements := make([]content.Placement, 0, len(s.Images)+len(s.InlineImages))
+	placements = append(placements, s.Images...)
+	placements = append(placements, s.InlineImages...)
+	sort.Slice(placements, func(i, j int) bool { return placements[i].Index < placements[j].Index })
+	for _, pl := range placements {
 		ref := ImageRef{
 			Bounds:       boxRect(pl.Box),
 			Placement:    [6]float64(pl.CTM),
 			PlacementDeg: placementDeg([6]float64(pl.CTM)),
+			Inline:       pl.Inline,
 		}
 		if info, ok := d.ImageInfo(pl.ID); ok {
 			ref.Width = info.Width
