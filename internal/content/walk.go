@@ -178,12 +178,20 @@ type Env interface {
 	ExtGStateOpaque(scope int, name string) bool
 }
 
-// Placement is one painting of an image XObject.
+// Placement is one painting of an image XObject, or of an inline image (see
+// Inline).
 type Placement struct {
 	Name string // resource name at the point of use, for diagnostics
 	ID   int
 	CTM  Matrix
 	Box  Box
+	// Inline reports a BI ... ID ... EI operator rather than a Do naming an
+	// image XObject. An inline image has no resource name and no object
+	// number -- Name is "" and ID is 0 -- because ISO 32000-1 8.9.7 embeds it
+	// in the content stream itself; the box is still the CTM's unit square,
+	// the same convention 8.9.5.1 gives an XObject image, which is why no
+	// other field here needs a separate inline path.
+	Inline bool
 	// Clip is the clip in effect at the moment of painting -- the running
 	// intersection of every W/W* n path and Form /BBox on gstate, in device
 	// space -- or nil when nothing clipped this placement. It is the clip
@@ -488,6 +496,15 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 		}
 		if tok.Kind == KindInlineImage {
 			s.InlineImgs++
+			box := gs.ctm.UnitSquareBox()
+			if gs.clip != nil {
+				box = intersectBox(*gs.clip, box)
+			}
+			s.order++
+			s.Images = append(s.Images, Placement{
+				CTM: gs.ctm, Box: box, Clip: gs.clip, Opaque: gs.opaque,
+				Index: s.order, Inline: true,
+			})
 			ops = ops[:0]
 			continue
 		}

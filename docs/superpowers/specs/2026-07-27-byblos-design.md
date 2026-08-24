@@ -354,6 +354,10 @@ type ImageRef struct {
                                   // substitution map. Read it BESIDE Bitonal, which is
                                   // "1 bpc OR an image mask" and so selects images the
                                   // seam refuses (byb-js5.2).
+    Inline        bool            // a BI ... ID ... EI operator, not a Do naming an
+                                  // XObject. No cross-reference entry, so Width, Height,
+                                  // Filter and ObjNr are always zero and Substitutable is
+                                  // always false (byb-js5.6).
 }
 
 type PageInfo struct {
