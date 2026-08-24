@@ -474,6 +474,11 @@ func (b *Bitmap) Equal(o *Bitmap) bool
 
 func EncodeJBIG2Generic(b *Bitmap) ([]byte, error)   // lossless; see §5
 
+// EncodeJBIG2Image (byb-js5.3) is EncodeJBIG2Generic packaged as a ready
+// EncodedImage, so a caller does not hand-transcribe the seven dictionary
+// entries EncodeJBIG2Generic's doc comment lists.
+func EncodeJBIG2Image(b *Bitmap) (EncodedImage, error)
+
 // Sauvola (byb-jj5) binarizes by local adaptive thresholding, producing the
 // Bitmap EncodeJBIG2Generic takes. Adaptive because a scan with a shadowed
 // gutter has no single global cutoff that works across the page.
@@ -537,6 +542,15 @@ type BuildPage struct {
 
 func BuildPDF(w io.Writer, pages []BuildPage) error
 func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error
+
+// EmbedPNG and EmbedJPEG (byb-js5.5) lift already-encoded image bytes into a
+// ready EncodedImage LOSSLESSLY -- carrying, not re-encoding -- plus the DPI
+// the file declares (0 if it declares none). EmbedPNG refuses alpha (colour
+// types 4/6), interlaced PNGs and 16-bit depth. EmbedJPEG refuses anything
+// but 1 or 3 component frames (matching internal/pdfbuild's DCTDecode
+// allowlist).
+func EmbedPNG(data []byte) (EncodedImage, float64, error)
+func EmbedJPEG(data []byte) (EncodedImage, float64, error)
 
 // --- page editing (G4) ---
 //
