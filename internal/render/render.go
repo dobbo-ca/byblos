@@ -68,8 +68,11 @@ var (
 	// path. 2M points is far past any real page's most complex path.
 	maxPathPoints int64 = 1 << 21
 	// maxFillWork bounds scanline filling, charged one unit per active edge
-	// per scanline, across the whole Page call.
-	maxFillWork int64 = 1 << 27
+	// per scanline AND one per painted pixel, across the whole Page call --
+	// pixel writes dominate large fills, so a budget that skipped them let a
+	// 387 KB stream of full-canvas fills buy ~33 minutes of CPU. 1<<28 units
+	// is four full coats of the largest permitted canvas (maxRasterPixels).
+	maxFillWork int64 = 1 << 28
 )
 
 // Page interprets the vector path operators of the decoded content stream src
@@ -573,7 +576,7 @@ func (r *renderer) fillSubpaths(subs []subpath, evenOdd bool, clip clipRect, col
 			continue
 		}
 		for i := 0; i+1 < len(s.pts); i++ {
-			edges = append(edges, addEdge(nil, s.pts[i], s.pts[i+1])...)
+			edges = addEdge(edges, s.pts[i], s.pts[i+1])
 		}
 		edges = addEdge(edges, s.pts[len(s.pts)-1], s.pts[0])
 	}
@@ -645,7 +648,16 @@ func (r *renderer) fillEdges(edges []edge, evenOdd bool, clip clipRect, col colo
 			if !inside || i+1 >= len(xs) {
 				continue
 			}
-			for x := max(px0, int(math.Ceil(c.x-0.5))); x < min(px1, int(math.Ceil(xs[i+1].x-0.5))); x++ {
+			xa := max(px0, int(math.Ceil(c.x-0.5)))
+			xb := min(px1, int(math.Ceil(xs[i+1].x-0.5)))
+			if xb <= xa {
+				continue
+			}
+			r.fillWork += int64(xb - xa)
+			if r.fillWork > maxFillWork {
+				return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+			}
+			for x := xa; x < xb; x++ {
 				r.img.SetRGBA(x, y, col)
 			}
 		}
@@ -653,44 +665,49 @@ func (r *renderer) fillEdges(edges []edge, evenOdd bool, clip clipRect, col colo
 	return nil
 }
 
-// strokeSubpaths widens each subpath's segments into rectangles, adds a join
-// polygon at every shared vertex, and fills the lot with nonzero winding --
-// overlaps union because every polygon is emitted with the same orientation.
-// Caps are butt (the PDF default); joins are octagons circumscribing the
-// round join's circle, correct for the common case. A width of zero is the
-// thinnest renderable line (ISO 32000-1 8.4.3.2), one device pixel, and any
-// width thinner than a pixel still marks -- so the half-width floors at 0.5.
+// strokeSubpaths widens each subpath's segments into rectangles and adds a
+// join polygon at every shared vertex. Each polygon is filled the moment it
+// is built: same-colour opaque fills union pixel-for-pixel with filling the
+// whole pile at once, and the edge buffer stays O(1) instead of ~12 edges
+// per budgeted path point -- accumulation let MB-scale streams peak at GiB
+// of edges before the first budget check, violating the package's
+// refuse-before-allocating rule. Caps are butt (the PDF default); joins are
+// octagons circumscribing the round join's circle, correct for the common
+// case. A width of zero is the thinnest renderable line (ISO 32000-1
+// 8.4.3.2), one device pixel, and any width thinner than a pixel still
+// marks -- so the half-width floors at 0.5.
 func (r *renderer) strokeSubpaths(subs []subpath, gs gstate, clip clipRect) error {
 	half := math.Max(gs.lineWidth*deviceScale(gs.ctm)/2, 0.5)
-	var edges []edge
-	quad := func(a, b point) {
+	edges := make([]edge, 0, 8)
+	fillRing := func(pts []point) error {
+		edges = edges[:0]
+		for i := range pts {
+			edges = addEdge(edges, pts[i], pts[(i+1)%len(pts)])
+		}
+		return r.fillEdges(edges, false, clip, gs.stroke.rgba)
+	}
+	quad := func(a, b point) error {
 		dx, dy := b.x-a.x, b.y-a.y
 		l := math.Hypot(dx, dy)
 		if l == 0 {
-			return
+			return nil
 		}
 		nx, ny := -dy/l*half, dx/l*half
 		q := [4]point{
 			{a.x + nx, a.y + ny}, {b.x + nx, b.y + ny},
 			{b.x - nx, b.y - ny}, {a.x - nx, a.y - ny},
 		}
-		for i := range q {
-			edges = addEdge(edges, q[i], q[(i+1)%4])
-		}
+		return fillRing(q[:])
 	}
-	// Octagon circumscribing the radius-half circle, emitted clockwise in
-	// device space to match quad's orientation (nonzero overlap must add,
-	// not cancel).
-	join := func(c point) {
+	// Octagon circumscribing the radius-half circle.
+	join := func(c point) error {
 		rad := half / math.Cos(math.Pi/8)
 		var q [8]point
 		for i := range q {
 			a := -2 * math.Pi * float64(i) / 8
 			q[i] = point{c.x + rad*math.Cos(a), c.y + rad*math.Sin(a)}
 		}
-		for i := range q {
-			edges = addEdge(edges, q[i], q[(i+1)%8])
-		}
+		return fillRing(q[:])
 	}
 	for _, s := range subs {
 		n := len(s.pts)
@@ -698,18 +715,28 @@ func (r *renderer) strokeSubpaths(subs []subpath, gs gstate, clip clipRect) erro
 			continue
 		}
 		for i := 0; i+1 < n; i++ {
-			quad(s.pts[i], s.pts[i+1])
+			if err := quad(s.pts[i], s.pts[i+1]); err != nil {
+				return err
+			}
 		}
 		for i := 1; i+1 < n; i++ {
-			join(s.pts[i])
+			if err := join(s.pts[i]); err != nil {
+				return err
+			}
 		}
 		if s.closed {
-			quad(s.pts[n-1], s.pts[0])
-			join(s.pts[0])
-			join(s.pts[n-1])
+			if err := quad(s.pts[n-1], s.pts[0]); err != nil {
+				return err
+			}
+			if err := join(s.pts[0]); err != nil {
+				return err
+			}
+			if err := join(s.pts[n-1]); err != nil {
+				return err
+			}
 		}
 	}
-	return r.fillEdges(edges, false, clip, gs.stroke.rgba)
+	return nil
 }
 
 // deviceScale is walk.go's: how much the CTM magnifies lengths, exact for

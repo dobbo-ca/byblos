@@ -1,6 +1,7 @@
 package render
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
@@ -253,6 +254,118 @@ func TestContextCancellation(t *testing.T) {
 	src := strings.Repeat("10 20 30 40 re f ", 100)
 	if _, err := Page(ctx, []byte(src), box100, 1); err == nil {
 		t.Fatal("Page ignored a cancelled context")
+	}
+}
+
+// TestStrokeColorOperators: G/RG/CS/SCN drive the STROKE colour, not the
+// fill colour -- the other stroke tests use the default black, which routing
+// these operators to gs.fill would leave untouched.
+func TestStrokeColorOperators(t *testing.T) {
+	img := render100(t, "1 0 0 RG 4 w 10 50 m 90 50 l S")
+	assertRect(t, img, 10, 90, 48, 52, red)
+	img = render100(t, "/DeviceRGB CS 0 0 1 SCN 4 w 10 50 m 90 50 l S")
+	assertRect(t, img, 10, 90, 48, 52, blue)
+	img = render100(t, "0.5 G 4 w 10 50 m 90 50 l S")
+	assertRect(t, img, 10, 90, 48, 52, color.RGBA{128, 128, 128, 255})
+}
+
+// TestFillStrokeOperatorB: B both fills (with the fill colour) and strokes
+// (with the stroke colour) in one operator.
+func TestFillStrokeOperatorB(t *testing.T) {
+	img := render100(t, "1 0 0 rg 0 0 1 RG 8 w 20 20 60 60 re B")
+	for _, p := range []struct {
+		ux, uy int
+		want   color.RGBA
+		what   string
+	}{
+		{50, 50, red, "interior fill"},
+		{20, 50, blue, "stroke centred on the left edge"},
+		{17, 50, blue, "stroke spread outside the edge"},
+		{10, 50, white, "beyond the stroke"},
+	} {
+		if got := pixelAt(img, p.ux, 100-p.uy); got != p.want {
+			t.Errorf("%s at user (%d,%d) = %v; want %v", p.what, p.ux, p.uy, got, p.want)
+		}
+	}
+}
+
+// TestEvenOddFillStrokeOperator: b* fills even-odd (the inner rectangle is a
+// hole) and strokes the path.
+func TestEvenOddFillStrokeOperator(t *testing.T) {
+	img := render100(t, "1 0 0 rg 4 w 20 20 60 60 re 35 35 30 30 re b*")
+	for _, p := range []struct {
+		ux, uy int
+		want   color.RGBA
+		what   string
+	}{
+		{50, 50, white, "even-odd hole"},
+		{27, 50, red, "ring fill"},
+		{20, 50, black, "stroked outer edge"},
+		{35, 50, black, "stroked inner edge"},
+	} {
+		if got := pixelAt(img, p.ux, 100-p.uy); got != p.want {
+			t.Errorf("%s at user (%d,%d) = %v; want %v", p.what, p.ux, p.uy, got, p.want)
+		}
+	}
+}
+
+// TestCloseStrokeOperator: s closes the subpath before stroking, so the
+// closing diagonal of the L is inked; the same path under S leaves it bare.
+// This is the only operator sequence that reaches the closed-subpath stroke
+// block via an explicit close.
+func TestCloseStrokeOperator(t *testing.T) {
+	img := render100(t, "0 g 4 w 20 20 m 20 80 l 80 80 l s")
+	if got := pixelAt(img, 50, 50); got != black {
+		t.Errorf("closing segment midpoint = %v; want black", got)
+	}
+	img = render100(t, "0 g 4 w 20 20 m 20 80 l 80 80 l S")
+	if got := pixelAt(img, 50, 50); got != white {
+		t.Errorf("S must not close: midpoint = %v; want white", got)
+	}
+}
+
+// TestVYCurveOperators pins the operand-to-control-point mapping of v and y
+// (ISO 32000-1 table 59) by requiring pixel identity with the equivalent c
+// operator. Swapping the two mappings moves ~90 boundary pixels, so the two
+// rasters must also differ from each other.
+func TestVYCurveOperators(t *testing.T) {
+	yImg := render100(t, "0 g 10 10 m 10 90 90 10 y h f")
+	yRef := render100(t, "0 g 10 10 m 10 90 90 10 90 10 c h f")
+	vImg := render100(t, "0 g 10 10 m 10 90 90 10 v h f")
+	vRef := render100(t, "0 g 10 10 m 10 10 10 90 90 10 c h f")
+	if !bytes.Equal(yImg.Pix, yRef.Pix) {
+		t.Error("y does not match its c equivalent (c1=(x1,y1), c2=endpoint)")
+	}
+	if !bytes.Equal(vImg.Pix, vRef.Pix) {
+		t.Error("v does not match its c equivalent (c1=current point)")
+	}
+	if bytes.Equal(yImg.Pix, vImg.Pix) {
+		t.Error("y and v produced identical rasters; the two mappings have collapsed")
+	}
+	if got := pixelAt(yImg, 30, 100-30); got != black {
+		t.Errorf("y curve fill interior = %v; want black", got)
+	}
+}
+
+// TestFillPixelWorkBudget: painted pixels are charged against maxFillWork,
+// not just active edges. A full-canvas rectangle charges 3 edge units per
+// row (300 total, under this budget) but 100 pixels per row, which must
+// trip it.
+func TestFillPixelWorkBudget(t *testing.T) {
+	defer func(v int64) { maxFillWork = v }(maxFillWork)
+	maxFillWork = 350
+	if _, err := Page(context.Background(), []byte("0 g 0 0 100 100 re f"), box100, 1); err == nil {
+		t.Fatal("Page accepted pixel-fill work beyond the budget")
+	}
+}
+
+// TestStrokeWorkBudget: stroke rasterisation goes through the same budgeted
+// scanline filler as fills, so a stroke is cut off too.
+func TestStrokeWorkBudget(t *testing.T) {
+	defer func(v int64) { maxFillWork = v }(maxFillWork)
+	maxFillWork = 16
+	if _, err := Page(context.Background(), []byte("0 g 4 w 10 10 m 90 90 l S"), box100, 1); err == nil {
+		t.Fatal("Page accepted stroke work beyond the budget")
 	}
 }
 
