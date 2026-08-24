@@ -48,6 +48,7 @@ jobs:
             fi
           done
           exit $fail
+      - run: gofmt -l $(git ls-files '*.go') | tee /dev/stderr | (! read)
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./... -v

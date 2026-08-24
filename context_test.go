@@ -146,8 +146,11 @@ type entryPoint struct {
 func nineEntryPoints() []entryPoint {
 	return []entryPoint{
 		{
-			name:  "Inspect", perPageBoundary: true,
-			call:  func(c context.Context, f fixture, _ io.Writer) error { _, e := InspectContext(c, bytes.NewReader(f.doc)); return e },
+			name: "Inspect", perPageBoundary: true,
+			call: func(c context.Context, f fixture, _ io.Writer) error {
+				_, e := InspectContext(c, bytes.NewReader(f.doc))
+				return e
+			},
 			plain: func(f fixture, _ io.Writer) error { _, e := Inspect(bytes.NewReader(f.doc)); return e },
 		},
 		{
@@ -175,7 +178,7 @@ func nineEntryPoints() []entryPoint {
 			writesTo: true,
 		},
 		{
-			name:     "BuildPDF", perPageBoundary: true,
+			name: "BuildPDF", perPageBoundary: true,
 			call:     func(c context.Context, f fixture, w io.Writer) error { return BuildPDFContext(c, w, f.pages) },
 			plain:    func(f fixture, w io.Writer) error { return BuildPDF(w, f.pages) },
 			writesTo: true,
