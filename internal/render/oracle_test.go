@@ -127,7 +127,7 @@ func TestRenderAgreesWithPdftoppm(t *testing.T) {
 	oracle := pdftoppmPNG(t, vectorPDF(oracleContent, 200, 200))
 
 	box := content.Box{LLX: 0, LLY: 0, URX: 200, URY: 200}
-	got, err := Page(context.Background(), []byte(oracleContent), box, 1, nil)
+	got, err := Page(context.Background(), []byte(oracleContent), box, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestRenderAgreesWithPdftoppm(t *testing.T) {
 
 	// The null check: a blank canvas must not pass the metric, or the metric
 	// measures nothing.
-	blank, err := Page(context.Background(), nil, box, 1, nil)
+	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page(blank): %v", err)
 	}
@@ -227,7 +227,7 @@ func TestImagesAgreeWithPdftoppm(t *testing.T) {
 		t.Fatalf("Page(1): %v", err)
 	}
 	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
-	got, err := Page(context.Background(), p.Content, box, 1, pdfdocImages(d, p))
+	got, err := Page(context.Background(), p.Content, box, 1, pdfdocImages(d, p), nil)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -239,12 +239,90 @@ func TestImagesAgreeWithPdftoppm(t *testing.T) {
 			frac*100, tolerance*100)
 	}
 
-	blank, err := Page(context.Background(), nil, box, 1, nil)
+	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page(blank): %v", err)
 	}
 	if frac := mismatchFraction(t, blank, oracle); frac <= tolerance {
 		t.Errorf("a BLANK raster is within tolerance of pdftoppm (%.1f%% mismatch); the image oracle metric is broken", frac*100)
+	}
+}
+
+// oracleTTF is a three-glyph TrueType font for the text oracle: 'A' a
+// square, 'B' a triangle, 'C' a diamond of four quadratic curves -- three
+// distinct asymmetric shapes so a wrong code-to-glyph mapping, a flipped
+// outline, or an unflattened curve cannot pass by luck.
+func oracleTTF() []byte {
+	square := squareGlyph()
+	triangle := [][]gpt{{{0, 0, false}, {600, 0, false}, {300, 500, false}}}
+	diamond := [][]gpt{{
+		{250, 0, false}, {500, 0, true}, {500, 250, false}, {500, 500, true},
+		{250, 500, false}, {0, 500, true}, {0, 250, false}, {0, 0, true},
+	}}
+	return buildTTF('A', [][][]gpt{square, triangle, diamond}, []uint16{600, 700, 550})
+}
+
+// textOracleContent shows two lines of text at different sizes, with a TJ
+// adjustment on the second, so widths, line moves and the adjustment all land
+// in the oracle comparison. The sizes are large enough that a blank canvas
+// fails the tolerance, which the null check below depends on.
+const textOracleContent = "BT /F1 72 Tf 1 0 0 1 10 110 Tm (ABC) Tj " +
+	"48 Tf 0 -90 Td [(AB) -400 (C)] TJ ET"
+
+// textPDF embeds oracleTTF as /FontFile2 in a simple TrueType font dict
+// showing textOracleContent.
+func textPDF() []byte {
+	ttf := string(oracleTTF())
+	const textContent = textOracleContent
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
+			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
+		"<< /Type /Font /Subtype /TrueType /BaseFont /BbOracle /FirstChar 65" +
+			" /LastChar 67 /Widths [600 700 550] /Encoding /WinAnsiEncoding" +
+			" /FontDescriptor 6 0 R >>",
+		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 32" +
+			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
+			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile2 7 0 R >>",
+		fmt.Sprintf("<< /Length %d /Length1 %d >>\nstream\n%s\nendstream", len(ttf), len(ttf), ttf),
+	})
+}
+
+// TestTextAgreesWithPdftoppm is byb-8b9.3's second acceptance clause: a page
+// of embedded-TrueType text rasterises within tolerance of pdftoppm, and the
+// blank null must fail the metric. The renderer sees the same /FontFile2
+// bytes and /Widths the PDF carries, through the FontFor seam.
+func TestTextAgreesWithPdftoppm(t *testing.T) {
+	pdf := textPDF()
+	oracle := pdftoppmPNG(t, pdf)
+
+	fonts := func(name string) (Font, bool) {
+		if name != "F1" {
+			return Font{}, false
+		}
+		return Font{Program: oracleTTF(), FirstChar: 65, Widths: []float64{600, 700, 550}}, true
+	}
+	box := content.Box{URX: 200, URY: 200}
+	got, err := Page(context.Background(), []byte(textOracleContent), box, 1, nil, fonts)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	const tolerance = 0.05
+	frac := mismatchFraction(t, got, oracle)
+	t.Logf("text mismatch vs pdftoppm: %.2f%% of pixels", frac*100)
+	if frac > tolerance {
+		t.Errorf("text page disagrees with pdftoppm on %.1f%% of pixels; tolerance %.0f%%",
+			frac*100, tolerance*100)
+	}
+
+	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
+	if err != nil {
+		t.Fatalf("Page(blank): %v", err)
+	}
+	if frac := mismatchFraction(t, blank, oracle); frac <= tolerance {
+		t.Errorf("a BLANK raster is within tolerance of pdftoppm (%.1f%% mismatch); the text oracle metric is broken", frac*100)
 	}
 }
 
@@ -289,7 +367,7 @@ func TestOneImageMatchesExtractPageRaster(t *testing.T) {
 		t.Fatalf("Page(1): %v", err)
 	}
 	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
-	got, err := Page(context.Background(), p.Content, box, 1, pdfdocImages(d, p))
+	got, err := Page(context.Background(), p.Content, box, 1, pdfdocImages(d, p), nil)
 	if err != nil {
 		t.Fatalf("render.Page: %v", err)
 	}

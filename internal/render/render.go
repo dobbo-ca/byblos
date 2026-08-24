@@ -32,8 +32,22 @@
 // clip (W/W* intersect the clip with the path's device bounding box, the
 // same approximation walk.go uses). Stage 4b adds Do for image XObjects,
 // sampled nearest-neighbor under the CTM; the caller supplies the DECODED
-// pixels (see ImageFor). Text, form XObjects, shading and inline images are
-// later stages and are ignored here.
+// pixels (see ImageFor). Stage 4c adds text: the full text state machinery
+// (BT/ET, Tf, Td/TD/Tm/T*, TL/Tc/Tw/Tz/Ts/Tr, Tj/TJ/'/") and embedded
+// TrueType glyph outlines (see text.go). Form XObjects, shading and inline
+// images are later stages and are ignored here.
+//
+// WHY STAGE 4c MIRRORS walk.go's TEXT OPERATORS instead of consuming
+// content.Walk's TextShows: Walk records where each show STARTED (one Trm
+// per string), but rendering needs a position per GLYPH -- the /Widths
+// advance and TJ adjustments happen inside the show -- and it needs each
+// show painted in operator order between the fills around it, where Walk
+// hands back a flat record after the fact. Mirroring the dozen text-state
+// cases here (the same choice 4a already made for the path operators, and
+// the same operator semantics walk.go pins with its own tests) is smaller
+// than re-interleaving Walk's output, and the two walkers stay two readers
+// of the same tokens. Deviations would show up as byb-8b9.3's oracle test
+// disagreeing with walk_test.go's quad fixtures.
 //
 // Untrusted input: the page box and scale come out of the file, so raster
 // dimensions are clamped before allocation; flattened path points and
@@ -112,8 +126,9 @@ type ImageFor func(name string) (Image, bool)
 // and rasterises them onto a white, opaque canvas. box is the page box in PDF
 // points (user space, y up); scale is device pixels per point, so the canvas
 // is box's size times scale with device row 0 at the TOP of the page.
-// images resolves Do operands; nil renders paths only.
-func Page(ctx context.Context, src []byte, box content.Box, scale float64, images ImageFor) (*image.RGBA, error) {
+// images resolves Do operands and fonts resolves Tf operands; either may be
+// nil to render without images or without text.
+func Page(ctx context.Context, src []byte, box content.Box, scale float64, images ImageFor, fonts FontFor) (*image.RGBA, error) {
 	w, h, err := rasterSize(box, scale)
 	if err != nil {
 		return nil, err
@@ -122,14 +137,17 @@ func Page(ctx context.Context, src []byte, box content.Box, scale float64, image
 	for i := range img.Pix {
 		img.Pix[i] = 0xff
 	}
-	r := &renderer{img: img, images: images}
+	r := &renderer{img: img, images: images, fonts: fonts}
 	// User space to device space: scale, then flip y so user URY lands on
 	// device row 0. Row-vector convention, like content.Matrix.
 	base := content.Matrix{scale, 0, 0, -scale, -box.LLX * scale, box.URY * scale}
 	// ISO 32000-1 8.4.1's initial graphics state for the parts tracked here:
 	// DeviceGray black for both colours, line width 1.
 	ink := colorState{space: "DeviceGray", rgba: color.RGBA{0, 0, 0, 255}}
-	err = r.run(ctx, src, gstate{ctm: base, lineWidth: 1, fill: ink, stroke: ink})
+	err = r.run(ctx, src, gstate{
+		ctm: base, lineWidth: 1, fill: ink, stroke: ink,
+		tm: content.Identity, tlm: content.Identity, hscale: 1,
+	})
 	return img, err
 }
 
@@ -159,6 +177,28 @@ type gstate struct {
 	// clipped yet. Rectangular only in this stage: W/W* contribute the
 	// path's device bounding box, walk.go's approximation.
 	clip *clipRect
+
+	// Text state (ISO 32000-1 9.3). The parameters are graphics state (table
+	// 52), so q/Q saving them as a unit is the spec's behaviour; tm and tlm
+	// are strictly BT..ET-scoped but live here anyway, walk.go's documented
+	// simplification, because q/Q nesting then handles them for free and BT
+	// resets both.
+	tm, tlm  content.Matrix
+	font     *textFont // Tf resolution; nil skips shows entirely
+	fontSize float64   // Tfs
+	charSp   float64   // Tc
+	wordSp   float64   // Tw
+	hscale   float64   // Tz / 100, initially 1
+	leading  float64   // TL
+	rise     float64   // Ts
+	tr       int       // Tr rendering mode
+}
+
+// nextLine is walk.go's: Td, TD, T*, and the implicit advance of ' and "
+// move the line matrix and the text matrix follows it (ISO 32000-1 9.4.2).
+func (gs *gstate) nextLine(tx, ty float64) {
+	gs.tlm = content.Matrix{1, 0, 0, 1, tx, ty}.Mul(gs.tlm)
+	gs.tm = gs.tlm
 }
 
 type clipRect struct{ x0, y0, x1, y1 float64 }
@@ -222,8 +262,10 @@ type subpath struct {
 type renderer struct {
 	img      *image.RGBA
 	images   ImageFor
-	points   int64 // flattened points held for the current path
-	fillWork int64 // active-edge x scanline units spent
+	fonts    FontFor
+	fontsBy  map[string]*textFont // Tf resolutions, nil entry = known unusable
+	points   int64                // flattened points held for the current path
+	fillWork int64                // active-edge x scanline units spent
 }
 
 // path is the current path under construction, all points already in device
@@ -410,6 +452,90 @@ func (r *renderer) run(ctx context.Context, src []byte, gs gstate) error {
 			gs.fill.setComps(numberOperands(ops))
 		case "SC", "SCN":
 			gs.stroke.setComps(numberOperands(ops))
+
+		// Text (stage 4c, byb-8b9.3): the same operator semantics as
+		// walk.go's text state, feeding glyph outlines to the fill machinery.
+		// ET needs no case -- BT resets both matrices, and the state
+		// parameters persist across text objects (table 104).
+		case "BT":
+			gs.tm, gs.tlm = content.Identity, content.Identity
+		case "Tf":
+			gs.font = r.resolveFont(lastName(ops))
+			if v, ok := lastFinite(ops); ok {
+				gs.fontSize = v
+			}
+		case "Td":
+			if n := numberOperands(ops); len(n) >= 2 {
+				gs.nextLine(n[len(n)-2], n[len(n)-1])
+			}
+		case "TD":
+			if n := numberOperands(ops); len(n) >= 2 {
+				gs.leading = -n[len(n)-1]
+				gs.nextLine(n[len(n)-2], n[len(n)-1])
+			}
+		case "Tm":
+			if m, ok := matrixOperands(ops); ok {
+				gs.tm, gs.tlm = m, m
+			}
+		case "T*":
+			gs.nextLine(0, -gs.leading)
+		case "TL":
+			if v, ok := lastFinite(ops); ok {
+				gs.leading = v
+			}
+		case "Tc":
+			if v, ok := lastFinite(ops); ok {
+				gs.charSp = v
+			}
+		case "Tw":
+			if v, ok := lastFinite(ops); ok {
+				gs.wordSp = v
+			}
+		case "Tz":
+			if v, ok := lastFinite(ops); ok {
+				gs.hscale = v / 100
+			}
+		case "Ts":
+			if v, ok := lastFinite(ops); ok {
+				gs.rise = v
+			}
+		case "Tr":
+			if v, ok := lastFinite(ops); ok {
+				gs.tr = int(v)
+			}
+		case "Tj", "'", "\"":
+			if op == "\"" {
+				// " sets word and character spacing from its two leading
+				// operands, then behaves as ' (ISO 32000-1 table 109).
+				if n := numberOperands(ops); len(n) >= 2 {
+					gs.wordSp, gs.charSp = n[len(n)-2], n[len(n)-1]
+				}
+			}
+			if op != "Tj" {
+				// ' and " advance to the next line BEFORE showing.
+				gs.nextLine(0, -gs.leading)
+			}
+			for i := len(ops) - 1; i >= 0; i-- {
+				if ops[i].Kind == content.KindString {
+					if err := r.showText(&gs, ops[i].Text); err != nil {
+						return err
+					}
+					break
+				}
+			}
+		case "TJ":
+			for _, o := range ops {
+				switch o.Kind {
+				case content.KindString:
+					if err := r.showText(&gs, o.Text); err != nil {
+						return err
+					}
+				case content.KindNumber:
+					// Subtracted from the displacement, in thousandths of
+					// unscaled text space (9.4.3).
+					gs.tm = content.Matrix{1, 0, 0, 1, -o.Num / 1000 * gs.fontSize * gs.hscale, 0}.Mul(gs.tm)
+				}
+			}
 
 		case "m":
 			if pt, ok := lastPoint(ops, gs.ctm); ok {
@@ -940,6 +1066,21 @@ func matrixOperands(ops []content.Token) (content.Matrix, bool) {
 		}
 	}
 	return m, true
+}
+
+// lastFinite is the last numeric operand, rejecting NaN and Inf: text state
+// parameters multiply into device coordinates, and a non-finite one admitted
+// here would be caught only glyph-by-glyph in fillGlyph.
+func lastFinite(ops []content.Token) (float64, bool) {
+	nums := numberOperands(ops)
+	if len(nums) == 0 {
+		return 0, false
+	}
+	v := nums[len(nums)-1]
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false
+	}
+	return v, true
 }
 
 func lastName(ops []content.Token) string {

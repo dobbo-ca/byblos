@@ -56,9 +56,16 @@ func TestNoFormatRegisteringImageDecoderIsImported(t *testing.T) {
 	// internal/jbig2/fixtures_test.go already uses it. draw is the resampler
 	// byb-b3 needs; `go list -deps golang.org/x/image/draw` is the standard
 	// library plus golang.org/x/image/math/f64, and neither registers.
+	// font/sfnt and math/fixed are the TrueType parser stage 4c (byb-8b9.3)
+	// needs: checked by grep for image.RegisterFormat over font/ and math/ in
+	// x/image v0.41.0 -- zero hits, and sfnt's transitive deps beyond the
+	// stdlib are x/image/font, math/fixed and x/text/encoding/charmap, none
+	// of which register either.
 	allowed := map[string]bool{
-		"golang.org/x/image/ccitt": true,
-		"golang.org/x/image/draw":  true,
+		"golang.org/x/image/ccitt":      true,
+		"golang.org/x/image/draw":       true,
+		"golang.org/x/image/font/sfnt":  true,
+		"golang.org/x/image/math/fixed": true,
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		pkg, rest, _ := strings.Cut(line, " ")
