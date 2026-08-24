@@ -261,12 +261,12 @@ func (d *doc) ReplaceImage(id int, img EncodedImage) (err error) {
 // deliberately skips validation (see its doc comment); a file Byblos accepted
 // on the way in must not be rejected on the way out.
 //
-// The output is byte-deterministic: pdfcpu's per-run stamps are pinned after
-// the fact, using the Info dates Open captured (see deterministic.go,
-// byb-c53).
+// The output is byte-deterministic: the bytes are a pure function of the
+// context's content (see deterministic.go, byb-c53), except for encrypted
+// documents, which fail open to pdfcpu's writer.
 func (d *doc) Write(w io.Writer) (err error) {
 	defer catchPanic("write", &err)
-	if err := writePinned(d.ctx, w, d.creationDate, d.modDate, d.hadID); err != nil {
+	if err := writeDeterministic(d.ctx, w); err != nil {
 		return fmt.Errorf("byblos/pdfdoc: write: %w", err)
 	}
 	return nil

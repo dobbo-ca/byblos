@@ -22,18 +22,15 @@ import (
 // non-PDF rs is reported here rather than producing corrupt output.
 //
 // Those two calls are made here directly rather than through api.Optimize:
-// the context must be visible between read and write so the input's Info
-// dates can be captured before pdfcpu's writer stamps over them, and the
-// write goes through writePinned for byte-deterministic output (byb-c53,
-// deterministic.go).
+// the write goes through writeDeterministic for byte-deterministic output
+// (byb-c53, deterministic.go).
 func Optimize(rs io.ReadSeeker, w io.Writer) (err error) {
 	defer catchPanic("optimize", &err)
 	ctx, err := api.ReadValidateAndOptimize(rs, defaultConfig())
 	if err != nil {
 		return fmt.Errorf("byblos/pdfdoc: optimize: %w", err)
 	}
-	creation, mod := infoDates(ctx)
-	if err := writePinned(ctx, w, creation, mod, ctx.ID != nil); err != nil {
+	if err := writeDeterministic(ctx, w); err != nil {
 		return fmt.Errorf("byblos/pdfdoc: optimize: %w", err)
 	}
 	return nil

@@ -2,60 +2,57 @@ package pdfdoc
 
 // Deterministic pdfcpu output (byb-c53).
 //
-// pdfcpu v0.13.0's writer injects two per-run values on EVERY write, with no
-// Configuration knob gating either: ensureInfoDict (info.go) stamps
-// CreationDate/ModDate with time.Now() at second resolution plus a Producer
-// line, and fileID (crypto.go) hashes time.Now() nanoseconds into the
-// trailer's /ID. The same input written twice therefore yields two different
-// files with two different hashes — which breaks deduplication,
-// content-addressed storage and any integrity check that re-derives a
-// document and compares (byblos is a library for an archive that stores what
-// it produces).
+// pdfcpu v0.13.0's writer is nondeterministic three ways, and only the first
+// two are stamps that could be patched after the fact: ensureInfoDict
+// (info.go) writes CreationDate/ModDate from time.Now(), fileID (crypto.go)
+// hashes time.Now() nanoseconds into the trailer's /ID -- and writeDeepDict
+// (writeObjects.go) emits referenced objects in Go MAP ITERATION order, so
+// object order, xref offsets and object-stream interiors shuffle from run to
+// run with no knob to stop it. Measured on this repo's corpus: the same
+// StampTextLayer call produced 2 distinct outputs in 6 runs. That breaks
+// deduplication, content-addressed storage and any integrity check that
+// re-derives a document and compares (byblos is a library for an archive that
+// stores what it produces).
+//
+// The only fix that covers all three is to not let pdfcpu's traversal hold
+// the pen: writeDeterministic serializes the context itself, with the same
+// primitives the Annex F linearizer already uses on arbitrary read documents
+// (liveObjects, serialize, auditSerializable -- linearize.go). Objects are
+// renumbered contiguously in ascending source-number order; non-stream
+// objects are packed into one object stream and the trailer is a
+// cross-reference stream, mirroring the compressed layout pdfcpu would have
+// used (see deterministicBytes for the measured size cost of not doing so).
+// The per-run stamps become pure functions of the input:
+//
+//   - CreationDate/ModDate are the input document's own dates, normalized to
+//     the fixed 23-byte D:YYYYMMDDHHMMSS±HH'MM' form (preserving their UTC
+//     offset), or the constant pinnedDate when it had none.
+//
+//   - /ID keeps the input's first element when the input carried an /ID (ISO
+//     32000-1 14.4 makes it the document's permanent identity) and derives
+//     the second from an md5 of the emitted body -- still a fingerprint of
+//     the file, but a deterministic one.
 //
 // Determinism is the DEFAULT, not an option: nondeterminism here is never a
-// feature anyone asks for, every caller of this package benefits, and an
-// opt-in flag would leave the archive's default behaviour broken. The Producer
-// stamp is a constant per pdfcpu version and needs no pin.
+// feature anyone asks for, and an opt-in flag would leave the archive's
+// default behaviour broken.
 //
-// The mechanism is a post-write in-place patch. pdfcpu offers no pin, so
-// writePinned serializes to a buffer and overwrites the stamps there:
-//
-//   - Both date stamps are fixed-length plaintext (verified against v0.13.0:
-//     types.DateString always renders 23 bytes for a 4-digit year, and the
-//     Info dict is written as a top-level plaintext object — writeObjects
-//     runs writeDocumentInfoDict after every object-stream phase has been
-//     stopObjectStream'd, so the dates never land inside a compressed
-//     stream). They are found by exact value: the writer stamped some second
-//     in [from, to], so only a date equal to one of those candidate seconds
-//     is touched — an input document's own dates elsewhere (annotation
-//     /CreationDate, say) cannot match. Each stamp is replaced with the
-//     input document's own date when it had one, else with pinnedDate.
-//
-//   - The /ID pair is plaintext hex in the trailer (or xref-stream) dict.
-//     Each freshly minted 32-hex-digit value is replaced with the md5 of the
-//     pinned buffer itself (ID digits zeroed first), so /ID remains what ISO
-//     32000-1 14.4 wants — a fingerprint of the file — while being a pure
-//     function of the bytes. When the input carried an /ID, pdfcpu keeps
-//     element one and replaces only element two (ensureFileID), and so does
-//     the patch; which case applies is captured from the context BEFORE the
-//     write, because it cannot be recovered from the bytes (measured: one
-//     write can mint two DIFFERENT fresh values, ensureFileID runs more than
-//     once, so fresh elements need not be equal).
-//
-// Every edit is same-length, so no xref offset moves. Anything unexpected —
-// a stamp that is not where it should be, a hex literal of the wrong shape,
-// an /Encrypt dict (the /ID feeds the encryption key, and encrypted strings
-// cannot match a date candidate anyway) — fails open: the bytes are left
-// exactly as pdfcpu wrote them, trading determinism for never corrupting a
-// document.
+// FAIL OPEN. Anything this writer cannot hold safely -- an /Encrypt
+// dictionary (pdfcpu re-encrypts strings and streams on write from the same
+// context, which encryptwritepaths_test.go proves 198 real documents depend
+// on; this writer cannot), a catalog-less table, an object pdfcpu's
+// serializer would silently mangle -- falls back to api.WriteContext:
+// nondeterministic bytes, but never a corrupted document.
 
 import (
 	"bytes"
+	"compress/zlib"
 	"crypto/md5"
 	"encoding/hex"
+	"fmt"
 	"io"
+	"slices"
 	"strings"
-	"time"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -68,10 +65,19 @@ import (
 // document's bytes and hence its content hash.
 const pinnedDate = "D:20000101000000+00'00'"
 
+// writeDeterministic serializes ctx to w with deterministic bytes, falling
+// back to pdfcpu's own (nondeterministic) writer when it cannot hold the pen
+// safely -- see the package comment's fail-open list.
+func writeDeterministic(ctx *model.Context, w io.Writer) error {
+	if b, ok := deterministicBytes(ctx); ok {
+		_, err := w.Write(b)
+		return err
+	}
+	return api.WriteContext(ctx, w)
+}
+
 // infoDates returns ctx's Info-dictionary CreationDate and ModDate as raw
-// date strings, "" for absent or unreadable. Callers must read these BEFORE
-// the context is written: pdfcpu's ensureInfoDict overwrites both values in
-// the live dict on every write.
+// date strings, "" for absent or unreadable.
 func infoDates(ctx *model.Context) (creation, mod string) {
 	if ctx.Info == nil {
 		return "", ""
@@ -104,7 +110,7 @@ func rawDate(ctx *model.Context, o types.Object) string {
 // pinDate normalizes raw to pdfcpu's fixed 23-byte D:YYYYMMDDHHMMSS±HH'MM'
 // form (any valid PDF date has one, and it preserves the date's own UTC
 // offset), falling back to pinnedDate when raw is absent, unparseable, or —
-// out-of-range years — would not render at the stamp's length.
+// out-of-range years — would not render at that length.
 func pinDate(raw string) string {
 	if raw != "" {
 		if t, ok := types.DateTime(raw, true); ok {
@@ -116,131 +122,235 @@ func pinDate(raw string) string {
 	return pinnedDate
 }
 
-// writePinned serializes ctx like api.WriteContext and pins pdfcpu's per-run
-// stamps in the result. creation, mod and hadID describe the INPUT document
-// (from infoDates and ctx.ID != nil, read before any write mutates them).
-func writePinned(ctx *model.Context, w io.Writer, creation, mod string, hadID bool) error {
+// pinInfo rewrites ctx's Info dictionary in place to its deterministic form —
+// dates pinned, /Producer naming what actually writes the bytes (pdfcpu's
+// ensureInfoDict would have clobbered all three with per-run/per-version
+// values) — creating the Info object when the document has none, exactly as
+// pdfcpu's own writer would have. Idempotent: pinned dates normalize to
+// themselves, so a second Write emits the same bytes.
+func pinInfo(ctx *model.Context) error {
+	creation, mod := infoDates(ctx)
+	var d types.Dict
+	if ctx.Info != nil {
+		var err error
+		d, err = ctx.DereferenceDict(*ctx.Info)
+		if err != nil || d == nil {
+			return fmt.Errorf("info dictionary: %v", err)
+		}
+	} else {
+		d = types.NewDict()
+		ir, err := ctx.XRefTable.IndRefForNewObject(d)
+		if err != nil {
+			return err
+		}
+		ctx.Info = ir
+	}
+	d["CreationDate"] = types.StringLiteral(pinDate(creation))
+	d["ModDate"] = types.StringLiteral(pinDate(mod))
+	d["Producer"] = types.StringLiteral(producer)
+	return nil
+}
+
+// deterministicBytes renders ctx as a complete PDF whose bytes are a pure
+// function of the context's content, or ok=false when pdfcpu's own writer
+// must hold the pen instead (see the fail-open list in writeDeterministic's
+// comment).
+//
+// The layout matches what pdfcpu's writer would have used in spirit — every
+// non-stream object packed into one object stream, a cross-reference stream
+// as the trailer — because dropping that compression costs real size
+// (measured on pdfcpu's bookletTest.pdf: a classic-xref rendering was 51,019
+// bytes where pdfcpu wrote 34,533, which flipped byblos.Optimize's
+// is-it-smaller policy into pass-through). Only the ORDER is different:
+// objects are renumbered contiguously in ascending source-number order, so
+// nothing depends on Go map iteration.
+//
+// ponytail: the whole output is built in memory, like the writePinned design
+// it replaces; stream one object at a time (selfwrite.go's shape) if a write
+// path ever outgrows the callers that already hold input and output in memory.
+func deterministicBytes(ctx *model.Context) ([]byte, bool) {
+	xt := ctx.XRefTable
+	if xt.Encrypt != nil || xt.Root == nil {
+		return nil, false
+	}
+	if err := pinInfo(ctx); err != nil {
+		return nil, false
+	}
+	live, err := liveObjects(xt)
+	if err != nil {
+		return nil, false
+	}
+	rootNr := xt.Root.ObjectNumber.Value()
+	infoNr := xt.Info.ObjectNumber.Value()
+	keep := reachable(live, rootNr, infoNr)
+	if !keep[rootNr] || !keep[infoNr] {
+		return nil, false
+	}
+	olds := make([]int, 0, len(keep))
+	for n := range keep {
+		olds = append(olds, n)
+	}
+	slices.Sort(olds)
+	renumber := make(map[int]int, len(olds))
+	for i, old := range olds {
+		renumber[old] = i + 1
+	}
+
+	// Serialize every object, split by where it can live: a stream object
+	// must be a top-level object, everything else goes into the object
+	// stream (ISO 32000-1 7.5.7).
+	type topObj struct {
+		nr     int
+		body   []byte
+		offset int
+	}
+	var tops []topObj
+	var packedNrs []int
+	var packed [][]byte
+	for i, old := range olds {
+		if err := auditSerializable(old, live[old]); err != nil {
+			return nil, false
+		}
+		body, err := serialize(renumberObject(live[old], renumber))
+		if err != nil {
+			return nil, false
+		}
+		switch live[old].(type) {
+		case types.StreamDict, *types.StreamDict:
+			tops = append(tops, topObj{nr: i + 1, body: body})
+		default:
+			packedNrs = append(packedNrs, i+1)
+			packed = append(packed, body)
+		}
+	}
+	if len(packed) > 0xFFFF {
+		return nil, false // the xref stream's object-stream index field is 2 bytes
+	}
+	objStmNr := len(olds) + 1
+	xrefNr := objStmNr + 1
+
 	var buf bytes.Buffer
-	from := time.Now()
-	if err := api.WriteContext(ctx, &buf); err != nil {
-		return err
+	version := xt.VersionString()
+	// Cross-reference and object streams are PDF 1.5 features; a 1.0-1.4
+	// input's content is untouched, but the file that now carries it must
+	// declare a version a reader will accept them under.
+	if version == "" || version < "1.5" {
+		version = "1.5"
 	}
-	to := time.Now()
-	b := buf.Bytes()
-	pinStamps(b, from, to, pinDate(creation), pinDate(mod), hadID)
-	_, err := w.Write(b)
-	return err
-}
+	fmt.Fprintf(&buf, "%%PDF-%s\n%s", version, binaryMarker)
 
-// pinStamps patches pdfcpu's write-time stamps in buf in place. [from, to]
-// brackets the api.WriteContext call, so the date the writer stamped is
-// types.DateString of one of those seconds.
-func pinStamps(buf []byte, from, to time.Time, creation, mod string, hadID bool) {
-	for sec := from.Unix(); sec <= to.Unix(); sec++ {
-		cand := types.DateString(time.Unix(sec, 0))
-		pinDateKey(buf, "/CreationDate", cand, creation)
-		pinDateKey(buf, "/ModDate", cand, mod)
+	// The object stream: "nr offset" pairs, then the bodies (7.5.7). Never
+	// empty: the catalog and the Info dictionary are always packable.
+	objStmOffset := buf.Len()
+	var header, bodies bytes.Buffer
+	for i, nr := range packedNrs {
+		fmt.Fprintf(&header, "%d %d ", nr, bodies.Len())
+		bodies.Write(packed[i])
+		bodies.WriteByte('\n')
 	}
-	pinFileID(buf, hadID)
-}
+	d := types.Dict{
+		"Type":   types.Name("ObjStm"),
+		"N":      types.Integer(len(packed)),
+		"First":  types.Integer(header.Len()),
+		"Filter": types.Name("FlateDecode"),
+	}
+	raw, err := flateRaw(append(header.Bytes(), bodies.Bytes()...))
+	if err != nil {
+		return nil, false
+	}
+	body, err := streamBody(types.StreamDict{Dict: d, Raw: raw})
+	if err != nil {
+		return nil, false
+	}
+	fmt.Fprintf(&buf, "%d 0 obj\n", objStmNr)
+	buf.Write(body)
+	buf.WriteString("\nendobj\n")
+	for i := range tops {
+		tops[i].offset = buf.Len()
+		fmt.Fprintf(&buf, "%d 0 obj\n", tops[i].nr)
+		buf.Write(tops[i].body)
+		buf.WriteString("\nendobj\n")
+	}
+	start := buf.Len()
+	if start > 0xFFFFFFFF {
+		return nil, false // the xref stream's offset field below is 4 bytes
+	}
 
-// pinDateKey overwrites every occurrence of key valued exactly (stamped)
-// with pin, which must be the same length — otherwise it does nothing.
-func pinDateKey(buf []byte, key, stamped, pin string) {
-	if len(pin) != len(stamped) {
-		return
-	}
-	pat := []byte(key + "(" + stamped + ")")
-	for off := 0; ; {
-		i := bytes.Index(buf[off:], pat)
-		if i < 0 {
-			return
-		}
-		copy(buf[off+i+len(key)+1:], pin)
-		off += i + len(pat)
-	}
-}
-
-// pinFileID replaces the freshly minted /ID value(s) with the md5 of the
-// buffer itself. It patches the trailing /ID[<..><..>] only, and only when
-// the fresh elements have fileID's exact shape (32 hex digits): both
-// elements when the input document carried no /ID (pdfcpu mints both), the
-// second alone when it did (pdfcpu keeps the input's first, which is already
-// deterministic).
-func pinFileID(buf []byte, hadID bool) {
-	if bytes.Contains(buf, []byte("/Encrypt")) {
-		return // the /ID feeds the encryption key; leave it alone
-	}
-	i := bytes.LastIndex(buf, []byte("/ID["))
-	if i < 0 {
-		return
-	}
-	p := i + len("/ID[")
-	h1s, h1e, ok := hexSpan(buf, &p)
-	if !ok {
-		return
-	}
-	h2s, h2e, ok := hexSpan(buf, &p)
-	if !ok {
-		return
-	}
-	if p = skipWS(buf, p); p >= len(buf) || buf[p] != ']' {
-		return
-	}
-	if h2e-h2s != 2*md5.Size || !isHexDigits(buf[h2s:h2e]) {
-		return
-	}
-	if !hadID && (h1e-h1s != 2*md5.Size || !isHexDigits(buf[h1s:h1e])) {
-		return
-	}
-	fill(buf[h2s:h2e], '0')
-	if !hadID {
-		fill(buf[h1s:h1e], '0')
-	}
-	sum := md5.Sum(buf)
-	id := strings.ToUpper(hex.EncodeToString(sum[:]))
-	copy(buf[h2s:h2e], id)
-	if !hadID {
-		copy(buf[h1s:h1e], id)
-	}
-}
-
-// hexSpan parses a <...> hex literal at buf[*p] after optional whitespace and
-// returns the span of the digits between the brackets, advancing *p past it.
-func hexSpan(buf []byte, p *int) (start, end int, ok bool) {
-	i := skipWS(buf, *p)
-	if i >= len(buf) || buf[i] != '<' {
-		return 0, 0, false
-	}
-	start = i + 1
-	end = bytes.IndexByte(buf[start:], '>')
-	if end < 0 {
-		return 0, 0, false
-	}
-	end += start
-	*p = end + 1
-	return start, end, true
-}
-
-// skipWS advances past ISO 32000-1 white-space characters.
-func skipWS(buf []byte, i int) int {
-	for i < len(buf) && strings.IndexByte(" \t\r\n\f\x00", buf[i]) >= 0 {
-		i++
-	}
-	return i
-}
-
-func isHexDigits(b []byte) bool {
-	for _, c := range b {
-		if !('0' <= c && c <= '9' || 'A' <= c && c <= 'F' || 'a' <= c && c <= 'f') {
-			return false
+	// /ID: a deterministic fingerprint. Element two is the md5 of everything
+	// emitted so far; element one is the input's own first element when it
+	// carried an /ID (unchanged identity), else the same digest.
+	sum := md5.Sum(buf.Bytes())
+	fresh := strings.ToUpper(hex.EncodeToString(sum[:]))
+	el0 := fresh
+	if xt.ID != nil {
+		if b := trailerID(xt)[0]; b != nil {
+			el0 = strings.ToUpper(hex.EncodeToString(b))
 		}
 	}
-	return true
+
+	// The cross-reference stream (7.5.8): W [1 4 2], one contiguous
+	// subsection covering object 0 through the xref stream itself.
+	size := xrefNr + 1
+	entries := make([]byte, 0, 7*size)
+	add := func(kind byte, mid int, low uint16) {
+		entries = append(entries, kind,
+			byte(mid>>24), byte(mid>>16), byte(mid>>8), byte(mid),
+			byte(low>>8), byte(low))
+	}
+	add(0, 0, 0xFFFF) // object 0: head of an empty free list
+	stmIdx := map[int]int{}
+	for i, nr := range packedNrs {
+		stmIdx[nr] = i
+	}
+	topOff := map[int]int{}
+	for _, o := range tops {
+		topOff[o.nr] = o.offset
+	}
+	for nr := 1; nr <= len(olds); nr++ {
+		if i, ok := stmIdx[nr]; ok {
+			add(2, objStmNr, uint16(i))
+		} else {
+			add(1, topOff[nr], 0)
+		}
+	}
+	add(1, objStmOffset, 0) // the object stream
+	add(1, start, 0)        // the xref stream itself
+	xraw, err := flateRaw(entries)
+	if err != nil {
+		return nil, false
+	}
+	xd := types.Dict{
+		"Type":   types.Name("XRef"),
+		"Size":   types.Integer(size),
+		"W":      types.Array{types.Integer(1), types.Integer(4), types.Integer(2)},
+		"Index":  types.Array{types.Integer(0), types.Integer(size)},
+		"Filter": types.Name("FlateDecode"),
+		"Root": types.IndirectRef{ObjectNumber: types.Integer(renumber[rootNr]),
+			GenerationNumber: types.Integer(0)},
+		"Info": types.IndirectRef{ObjectNumber: types.Integer(renumber[infoNr]),
+			GenerationNumber: types.Integer(0)},
+		"ID": types.Array{types.HexLiteral(el0), types.HexLiteral(fresh)},
+	}
+	xbody, err := streamBody(types.StreamDict{Dict: xd, Raw: xraw})
+	if err != nil {
+		return nil, false
+	}
+	fmt.Fprintf(&buf, "%d 0 obj\n", xrefNr)
+	buf.Write(xbody)
+	fmt.Fprintf(&buf, "\nendobj\nstartxref\n%d\n%%%%EOF\n", start)
+	return buf.Bytes(), true
 }
 
-func fill(b []byte, c byte) {
-	for i := range b {
-		b[i] = c
+// flateRaw is FlateDecode's encode side: zlib, default level — deterministic
+// for a given input.
+func flateRaw(b []byte) ([]byte, error) {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write(b); err != nil {
+		return nil, err
 	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return z.Bytes(), nil
 }
