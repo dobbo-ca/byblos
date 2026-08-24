@@ -292,18 +292,18 @@ func buildPost() []byte {
 // the last version whose field list is fixed.
 func buildOS2() []byte {
 	var b []byte
-	b = be16(b, 4)      // version
-	b = bei16(b, 500)   // xAvgCharWidth
-	b = be16(b, 400)    // usWeightClass: normal
-	b = be16(b, 5)      // usWidthClass: medium
-	b = be16(b, 0)      // fsType: installable
+	b = be16(b, 4)           // version
+	b = bei16(b, 500)        // xAvgCharWidth
+	b = be16(b, 400)         // usWeightClass: normal
+	b = be16(b, 5)           // usWidthClass: medium
+	b = be16(b, 0)           // fsType: installable
 	for i := 0; i < 5; i++ { // subscript/superscript metrics
 		b = bei16(b, 0)
 		b = bei16(b, 0)
 	}
-	b = bei16(b, 50)  // yStrikeoutSize
-	b = bei16(b, 250) // yStrikeoutPosition
-	b = bei16(b, 0)   // sFamilyClass
+	b = bei16(b, 50)                   // yStrikeoutSize
+	b = bei16(b, 250)                  // yStrikeoutPosition
+	b = bei16(b, 0)                    // sFamilyClass
 	b = append(b, make([]byte, 10)...) // PANOSE
 	b = be32(b, 0x00000003)            // ulUnicodeRange1: Basic Latin + Latin-1
 	b = be32(b, 0)

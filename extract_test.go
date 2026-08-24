@@ -1,8 +1,8 @@
 package byblos
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image"

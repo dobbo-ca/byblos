@@ -1,8 +1,8 @@
 package pdfdoc
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"errors"
 	"image"
 	"slices"
