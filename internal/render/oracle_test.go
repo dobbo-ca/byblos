@@ -1,6 +1,8 @@
 package render
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
 	"fmt"
 	"image"
@@ -11,16 +13,12 @@ import (
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
-// vectorPDF wraps a content stream in a minimal one-page PDF, the hand-rolled
-// idiom internal/corpus uses for fixtures.
-func vectorPDF(contentStream string, w, h float64) []byte {
-	objs := []string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %g %g] /Contents 4 0 R >>", w, h),
-	}
+// wrapPDF numbers objs from 1, appends an xref, and points the trailer at
+// object 1 as /Root -- the hand-rolled fixture idiom internal/corpus uses.
+func wrapPDF(objs []string) []byte {
 	var buf []byte
 	buf = append(buf, "%PDF-1.4\n"...)
 	var offsets []int
@@ -28,9 +26,6 @@ func vectorPDF(contentStream string, w, h float64) []byte {
 		offsets = append(offsets, len(buf))
 		buf = append(buf, fmt.Sprintf("%d 0 obj\n%s\nendobj\n", len(offsets), o)...)
 	}
-	offsets = append(offsets, len(buf))
-	buf = append(buf, fmt.Sprintf("4 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n",
-		len(contentStream), contentStream)...)
 	xref := len(buf)
 	buf = append(buf, fmt.Sprintf("xref\n0 %d\n0000000000 65535 f \n", len(offsets)+1)...)
 	for _, off := range offsets {
@@ -39,6 +34,16 @@ func vectorPDF(contentStream string, w, h float64) []byte {
 	buf = append(buf, fmt.Sprintf("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n",
 		len(offsets)+1, xref)...)
 	return buf
+}
+
+// vectorPDF wraps a content stream in a minimal one-page PDF.
+func vectorPDF(contentStream string, w, h float64) []byte {
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %g %g] /Contents 4 0 R >>", w, h),
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(contentStream), contentStream),
+	})
 }
 
 // oracleContent exercises both winding rules, a stroke, a curve, and both
@@ -84,14 +89,17 @@ func mismatchFraction(t *testing.T, a *image.RGBA, b image.Image) float64 {
 // disagree (antialiased edges), and the do-nothing null -- a blank raster --
 // must FAIL the same metric, which pins that the metric can fail at all
 // (byb-8b9.1's acceptance).
-func TestRenderAgreesWithPdftoppm(t *testing.T) {
+// pdftoppmPNG renders page 1 of pdf at 72 DPI through poppler, skipping the
+// test when pdftoppm is not on PATH.
+func pdftoppmPNG(t *testing.T, pdf []byte) image.Image {
+	t.Helper()
 	pdftoppm, err := exec.LookPath("pdftoppm")
 	if err != nil {
 		t.Skipf("pdftoppm not on PATH: %v", err)
 	}
 	dir := t.TempDir()
-	pdfPath := filepath.Join(dir, "vector.pdf")
-	if err := os.WriteFile(pdfPath, vectorPDF(oracleContent, 200, 200), 0o600); err != nil {
+	pdfPath := filepath.Join(dir, "page.pdf")
+	if err := os.WriteFile(pdfPath, pdf, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, err := exec.Command(pdftoppm, "-r", "72", "-png", pdfPath, filepath.Join(dir, "oracle")).CombinedOutput()
@@ -111,9 +119,14 @@ func TestRenderAgreesWithPdftoppm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode pdftoppm output: %v", err)
 	}
+	return oracle
+}
+
+func TestRenderAgreesWithPdftoppm(t *testing.T) {
+	oracle := pdftoppmPNG(t, vectorPDF(oracleContent, 200, 200))
 
 	box := content.Box{LLX: 0, LLY: 0, URX: 200, URY: 200}
-	got, err := Page(context.Background(), []byte(oracleContent), box, 1)
+	got, err := Page(context.Background(), []byte(oracleContent), box, 1, nil)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -127,11 +140,102 @@ func TestRenderAgreesWithPdftoppm(t *testing.T) {
 
 	// The null check: a blank canvas must not pass the metric, or the metric
 	// measures nothing.
-	blank, err := Page(context.Background(), nil, box, 1)
+	blank, err := Page(context.Background(), nil, box, 1, nil)
 	if err != nil {
 		t.Fatalf("Page(blank): %v", err)
 	}
 	if frac := mismatchFraction(t, blank, oracle); frac <= tolerance {
 		t.Errorf("a BLANK raster is within tolerance of pdftoppm (%.1f%% mismatch); the oracle metric is broken", frac*100)
+	}
+}
+
+// imagePDF builds a one-page 200x200 PDF placing two solid-colour flate RGB
+// image XObjects at different CTMs: red axis-aligned, blue rotated 30
+// degrees. Solid colours keep poppler's image smoothing out of the
+// comparison, so only PLACEMENT geometry can disagree -- which is what stage
+// 4b (byb-8b9.2) adds.
+func imagePDF() []byte {
+	rgb := func(r, g, b byte) []byte {
+		px := bytes.Repeat([]byte{r, g, b}, 4*4)
+		var buf bytes.Buffer
+		zw := zlib.NewWriter(&buf)
+		if _, err := zw.Write(px); err != nil {
+			panic(err)
+		}
+		if err := zw.Close(); err != nil {
+			panic(err)
+		}
+		return buf.Bytes()
+	}
+	imgObj := func(data []byte) string {
+		return fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width 4 /Height 4"+
+			" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>"+
+			"\nstream\n%s\nendstream", len(data), data)
+	}
+	// 51.9615 = 60*cos30, 30 = 60*sin30: a 60pt square rotated 30 degrees CCW.
+	const imageContent = "q 80 0 0 60 20 110 cm /Im0 Do Q " +
+		"q 51.9615 30 -30 51.9615 100 30 cm /Im1 Do Q"
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
+			" /Resources << /XObject << /Im0 5 0 R /Im1 6 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(imageContent), imageContent),
+		imgObj(rgb(255, 0, 0)),
+		imgObj(rgb(0, 0, 255)),
+	})
+}
+
+// TestImagesAgreeWithPdftoppm is byb-8b9.2's acceptance: a page with two
+// images at different CTMs -- one of them rotated -- matches pdftoppm within
+// tolerance, with the images decoded through the SAME seam the extract path
+// uses (pdfdoc.RawImage, then image.Decode), and the blank null must fail the
+// metric.
+func TestImagesAgreeWithPdftoppm(t *testing.T) {
+	pdf := imagePDF()
+	oracle := pdftoppmPNG(t, pdf)
+
+	d, err := pdfdoc.Open(bytes.NewReader(pdf))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	images := func(name string) (Image, bool) {
+		xo, ok := d.XObject(p.Scope, name)
+		if !ok || !xo.Image {
+			return Image{}, false
+		}
+		data, fileType, err := d.RawImage(xo.ID)
+		if err != nil || fileType == "jbig2" || fileType == "jpx" {
+			return Image{}, false
+		}
+		im, _, err := image.Decode(bytes.NewReader(data))
+		if err != nil {
+			return Image{}, false
+		}
+		return Image{Data: im}, true
+	}
+	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
+	got, err := Page(context.Background(), p.Content, box, 1, images)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	const tolerance = 0.05
+	frac := mismatchFraction(t, got, oracle)
+	t.Logf("image mismatch vs pdftoppm: %.2f%% of pixels", frac*100)
+	if frac > tolerance {
+		t.Errorf("image page disagrees with pdftoppm on %.1f%% of pixels; tolerance %.0f%%",
+			frac*100, tolerance*100)
+	}
+
+	blank, err := Page(context.Background(), nil, box, 1, nil)
+	if err != nil {
+		t.Fatalf("Page(blank): %v", err)
+	}
+	if frac := mismatchFraction(t, blank, oracle); frac <= tolerance {
+		t.Errorf("a BLANK raster is within tolerance of pdftoppm (%.1f%% mismatch); the image oracle metric is broken", frac*100)
 	}
 }
