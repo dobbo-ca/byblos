@@ -85,7 +85,9 @@ func EncodeJBIG2Generic(b *Bitmap) ([]byte, error) {
 // once here instead of by every caller. Width and Height come from b's
 // dimensions, BPC is 1, ColorSpace is DeviceGray, Filter is JBIG2Decode, Data
 // is EncodeJBIG2Generic's output, and DecodeParms stays zero -- no /Decode
-// array either, per EncodeJBIG2Generic's doc comment.
+// array either, per EncodeJBIG2Generic's doc comment. Like
+// EncodeJBIG2Generic, it does not copy b.Pix (and zeroes each row's padding
+// in place) -- pass a copy of b if that matters to the caller.
 func EncodeJBIG2Image(b *Bitmap) (EncodedImage, error) {
 	data, err := EncodeJBIG2Generic(b)
 	if err != nil {

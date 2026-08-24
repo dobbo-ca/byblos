@@ -88,32 +88,58 @@ func paletteBitDepth(n int) int {
 	}
 }
 
-// extractPLTEAndIDAT walks pngData's chunk framing (ISO/IEC 15948) and
-// returns the PLTE chunk's payload and the concatenation of every IDAT
-// chunk's payload. Concatenating every IDAT -- not just the first -- is
-// required: image/png splits its zlib stream across multiple IDAT chunks
-// once it exceeds an internal buffer, and the chunks are one continuous
-// stream, not independent ones (see TestQuantizeIndexedMultipleIDATNotTruncated).
-func extractPLTEAndIDAT(pngData []byte) (plte, idat []byte, err error) {
+// pngChunk is one chunk out of walkPNGChunks.
+type pngChunk struct {
+	typ  string
+	data []byte
+}
+
+// walkPNGChunks walks pngData's chunk framing (ISO/IEC 15948), skipping the
+// 8-byte signature, and returns every chunk up to and including IEND (chunks
+// after IEND, if any, are not part of the image and are ignored). Shared by
+// extractPLTEAndIDAT (below) and parsePNG (embed.go) so the framing walk --
+// and its bounds checking -- exists exactly once.
+func walkPNGChunks(pngData []byte) ([]pngChunk, error) {
 	const sigLen = 8
 	if len(pngData) < sigLen {
-		return nil, nil, fmt.Errorf("not a PNG file")
+		return nil, fmt.Errorf("not a PNG file")
 	}
 	p := pngData[sigLen:]
+	var chunks []pngChunk
 	for len(p) >= 8 {
-		length := binary.BigEndian.Uint32(p[0:4])
+		length := uint64(binary.BigEndian.Uint32(p[0:4]))
 		typ := string(p[4:8])
-		if uint64(len(p)) < 8+uint64(length)+4 {
-			return nil, nil, fmt.Errorf("truncated %s chunk", typ)
+		if length+12 > uint64(len(p)) {
+			return nil, fmt.Errorf("truncated %s chunk", typ)
 		}
-		data := p[8 : 8+length]
-		switch typ {
+		n := int(length) // safe: length+12 <= len(p), so length fits in an int
+		chunks = append(chunks, pngChunk{typ, p[8 : 8+n]})
+		p = p[8+n+4:]
+		if typ == "IEND" {
+			break
+		}
+	}
+	return chunks, nil
+}
+
+// extractPLTEAndIDAT returns the PLTE chunk's payload and the concatenation
+// of every IDAT chunk's payload out of pngData. Concatenating every IDAT --
+// not just the first -- is required: image/png splits its zlib stream across
+// multiple IDAT chunks once it exceeds an internal buffer, and the chunks are
+// one continuous stream, not independent ones (see
+// TestQuantizeIndexedMultipleIDATNotTruncated).
+func extractPLTEAndIDAT(pngData []byte) (plte, idat []byte, err error) {
+	chunks, err := walkPNGChunks(pngData)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, c := range chunks {
+		switch c.typ {
 		case "PLTE":
-			plte = append([]byte(nil), data...)
+			plte = append([]byte(nil), c.data...)
 		case "IDAT":
-			idat = append(idat, data...)
+			idat = append(idat, c.data...)
 		}
-		p = p[8+length+4:]
 	}
 	if plte == nil {
 		return nil, nil, fmt.Errorf("no PLTE chunk in encoded PNG")

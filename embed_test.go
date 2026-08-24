@@ -214,7 +214,7 @@ func TestEmbedJPEGCarriesTheSourceBytesVerbatim(t *testing.T) {
 		t.Fatalf("EmbedJPEG: %v", err)
 	}
 	if dpi != 0 {
-		t.Errorf("dpi = %v; want 0 (Go's jpeg writer declares an aspect ratio, not a density)", dpi)
+		t.Errorf("dpi = %v; want 0 (Go's jpeg writer emits no JFIF APP0 segment at all)", dpi)
 	}
 	if enc.Width != w || enc.Height != h || enc.BPC != 8 || enc.ColorSpace.Name != "DeviceGray" || enc.Filter != "DCTDecode" {
 		t.Fatalf("EncodedImage = %+v; want an 8bpc DeviceGray DCTDecode image", enc)
@@ -229,6 +229,129 @@ func TestEmbedJPEGCarriesTheSourceBytesVerbatim(t *testing.T) {
 	}
 	if _, err := ExtractPageRaster(bytes.NewReader(pdf.Bytes()), 1); err != nil {
 		t.Fatalf("ExtractPageRaster: %v", err)
+	}
+}
+
+// TestJFIFDPIReadsTheDeclaredDensity builds a JFIF APP0 segment by hand,
+// since Go's own jpeg.Encode never emits one (see the comment above), and
+// checks jfifDPI reads both unit specifiers.
+func TestJFIFDPIReadsTheDeclaredDensity(t *testing.T) {
+	jfif := func(units byte, density uint16) []byte {
+		seg := make([]byte, 14) // JFIF\0(5) + version(2) + units(1) + x/y density(4) + thumbnail w/h(2)
+		copy(seg, "JFIF\x00")
+		seg[5], seg[6] = 1, 2 // version 1.02
+		seg[7] = units
+		binary.BigEndian.PutUint16(seg[8:10], density)
+		binary.BigEndian.PutUint16(seg[10:12], density)
+		var buf bytes.Buffer
+		buf.Write([]byte{0xFF, 0xD8, 0xFF, 0xE0})
+		var lenBuf [2]byte
+		binary.BigEndian.PutUint16(lenBuf[:], uint16(len(seg)+2))
+		buf.Write(lenBuf[:])
+		buf.Write(seg)
+		return buf.Bytes()
+	}
+	if dpi := jfifDPI(jfif(1, 300)); dpi != 300 {
+		t.Errorf("units=1 (dpi) density=300: jfifDPI = %v; want 300", dpi)
+	}
+	if dpi := jfifDPI(jfif(2, 100)); dpi < 253 || dpi > 255 {
+		t.Errorf("units=2 (dots/cm) density=100: jfifDPI = %v; want ~254", dpi)
+	}
+	if dpi := jfifDPI(jfif(0, 4)); dpi != 0 {
+		t.Errorf("units=0 (aspect ratio only): jfifDPI = %v; want 0", dpi)
+	}
+}
+
+// TestEmbedJPEGRefusesLossless hand-builds the smallest possible SOF3
+// (lossless) frame header: EmbedJPEG must not accept it, since byblos's own
+// JPEG reader (extract.go) cannot decode lossless JPEG back out.
+func TestEmbedJPEGRefusesLossless(t *testing.T) {
+	data := []byte{
+		0xFF, 0xD8, // SOI
+		0xFF, 0xC3, 0x00, 0x0B, 0x08, 0x00, 0x04, 0x00, 0x04, 0x01, 0x01, 0x11, 0x00, // SOF3, 4x4, 1 component
+		0xFF, 0xDA, 0x00, 0x02, // SOS (empty)
+	}
+	if _, _, err := EmbedJPEG(data); err == nil {
+		t.Fatal("EmbedJPEG on a lossless (SOF3) JPEG: want an error, got nil")
+	}
+}
+
+func TestEmbedPNGIndexedRoundTripsThroughBuildPDF(t *testing.T) {
+	w, h := 6, 5
+	pal := color.Palette{
+		color.RGBA{R: 10, G: 20, B: 30, A: 255},
+		color.RGBA{R: 200, G: 100, B: 50, A: 255},
+		color.RGBA{R: 0, G: 0, B: 0, A: 255},
+	}
+	src := image.NewPaletted(image.Rect(0, 0, w, h), pal)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			src.SetColorIndex(x, y, uint8((x+y)%len(pal)))
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, src); err != nil {
+		t.Fatalf("png.Encode: %v", err)
+	}
+
+	enc, _, err := EmbedPNG(buf.Bytes())
+	if err != nil {
+		t.Fatalf("EmbedPNG: %v", err)
+	}
+	if enc.ColorSpace.Name != "Indexed" || enc.ColorSpace.HiVal != len(pal)-1 {
+		t.Fatalf("EncodedImage.ColorSpace = %+v; want Indexed with HiVal %d", enc.ColorSpace, len(pal)-1)
+	}
+
+	var pdf bytes.Buffer
+	if err := BuildPDF(&pdf, []BuildPage{{Image: enc, WidthPt: 72, HeightPt: 72}}); err != nil {
+		t.Fatalf("BuildPDF: %v", err)
+	}
+	pr, err := ExtractPageRaster(bytes.NewReader(pdf.Bytes()), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster: %v", err)
+	}
+	b := pr.Image.Bounds()
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			want := pal[(x+y)%len(pal)].(color.RGBA)
+			got := color.RGBAModel.Convert(pr.Image.At(b.Min.X+x, b.Min.Y+y)).(color.RGBA)
+			if got.R != want.R || got.G != want.G || got.B != want.B {
+				t.Fatalf("pixel (%d,%d) = %+v; want %+v", x, y, got, want)
+			}
+		}
+	}
+}
+
+func TestEmbedPNGRefusesTRNS(t *testing.T) {
+	pal := color.Palette{
+		color.NRGBA{R: 0, G: 0, B: 0, A: 0}, // fully transparent entry
+		color.NRGBA{R: 255, G: 255, B: 255, A: 255},
+	}
+	src := image.NewPaletted(image.Rect(0, 0, 4, 4), pal)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, src); err != nil {
+		t.Fatalf("png.Encode: %v", err)
+	}
+	if _, _, err := EmbedPNG(buf.Bytes()); err == nil {
+		t.Fatal("EmbedPNG on a PNG with a tRNS chunk: want an error, got nil")
+	}
+}
+
+func TestEmbedPNGRefusesBadBitDepthColourTypeCombo(t *testing.T) {
+	src := image.NewGray(image.Rect(0, 0, 4, 4))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, src); err != nil {
+		t.Fatalf("png.Encode: %v", err)
+	}
+	data := append([]byte(nil), buf.Bytes()...)
+	// IHDR colour type byte (offset 8+8+9=25): rewrite as truecolour (2),
+	// leaving bit depth at grayscale's 8 -- that combo is legal, so also drop
+	// the bit depth (offset 24) to 1, which colour type 2 never allows.
+	const bitDepthOffset, colorTypeOffset = 8 + 8 + 8, 8 + 8 + 9
+	data[bitDepthOffset] = 1
+	data[colorTypeOffset] = 2
+	if _, _, err := EmbedPNG(data); err == nil {
+		t.Fatal("EmbedPNG on colour type 2 / bit depth 1: want an error, got nil")
 	}
 }
 
