@@ -75,12 +75,14 @@ jobs:
           go list -f '{{range .Imports}}{{.}}{{"\n"}}{{end}}{{range .TestImports}}{{.}}{{"\n"}}{{end}}{{range .XTestImports}}{{.}}{{"\n"}}{{end}}' ./... \
             | sort -u | grep '\.' | grep -v '^github.com/dobbo-ca/byblos' > ext.txt || true
           echo "external imports:"; cat ext.txt
-          if grep -vE '^(github\.com/pdfcpu/pdfcpu(/|$)|golang\.org/x/image/(ccitt|draw)(/|$))' ext.txt; then
+          if grep -vE '^(github\.com/pdfcpu/pdfcpu(/|$)|golang\.org/x/image/(ccitt|draw|font/sfnt|math/fixed)(/|$))' ext.txt; then
             echo "FORBIDDEN dependency listed above. Permitted: pdfcpu, and"
-            echo "golang.org/x/image/{ccitt,draw} ONLY -- x/image is allowlisted"
-            echo "by subpackage because /bmp, /tiff and /webp each call"
-            echo "image.RegisterFormat in init(), which would widen what"
-            echo "image.Decode accepts on the classification path (byb-1tj)."
+            echo "golang.org/x/image/{ccitt,draw,font/sfnt,math/fixed} ONLY --"
+            echo "x/image is allowlisted by subpackage because /bmp, /tiff and"
+            echo "/webp each call image.RegisterFormat in init(), which would"
+            echo "widen what image.Decode accepts on the classification path"
+            echo "(byb-1tj). font/sfnt and math/fixed register nothing"
+            echo "(checked for byb-8b9.3; see imagecodecs_arch_test.go)."
             exit 1
           fi
 
