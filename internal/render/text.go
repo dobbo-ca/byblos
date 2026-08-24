@@ -3,6 +3,7 @@ package render
 // Stage 4c (byb-8b9.3): embedded TrueType text.
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math"
 
@@ -45,9 +46,20 @@ type FontFor func(name string) (Font, bool)
 type textFont struct {
 	fnt   *sfnt.Font
 	upem  float64
+	gwork []int64 // per-GID gated charstring work (CFF only); fillGlyph charges it
 	buf   sfnt.Buffer
 	first int
 	width []float64
+}
+
+// fontProg is one parsed font program. resolveFont caches it by content hash
+// so a resource dict aliasing one program under many Tf names pays the parse
+// -- and above all the pre-Parse work gates, up to ~256 x maxCharstringWork
+// walk steps for a hostile CFF -- once per program, not once per name.
+type fontProg struct {
+	fnt   *sfnt.Font
+	upem  float64
+	gwork []int64
 }
 
 // resolveFont resolves and caches a Tf operand. A nil cache entry records a
@@ -68,31 +80,42 @@ func (r *renderer) resolveFont(name string) *textFont {
 		r.fontsBy[name] = nil
 		return nil
 	}
-	tf := &textFont{first: src.FirstChar, width: src.Widths}
-	// Refuse before allocating, and before sfnt.Parse: Parse itself loads
-	// whole glyphs ('x' and 'H', the OS/2 metrics fallback), so a hostile
-	// compound bomb must be caught FIRST -- see glyf.go. A program whose
-	// glyphs cannot all be bounded degrades to widths-only exactly like an
-	// unparsable one: a collection, malformed tables, or an expansion past
-	// the path budget. Past that gate, sfnt.Parse bounds its own remaining
-	// work against the hostile shapes it was fuzzed for, and a parse failure
-	// degrades the same way, never an error.
-	parse := func(program []byte) {
-		if f, err := sfnt.Parse(program); err == nil {
-			tf.fnt = f
-			tf.upem = float64(f.UnitsPerEm())
+	key := sha256.Sum256(src.Program)
+	prog, hit := r.progsBy[key]
+	if !hit {
+		prog = &fontProg{}
+		// Refuse before allocating, and before sfnt.Parse: Parse itself loads
+		// whole glyphs ('x' and 'H', the OS/2 metrics fallback), so a hostile
+		// compound bomb must be caught FIRST -- see glyf.go. A program whose
+		// glyphs cannot all be bounded degrades to widths-only exactly like an
+		// unparsable one: a collection, malformed tables, or an expansion past
+		// the path budget. Past that gate, sfnt.Parse bounds its own remaining
+		// work against the hostile shapes it was fuzzed for, and a parse
+		// failure degrades the same way, never an error.
+		parse := func(program []byte) {
+			if f, err := sfnt.Parse(program); err == nil {
+				prog.fnt = f
+				prog.upem = float64(f.UnitsPerEm())
+			}
 		}
-	}
-	if g := parseGlyfIndex(src.Program); g != nil {
-		if g.boundedBy(maxPathPoints) {
-			parse(src.Program)
+		if g := parseGlyfIndex(src.Program); g != nil {
+			if g.boundedBy(maxPathPoints) {
+				parse(src.Program)
+			}
+		} else if otf, gwork := cffToSFNT(src.Program); otf != nil {
+			// Stage 4d: a bare CFF (/FontFile3 /Subtype /Type1C), gated and
+			// wrapped by cff.go into the container sfnt parses. Anything else
+			// -- Type1 PFB (stage 4e), garbage -- leaves otf nil: widths-only.
+			parse(otf)
+			prog.gwork = gwork
 		}
-	} else if otf := cffToSFNT(src.Program); otf != nil {
-		// Stage 4d: a bare CFF (/FontFile3 /Subtype /Type1C), gated and
-		// wrapped by cff.go into the container sfnt parses. Anything else --
-		// Type1 PFB (stage 4e), garbage -- leaves otf nil: widths-only.
-		parse(otf)
+		if r.progsBy == nil {
+			r.progsBy = map[[sha256.Size]byte]*fontProg{}
+		}
+		r.progsBy[key] = prog
 	}
+	tf := &textFont{fnt: prog.fnt, upem: prog.upem, gwork: prog.gwork,
+		first: src.FirstChar, width: src.Widths}
 	r.fontsBy[name] = tf
 	return tf
 }
@@ -170,6 +193,19 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	gi, err := f.fnt.GlyphIndex(&f.buf, rune(code))
 	if err != nil || gi == 0 {
 		return nil
+	}
+	// Stage 4d: charge the charstring work LoadGlyph is about to execute
+	// (measured by cff.go's gate) BEFORE executing it. A glyph can run ~64 KB
+	// of charstring yet emit zero segments (an hstem sled), so the per-point
+	// charge below would price its re-shows at nothing -- one Tj per
+	// content-stream byte re-running the interpreter forever. Charging the
+	// gate total per SHOW keeps interpreter time under maxFillWork per Page,
+	// exactly like scanline time.
+	if int(gi) < len(f.gwork) {
+		r.fillWork += f.gwork[gi]
+		if r.fillWork > maxFillWork {
+			return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+		}
 	}
 	// LoadGlyph materialises the glyph's whole expansion up front, which is
 	// safe only because resolveFont refused any font with a glyph expanding

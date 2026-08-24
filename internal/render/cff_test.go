@@ -1,7 +1,9 @@
 package render
 
 import (
+	"bytes"
 	"context"
+	"math"
 	"strings"
 	"testing"
 
@@ -95,6 +97,7 @@ type cffOpts struct {
 	gsubrs      [][]byte
 	lsubrs      [][]byte
 	topExtra    []byte // extra Top DICT bytes, e.g. a CID ROS
+	private     []byte // raw Private DICT override (else derived from lsubrs)
 }
 
 // buildCFF assembles a bare CFF (the exact bytes a /FontFile3 /Subtype
@@ -110,6 +113,9 @@ func buildCFF(o cffOpts) []byte {
 	if o.lsubrs != nil {
 		lsubrs = cffIndexBytes(o.lsubrs)
 		private = append(cffDictInt(nil, 6), 19) // Subrs at 6 = len(private)
+	}
+	if o.private != nil {
+		private = o.private
 	}
 
 	var charset []byte
@@ -188,7 +194,7 @@ func TestType1CProgramTakesTheCFFPath(t *testing.T) {
 	if parseGlyfIndex(p) != nil {
 		t.Fatal("bare CFF parsed as an indexable TrueType; the fixture does not exercise the 4d path")
 	}
-	if cffToSFNT(p) == nil {
+	if otf, _ := cffToSFNT(p); otf == nil {
 		t.Fatal("cffToSFNT refused the minimal well-formed bare CFF")
 	}
 }
@@ -326,13 +332,10 @@ func TestType1CEncodings(t *testing.T) {
 	}
 }
 
-// TestHostileCFFSubrBombRefusedBeforeParse: sfnt's own Type 2 limits (subr
-// nesting 10, streams 64 KB) do NOT bound total work -- a chain of ten subrs
-// each calling the next hundreds of times is a sub-KB font that would execute
-// ~200^9 charstring bytes without ever tripping a depth check. The work gate
-// must refuse it in bounded time, the font degrades to widths-only, and the
-// rest of the page still renders.
-func TestHostileCFFSubrBombRefusedBeforeParse(t *testing.T) {
+// bombSubrs is the 10-deep local-subr work bomb both hostile-bomb tests
+// enter: subr i calls subr i+1 two hundred times and the last returns, so the
+// full chain would execute ~200^9 charstring bytes.
+func bombSubrs() [][]byte {
 	const chain = 10
 	var lsubrs [][]byte
 	for i := 0; i < chain; i++ {
@@ -347,12 +350,22 @@ func TestHostileCFFSubrBombRefusedBeforeParse(t *testing.T) {
 		}
 		lsubrs = append(lsubrs, s)
 	}
+	return lsubrs
+}
+
+// TestHostileCFFSubrBombRefusedBeforeParse: sfnt's own Type 2 limits (subr
+// nesting 10, streams 64 KB) do NOT bound total work -- a chain of ten subrs
+// each calling the next hundreds of times is a sub-KB font that would execute
+// ~200^9 charstring bytes without ever tripping a depth check. The work gate
+// must refuse it in bounded time, the font degrades to widths-only, and the
+// rest of the page still renders.
+func TestHostileCFFSubrBombRefusedBeforeParse(t *testing.T) {
 	bomb := buildCFF(cffOpts{
 		charstrings: [][]byte{t2cs("endchar"), t2cs(-107, "callsubr", "endchar")},
 		sids:        []uint16{34},
-		lsubrs:      lsubrs,
+		lsubrs:      bombSubrs(),
 	})
-	if got := cffToSFNT(bomb); got != nil {
+	if otf, _ := cffToSFNT(bomb); otf != nil {
 		t.Fatal("the subr work bomb was not refused before sfnt.Parse")
 	}
 	// Through the seam: widths-only, the page still renders.
@@ -372,28 +385,14 @@ func TestHostileCFFSubrBombRefusedBeforeParse(t *testing.T) {
 // would admit a bomb whose entry call it never followed; the fixed-encoded
 // entry into the same work bomb must still refuse.
 func TestHostileCFFFixedEncodedCallStillGated(t *testing.T) {
-	const chain = 10
-	var lsubrs [][]byte
-	for i := 0; i < chain; i++ {
-		var s []byte
-		if i == chain-1 {
-			s = t2cs("return")
-		} else {
-			for j := 0; j < 200; j++ {
-				s = t2cs(s, i+1-107, "callsubr")
-			}
-			s = t2cs(s, "return")
-		}
-		lsubrs = append(lsubrs, s)
-	}
 	// -107 (subr 0 under the bias) as 16.16 fixed: -107<<16 = 0xFF950000.
 	entry := t2cs([]byte{255, 0xff, 0x95, 0x00, 0x00}, "callsubr", "endchar")
 	bomb := buildCFF(cffOpts{
 		charstrings: [][]byte{t2cs("endchar"), entry},
 		sids:        []uint16{34},
-		lsubrs:      lsubrs,
+		lsubrs:      bombSubrs(),
 	})
-	if cffToSFNT(bomb) != nil {
+	if otf, _ := cffToSFNT(bomb); otf != nil {
 		t.Fatal("the fixed-encoded entry call hid the subr bomb from the work gate")
 	}
 }
@@ -411,7 +410,7 @@ func TestHostileCFFSelfRecursionCheap(t *testing.T) {
 		FirstChar: 'A',
 		Widths:    []float64{600},
 	}
-	if cffToSFNT(f.Program) == nil {
+	if otf, _ := cffToSFNT(f.Program); otf == nil {
 		t.Fatal("depth-limited self-recursion is cheap under sfnt's own wall; the gate must not refuse it")
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
@@ -435,7 +434,7 @@ func TestCFFCIDKeyedRefused(t *testing.T) {
 		sids:        []uint16{34},
 		topExtra:    ros,
 	})
-	if cffToSFNT(p) != nil {
+	if otf, _ := cffToSFNT(p); otf != nil {
 		t.Fatal("CID-keyed CFF must be refused until byb-8b9.8 carries its CMap")
 	}
 }
@@ -463,7 +462,7 @@ func TestCFFWorkGateBudgetTrips(t *testing.T) {
 	maxCharstringWork = 3
 
 	f := cffSquareFont()
-	if cffToSFNT(f.Program) != nil {
+	if otf, _ := cffToSFNT(f.Program); otf != nil {
 		t.Fatal("lowered charstring budget did not refuse the font; the gate is dead")
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
@@ -518,5 +517,167 @@ func TestCFFHugeCoordinatesStayBounded(t *testing.T) {
 		// A tripped budget is acceptable; a hang or panic is not, and the
 		// test binary's timeout is the harness for those.
 		t.Logf("Page returned %v (budget trips are fine)", err)
+	}
+}
+
+// t30 nibble-encodes a DICT real (operand 30) from its decimal spelling.
+func t30(s string) []byte {
+	var nibs []byte
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			nibs = append(nibs, c-'0')
+		case c == '.':
+			nibs = append(nibs, 0x0a)
+		case c == 'E' && i+1 < len(s) && s[i+1] == '-':
+			nibs = append(nibs, 0x0c)
+			i++
+		case c == 'E':
+			nibs = append(nibs, 0x0b)
+		case c == '-':
+			nibs = append(nibs, 0x0e)
+		default:
+			panic("t30: bad char")
+		}
+	}
+	nibs = append(nibs, 0x0f)
+	if len(nibs)%2 == 1 {
+		nibs = append(nibs, 0x0f)
+	}
+	b := []byte{30}
+	for i := 0; i < len(nibs); i += 2 {
+		b = append(b, nibs[i]<<4|nibs[i+1])
+	}
+	return b
+}
+
+// TestCFFFontMatrixRealOperands: real Type1C fonts spell FontMatrix (and most
+// Private DICT values) with operand 30's nibble reals, which no other fixture
+// emits -- buildCFF writes only 5-byte integers. A 1/2048 matrix must parse
+// to upem 2048 through every nibble branch (digits, '.', 'E', 'E-', '-'), and
+// a non-uniform matrix must refuse: only [s 0 0 s 0 0] maps onto sfnt's
+// single unitsPerEm, anything else would render silently at the wrong shape.
+func TestCFFFontMatrixRealOperands(t *testing.T) {
+	font := func(m3 string) []byte {
+		var mtx []byte
+		for _, s := range []string{"0.00048828125", "0", "0", m3, "-0", "0E1"} {
+			mtx = append(mtx, t30(s)...)
+		}
+		mtx = append(mtx, 12, 7) // FontMatrix
+		return buildCFF(cffOpts{
+			charstrings: [][]byte{t2cs("endchar"), cffSquare()},
+			sids:        []uint16{34},
+			topExtra:    mtx,
+		})
+	}
+	c := parseCFF(font("4.8828125E-4")) // == 0.00048828125 = 1/2048 exactly
+	if c == nil || c.upem != 2048 {
+		t.Fatalf("uniform real FontMatrix: got %+v, want upem 2048", c)
+	}
+	if parseCFF(font("9.765625E-4")) != nil {
+		t.Fatal("non-uniform FontMatrix (y scale != x scale) must refuse to widths-only")
+	}
+}
+
+// TestCFFCharsetFormats covers the three charset shapes buildCFF never emits:
+// the predefined ISOAdobe charset (offset 0, SID = GID) and the range formats
+// 1 and 2 -- where a wrong range walk would ink WRONG glyphs, not refuse --
+// plus the refused predefined Expert charsets (offsets 1 and 2).
+func TestCFFCharsetFormats(t *testing.T) {
+	const off = 10
+	pad := make([]byte, off)
+	for _, tc := range []struct {
+		name string
+		data []byte
+		off  int
+		want []uint16
+	}{
+		{"isoadobe-predefined", nil, 0, []uint16{0, 1, 2, 3, 4}},
+		// format 1: first SID u16, nLeft u8 per range.
+		{"format1", []byte{1, 0, 100, 2, 0, 200, 0}, off, []uint16{0, 100, 101, 102, 200}},
+		// format 2: first SID u16, nLeft u16 per range. 300 = 0x012C.
+		{"format2", []byte{2, 1, 44, 0, 3}, off, []uint16{0, 300, 301, 302, 303}},
+	} {
+		p := append(append([]byte(nil), pad...), tc.data...)
+		got := cffCharsetSIDs(p, tc.off, len(tc.want))
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Fatalf("%s: got %v, want %v", tc.name, got, tc.want)
+			}
+		}
+	}
+	for _, expert := range []int{1, 2} {
+		if cffCharsetSIDs(pad, expert, 2) != nil {
+			t.Fatalf("predefined Expert charset (offset %d) must refuse", expert)
+		}
+	}
+}
+
+// TestCFFIndexHugePosRefused pins cffIndex's overflow-safe bound: a position
+// near math.MaxInt64 (reachable when a Private DICT Subrs operand is a
+// real-encoded ~2^63 offset) must refuse, not compute pos+2, wrap it negative,
+// slip the length check, and panic on p[pos:]. This is the root guard every
+// caller routes through.
+func TestCFFIndexHugePosRefused(t *testing.T) {
+	for _, pos := range []int{math.MaxInt64, math.MaxInt64 - 1, math.MaxInt64 - 2} {
+		if _, _, ok := cffIndex(make([]byte, 100), pos); ok {
+			t.Fatalf("cffIndex accepted pos=%d past a 100-byte buffer", pos)
+		}
+	}
+}
+
+// TestCFFSubrsOffsetOverflowRefused: the Private DICT Subrs operand is the one
+// offset in parseCFF that is RELATIVE (Private start + operand). A real-encoded
+// ~2^63 operand must refuse to widths-only rather than reach cffIndex with a
+// position that wraps, or force an undefined float->int conversion. The
+// corruption sweep in TestCFFMalformedNoPanic cannot reach this shape: it never
+// synthesises a 19-digit operand-30 real.
+func TestCFFSubrsOffsetOverflowRefused(t *testing.T) {
+	// Private DICT: Subrs (19) = real 9223372036854774784 = 2^63-1024,
+	// exactly float64-representable.
+	private := append(t30("9223372036854774784"), 19)
+	p := buildCFF(cffOpts{
+		charstrings: [][]byte{t2cs("endchar"), cffSquare()},
+		sids:        []uint16{34},
+		private:     private,
+	})
+	if otf, _ := cffToSFNT(p); otf != nil {
+		t.Fatal("a Subrs offset past the end of the program must refuse")
+	}
+}
+
+// TestCFFZeroSegmentGlyphChargesFillWork: a glyph can execute ~60 KB of
+// charstring -- admitted by the gate, whose bound is per LoadGlyph -- yet
+// emit ZERO segments (an hstem sled), so it flattens to no points and the
+// per-point charge prices its re-shows at nothing: one Tj per content-stream
+// byte would re-run the interpreter forever, under any budget and past any
+// deadline (ctx is only checked per lexer token). fillGlyph must charge the
+// gate-measured work per SHOW, so re-showing it trips maxFillWork like any
+// other expensive operation.
+func TestCFFZeroSegmentGlyphChargesFillWork(t *testing.T) {
+	defer func(old int64) { maxFillWork = old }(maxFillWork)
+	maxFillWork = 100_000
+
+	sled := append(bytes.Repeat([]byte{1}, 60_000), t2cs("return")...)
+	f := Font{
+		Program: buildCFF(cffOpts{
+			charstrings: [][]byte{t2cs("endchar"), t2cs(-107, "callsubr", "endchar")},
+			sids:        []uint16{34},
+			lsubrs:      [][]byte{sled},
+		}),
+		FirstChar: 'A',
+		Widths:    []float64{600},
+	}
+	if otf, _ := cffToSFNT(f.Program); otf == nil {
+		t.Fatal("the hstem sled must be ADMITTED (one show is within budget); the point is the per-show charge")
+	}
+	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (AA) Tj ET"
+	box := content.Box{URX: 100, URY: 100}
+	_, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	if err == nil || !strings.Contains(err.Error(), "fill work exceeds") {
+		t.Fatalf("two shows of a ~60000-work zero-segment glyph under a 100000 budget must trip fill work, got %v", err)
 	}
 }

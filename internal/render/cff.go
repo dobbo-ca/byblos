@@ -69,14 +69,16 @@ type cffProgram struct {
 // offsets, then the data. nil items with ok=true is the empty INDEX (a bare
 // zero count).
 func cffIndex(p []byte, pos int) (items [][]byte, next int, ok bool) {
-	if pos < 0 || pos+2 > len(p) {
+	// len(p)-pos, not pos+n: a huge pos must not wrap the sum negative and
+	// slip past the bound (a real-encoded DICT operand can reach 2^63).
+	if pos < 0 || len(p)-pos < 2 {
 		return nil, 0, false
 	}
 	count := int(be.Uint16(p[pos:]))
 	if count == 0 {
 		return nil, pos + 2, true
 	}
-	if pos+3 > len(p) {
+	if len(p)-pos < 3 {
 		return nil, 0, false
 	}
 	offSize := int(p[pos+2])
@@ -379,7 +381,11 @@ func parseCFF(p []byte) *cffProgram {
 	}
 	c := &cffProgram{gsubrs: gsubrs, upem: 1000}
 	if m := top[1207]; m != nil { // FontMatrix: upem = 1/m[0]
-		if len(m) < 6 || !(m[0] > 0) {
+		// Only the uniform axis-aligned [s 0 0 s 0 0] form maps onto sfnt's
+		// single unitsPerEm; skew, non-uniform scale, or translation would
+		// render silently at the wrong shape, so refuse to widths-only.
+		if len(m) < 6 || !(m[0] > 0) || m[1] != 0 || m[2] != 0 ||
+			m[3] != m[0] || m[4] != 0 || m[5] != 0 {
 			return nil
 		}
 		u := math.Round(1 / m[0])
@@ -388,18 +394,17 @@ func parseCFF(p []byte) *cffProgram {
 		}
 		c.upem = uint16(u)
 	}
-	intOp := func(op int, want int) (int, bool) {
+	intOp := func(op int) (int, bool) {
 		v := top[op]
-		if len(v) != want {
+		if len(v) != 1 {
 			return 0, false
 		}
-		last := v[want-1]
-		if last != math.Trunc(last) || last < 0 || last > float64(len(p)) {
+		if v[0] != math.Trunc(v[0]) || v[0] < 0 || v[0] > float64(len(p)) {
 			return 0, false
 		}
-		return int(last), true
+		return int(v[0]), true
 	}
-	csOff, ok := intOp(17, 1)
+	csOff, ok := intOp(17)
 	if !ok {
 		return nil
 	}
@@ -421,7 +426,11 @@ func parseCFF(p []byte) *cffProgram {
 			return nil
 		}
 		if s := priv[19]; s != nil { // Subrs, relative to the Private DICT
-			if len(s) != 1 || s[0] != math.Trunc(s[0]) {
+			// Bound BEFORE converting: the float sum cannot overflow (both
+			// terms are <= len(p) once checked), where int(s[0]) of a 2^63-ish
+			// operand would, and hand cffIndex a wrapped position.
+			if len(s) != 1 || s[0] != math.Trunc(s[0]) || s[0] < 0 ||
+				off+s[0] > float64(len(p)) {
 				return nil
 			}
 			c.lsubrs, _, ok = cffIndex(p, int(off)+int(s[0]))
@@ -432,7 +441,7 @@ func parseCFF(p []byte) *cffProgram {
 	}
 	charsetOff := 0
 	if _, present := top[15]; present {
-		if charsetOff, ok = intOp(15, 1); !ok {
+		if charsetOff, ok = intOp(15); !ok {
 			return nil
 		}
 	}
@@ -442,7 +451,7 @@ func parseCFF(p []byte) *cffProgram {
 	}
 	encodingOff := 0
 	if _, present := top[16]; present {
-		if encodingOff, ok = intOp(16, 1); !ok {
+		if encodingOff, ok = intOp(16); !ok {
 			return nil
 		}
 	}
@@ -467,13 +476,14 @@ func cffSubrBias(count int) int32 {
 }
 
 // cffWalkGlyph re-runs the control flow of one glyph's charstring exactly as
-// sfnt's psInterpreter will, charging one unit of work per executed byte.
+// sfnt's psInterpreter will, charging one unit per executed byte against
+// *work (accumulated so fillGlyph can re-charge the total per SHOW).
 // false means the walk tripped maxCharstringWork: the call tree is too big
 // to hand sfnt. true means every byte sfnt will execute was charged and fits
 // -- INCLUDING the malformed cases (reserved operator, bad subr index, stack
 // over/underflow, truncated stream), where sfnt stops with an error at the
 // same byte this walk stops at, so the work already counted is the total.
-func (c *cffProgram) cffWalkGlyph(cs []byte) bool {
+func (c *cffProgram) cffWalkGlyph(cs []byte, work *int64) bool {
 	// sfnt refuses any stream over its 64 KB maxGlyphDataLength before
 	// running a byte of it; mirror that as zero-cost.
 	const maxStream = 64 * 1024
@@ -481,14 +491,13 @@ func (c *cffProgram) cffWalkGlyph(cs []byte) bool {
 		return true
 	}
 	var (
-		work      int64
 		args      []int32
 		call      [][]byte
 		hintBits  int32
 		seenWidth bool
 		ins       = cs
 	)
-	charge := func(n int) bool { work += int64(n); return work <= maxCharstringWork }
+	charge := func(n int) bool { *work += int64(n); return *work <= maxCharstringWork }
 	// stem mirrors t2CStem (and hintmask's implicit vstem): consume the
 	// optional leading width, then count -- never execute -- the hint pairs
 	// so mask data bytes are skipped correctly. false = sfnt errors here.
@@ -630,21 +639,23 @@ func (c *cffProgram) cffWalkGlyph(cs []byte) bool {
 	return true // stream ran out: sfnt's run loop ends here too
 }
 
-// cffBounded walks every glyph the synthetic cmap can reach. GID 0 is never
-// reached: fillGlyph skips it, and the version-2 OS/2 table keeps sfnt.Parse
-// from loading any glyph at all.
-func (c *cffProgram) cffBounded() bool {
-	walked := map[uint16]bool{}
+// cffGateWork walks every glyph the synthetic cmap can reach and returns the
+// work charged per GID; nil means some glyph tripped maxCharstringWork. GID 0
+// is never reached: fillGlyph skips it, and the version-2 OS/2 table keeps
+// sfnt.Parse from loading any glyph at all. A nonempty charstring always
+// charges at least one unit, so work[gid] != 0 doubles as the walked marker
+// (an empty charstring re-walks for free).
+func (c *cffProgram) cffGateWork() []int64 {
+	work := make([]int64, len(c.charstrings))
 	for _, gid := range c.code2gid {
-		if gid == 0 || int(gid) >= len(c.charstrings) || walked[gid] {
+		if gid == 0 || int(gid) >= len(c.charstrings) || work[gid] != 0 {
 			continue
 		}
-		walked[gid] = true
-		if !c.cffWalkGlyph(c.charstrings[int(gid)]) {
-			return false
+		if !c.cffWalkGlyph(c.charstrings[int(gid)], &work[gid]) {
+			return nil
 		}
 	}
-	return true
+	return work
 }
 
 // cffWrapSFNT wraps the raw CFF blob as the 'CFF ' table of a minimal OTTO
@@ -656,7 +667,7 @@ func cffWrapSFNT(cff []byte, numGlyphs int, upem uint16, code2gid *[256]uint16) 
 	head := make([]byte, 54)
 	be.PutUint16(head[18:], upem)
 
-	maxp := be16append(be32append(nil, 0x00005000), uint16(numGlyphs))
+	maxp := be.AppendUint16(be.AppendUint32(nil, 0x00005000), uint16(numGlyphs))
 
 	hhea := make([]byte, 36)
 	hhea[35] = 1 // numberOfHMetrics = 1
@@ -664,20 +675,20 @@ func cffWrapSFNT(cff []byte, numGlyphs int, upem uint16, code2gid *[256]uint16) 
 	hmtx := make([]byte, 4)
 
 	var sub []byte
-	sub = be16append(sub, 6) // format 6
-	sub = be16append(sub, uint16(10+2*len(code2gid)))
-	sub = be16append(sub, 0) // language
-	sub = be16append(sub, 0) // firstCode
-	sub = be16append(sub, uint16(len(code2gid)))
+	sub = be.AppendUint16(sub, 6) // format 6
+	sub = be.AppendUint16(sub, uint16(10+2*len(code2gid)))
+	sub = be.AppendUint16(sub, 0) // language
+	sub = be.AppendUint16(sub, 0) // firstCode
+	sub = be.AppendUint16(sub, uint16(len(code2gid)))
 	for _, g := range code2gid {
-		sub = be16append(sub, g)
+		sub = be.AppendUint16(sub, g)
 	}
 	var cmap []byte
-	cmap = be16append(cmap, 0) // version
-	cmap = be16append(cmap, 1) // one subtable: Windows Unicode BMP
-	cmap = be16append(cmap, 3)
-	cmap = be16append(cmap, 1)
-	cmap = be32append(cmap, 12)
+	cmap = be.AppendUint16(cmap, 0) // version
+	cmap = be.AppendUint16(cmap, 1) // one subtable: Windows Unicode BMP
+	cmap = be.AppendUint16(cmap, 3)
+	cmap = be.AppendUint16(cmap, 1)
+	cmap = be.AppendUint32(cmap, 12)
 	cmap = append(cmap, sub...)
 
 	os2 := make([]byte, 96)
@@ -700,15 +711,15 @@ func cffWrapSFNT(cff []byte, numGlyphs int, upem uint16, code2gid *[256]uint16) 
 		{0x706f7374, post},
 	}
 	var b []byte
-	b = be32append(b, 0x4f54544f) // OTTO
-	b = be16append(b, uint16(len(tables)))
+	b = be.AppendUint32(b, 0x4f54544f) // OTTO
+	b = be.AppendUint16(b, uint16(len(tables)))
 	b = append(b, 0, 0, 0, 0, 0, 0) // searchRange trio: unchecked
 	off := 12 + 16*len(tables)
 	for _, t := range tables {
-		b = be32append(b, t.tag)
-		b = be32append(b, 0) // checksum: unchecked
-		b = be32append(b, uint32(off))
-		b = be32append(b, uint32(len(t.data)))
+		b = be.AppendUint32(b, t.tag)
+		b = be.AppendUint32(b, 0) // checksum: unchecked
+		b = be.AppendUint32(b, uint32(off))
+		b = be.AppendUint32(b, uint32(len(t.data)))
 		off += (len(t.data) + 3) &^ 3
 	}
 	for _, t := range tables {
@@ -720,18 +731,18 @@ func cffWrapSFNT(cff []byte, numGlyphs int, upem uint16, code2gid *[256]uint16) 
 	return b
 }
 
-func be16append(b []byte, v uint16) []byte { return append(b, byte(v>>8), byte(v)) }
-func be32append(b []byte, v uint32) []byte {
-	return append(b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
-}
-
 // cffToSFNT is the 4d entry point: a bare CFF in, an sfnt.Parse-able wrapper
-// out, or nil when the program is not a bare CFF this stage can safely hand
-// to sfnt (see parseCFF and cffBounded).
-func cffToSFNT(p []byte) []byte {
+// plus the gate-measured per-GID charstring work out (fillGlyph charges it per
+// show), or nil when the program is not a bare CFF this stage can safely hand
+// to sfnt (see parseCFF and cffGateWork).
+func cffToSFNT(p []byte) ([]byte, []int64) {
 	c := parseCFF(p)
-	if c == nil || !c.cffBounded() {
-		return nil
+	if c == nil {
+		return nil, nil
 	}
-	return cffWrapSFNT(p, len(c.charstrings), c.upem, &c.code2gid)
+	gwork := c.cffGateWork()
+	if gwork == nil {
+		return nil, nil
+	}
+	return cffWrapSFNT(p, len(c.charstrings), c.upem, &c.code2gid), gwork
 }

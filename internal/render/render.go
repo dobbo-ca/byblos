@@ -265,9 +265,10 @@ type renderer struct {
 	img      *image.RGBA
 	images   ImageFor
 	fonts    FontFor
-	fontsBy  map[string]*textFont // Tf resolutions, nil entry = known unusable
-	points   int64                // flattened points held for the current path
-	fillWork int64                // active-edge x scanline units spent
+	fontsBy  map[string]*textFont   // Tf resolutions, nil entry = known unusable
+	progsBy  map[[32]byte]*fontProg // parsed font programs by content hash
+	points   int64                  // flattened points held for the current path
+	fillWork int64                  // active-edge x scanline units spent
 }
 
 // path is the current path under construction, all points already in device
