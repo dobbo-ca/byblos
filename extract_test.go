@@ -1284,6 +1284,8 @@ func (e pageEnv) XObject(scope int, name string) (content.XObject, bool) {
 
 func (e pageEnv) ExtGStateOpaque(scope int, name string) bool { return name == "GS1" }
 
+func (e pageEnv) Font(scope int, name string) (int, bool) { return 0, false }
+
 func walkPage(t *testing.T, src, form string) *content.Scan {
 	t.Helper()
 	s, err := content.Walk(context.Background(), []byte(src), 0, pageEnv{form: form})

@@ -176,6 +176,12 @@ type Env interface {
 	// not resolve must be reported as not opaque — a walk cannot vouch for a
 	// dictionary it could not read.
 	ExtGStateOpaque(scope int, name string) bool
+	// Font resolves the named /Font resource to a caller-assigned identity,
+	// echoed back in TextShow.FontID; pdfdoc uses the PDF object number. A
+	// name that does not resolve reports false, and shows made with it carry
+	// FontID 0 — the show is still recorded, so "text whose font I could not
+	// read" stays visible rather than silently empty.
+	Font(scope int, name string) (int, bool)
 }
 
 // Placement is one painting of an image XObject, or of an inline image (see
@@ -302,6 +308,34 @@ func (p Paint) Ink() (Box, bool) {
 	return ink, strokingOps[p.Op] || (ink.URX > ink.LLX && ink.URY > ink.LLY)
 }
 
+// TextShow is one string shown by Tj, TJ, ' or ": the bytes exactly as
+// stored, and the text state in force when they were shown. The walk decodes
+// nothing — mapping Raw to Unicode is byb-lez.5's business and word
+// boundaries are byb-lez.7's — it only records where each string started and
+// with what parameters.
+//
+// Trm is the text matrix composed with the CTM at the START of this string:
+// text-space (0,0) through Trm is the string's origin. It deliberately does
+// not fold in Size, Hscale or Rise; a consumer wanting the full rendering
+// matrix of ISO 32000-1 9.4.4 builds it from those fields. The walk advances
+// the text matrix through every positioning operator and every TJ numeric
+// adjustment — which is why each element of a TJ carries its own Trm — but
+// NOT through the glyphs of the string itself: glyph advances need the font's
+// width tables, which live behind FontID and are byb-lez.5's to read.
+type TextShow struct {
+	Raw         []byte  // string bytes as stored, undecoded
+	Font        string  // Tf resource name, "" when no Tf was seen
+	FontID      int     // Env.Font's identity for it, 0 when unresolved
+	Size        float64 // Tf's size operand (Tfs)
+	CharSpacing float64 // Tc, in unscaled text space units
+	WordSpacing float64 // Tw
+	Hscale      float64 // Tz / 100, initially 1
+	Rise        float64 // Ts
+	Mode        int     // rendering mode (Tr); see inksGlyphs
+	Trm         Matrix
+	Index       int // painting order, shared with Placement and Paint
+}
+
 // Scan is what a content-stream walk observed, including everything reached
 // through Form XObjects.
 type Scan struct {
@@ -323,6 +357,13 @@ type Scan struct {
 	// page is an invisible OCR layer (3 Tr) and deposits nothing; classification
 	// wants this count, not TextOps.
 	InkedTextOps int
+	// TextShows is in paint order too, one entry per string shown — a TJ
+	// contributes one per string element, because the numeric adjustments
+	// between them move the text matrix. TextChars, TextOps and InkedTextOps
+	// above are unchanged by it: they are the counters classification already
+	// reads, and this is the record byb-lez.5/.7 and the renderer read.
+	// Capped at maxTextShows; the counters keep counting past the cap.
+	TextShows []TextShow
 	// Paints is in paint order too, and interleaves with Images through the
 	// shared Index. Clipping alone does not appear here.
 	Paints     []Paint
@@ -343,6 +384,12 @@ const (
 	// close; truncating one costs a little TextChars precision on absurd input
 	// and nothing else.
 	maxOperands = 8192
+	// maxTextShows bounds Scan.TextShows: each entry retains its Raw bytes and
+	// text state (~30x the stream on a hostile many-Tj input), and a real
+	// page's OCR layer is a few thousand shows. Past the cap the shows still
+	// count into TextChars/TextOps/InkedTextOps; only the per-string record
+	// stops growing.
+	maxTextShows = 1 << 16
 )
 
 // Walk interprets a decoded content stream, resolving resource names in scope
@@ -401,7 +448,10 @@ func Walk(ctx context.Context, src []byte, scope int, env Env) (*Scan, error) {
 	// ISO 32000-1 section 8.4.1's initial graphics state, for the parts tracked
 	// here. The line width matters: a stroke that never sets one still spreads
 	// half a point either side of its path, not nothing.
-	err := walk(ctx, src, scope, env, gstate{ctm: Identity, opaque: true, lineWidth: 1}, 0, s)
+	err := walk(ctx, src, scope, env, gstate{
+		ctm: Identity, opaque: true, lineWidth: 1,
+		tm: Identity, tlm: Identity, hscale: 1,
+	}, 0, s)
 	return s, err
 }
 
@@ -428,6 +478,15 @@ func Walk(ctx context.Context, src []byte, scope int, env Env) (*Scan, error) {
 // lives on gstate for the same reason opacity does: q/Q save and restore
 // gstate as a unit (case "q"/"Q" below), so nesting and restoring the clip
 // falls out of that for free rather than needing its own stack.
+// The text state (Tf, Tc, Tw, Tz, TL, Ts) is part of the graphics state too
+// (table 52), so q/Q saving it as a unit is the spec's behaviour. The text
+// matrix and line matrix are NOT — the spec scopes them to a BT...ET pair —
+// but they live here anyway, because pass-by-value recursion into forms and
+// q/Q nesting then handle them for free. Known simplification: a stream that
+// runs `Tm ... q ... Td ... Q` INSIDE one text object gets the Td undone by
+// the Q, where a strict reader would keep it. No producer has been seen to
+// position text across a q/Q boundary like that, and BT resets both matrices
+// anyway.
 type gstate struct {
 	ctm       Matrix
 	opaque    bool
@@ -436,6 +495,24 @@ type gstate struct {
 	fill      Color
 	stroke    Color
 	clip      *Box
+
+	tm, tlm  Matrix  // text matrix and line matrix; BT resets both
+	font     string  // Tf resource name
+	fontID   int     // Env.Font's identity for font, 0 when unresolved
+	fontSize float64 // Tfs
+	charSp   float64 // Tc
+	wordSp   float64 // Tw
+	hscale   float64 // Tz / 100, initially 1
+	leading  float64 // TL
+	rise     float64 // Ts
+}
+
+// nextLine moves to the start of the next line, offset by (tx, ty) from the
+// start of the current one: Td, TD, T*, and the implicit advance of ' and "
+// (ISO 32000-1 9.4.2). The line matrix moves and the text matrix follows it.
+func (gs *gstate) nextLine(tx, ty float64) {
+	gs.tlm = Matrix{1, 0, 0, 1, tx, ty}.Mul(gs.tlm)
+	gs.tm = gs.tlm
 }
 
 // pathBox accumulates the device-space bounds of the path under construction.
@@ -547,6 +624,60 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 				gs.lineWidth = v
 			}
 
+		// Text state (ISO 32000-1 9.3, 9.4.2). BT resets the text and line
+		// matrices to identity; ET has nothing to undo, because the matrices
+		// are only meaningful between the two and the next BT resets them
+		// again. The remaining parameters live on gstate, so q/Q and form
+		// recursion handle them like every other graphics-state entry.
+		case "BT":
+			gs.tm, gs.tlm = Identity, Identity
+		case "Tf":
+			gs.font = lastName(ops)
+			if v, ok := lastNumber(ops); ok {
+				gs.fontSize = v
+			}
+			gs.fontID = 0
+			if id, ok := env.Font(scope, gs.font); ok {
+				gs.fontID = id
+			}
+		case "Td":
+			if n := numberOperands(ops); len(n) >= 2 {
+				gs.nextLine(n[len(n)-2], n[len(n)-1])
+			}
+		case "TD":
+			// Like Td, but also sets the leading to -ty (table 108).
+			if n := numberOperands(ops); len(n) >= 2 {
+				gs.leading = -n[len(n)-1]
+				gs.nextLine(n[len(n)-2], n[len(n)-1])
+			}
+		case "Tm":
+			if m, ok := matrixOperands(ops); ok {
+				gs.tm, gs.tlm = m, m
+			}
+		case "T*":
+			gs.nextLine(0, -gs.leading)
+		case "TL":
+			if v, ok := lastNumber(ops); ok {
+				gs.leading = v
+			}
+		case "Tc":
+			if v, ok := lastNumber(ops); ok {
+				gs.charSp = v
+			}
+		case "Tw":
+			if v, ok := lastNumber(ops); ok {
+				gs.wordSp = v
+			}
+		case "Tz":
+			// The operand is a percentage (table 105).
+			if v, ok := lastNumber(ops); ok {
+				gs.hscale = v / 100
+			}
+		case "Ts":
+			if v, ok := lastNumber(ops); ok {
+				gs.rise = v
+			}
+
 		// Colour. The lower-case operator sets the nonstroking colour and the
 		// upper-case one the stroking colour (ISO 32000-1 section 8.6.8). cs and
 		// CS name a space and reset the colour to that space's initial value,
@@ -604,9 +735,21 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 			if inksGlyphs(gs.tr) {
 				s.InkedTextOps++
 			}
+			if op == "\"" {
+				// " sets the word and character spacing from its two leading
+				// operands, then behaves as ' (ISO 32000-1 9.4.3 table 109).
+				if n := numberOperands(ops); len(n) >= 2 {
+					gs.wordSp, gs.charSp = n[len(n)-2], n[len(n)-1]
+				}
+			}
+			if op != "Tj" {
+				// ' and " advance to the next line BEFORE showing.
+				gs.nextLine(0, -gs.leading)
+			}
 			for i := len(ops) - 1; i >= 0; i-- {
 				if ops[i].Kind == KindString {
 					s.TextChars += len(ops[i].Text)
+					recordText(s, gs, ops[i].Text)
 					break
 				}
 			}
@@ -616,8 +759,16 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 				s.InkedTextOps++
 			}
 			for _, o := range ops {
-				if o.Kind == KindString {
+				switch o.Kind {
+				case KindString:
 					s.TextChars += len(o.Text)
+					recordText(s, gs, o.Text)
+				case KindNumber:
+					// A TJ number is subtracted from the displacement, in
+					// thousandths of unscaled text space (9.4.3): it moves the
+					// text matrix, scaled by the font size and horizontal
+					// scaling, and leaves the line matrix alone.
+					gs.tm = Matrix{1, 0, 0, 1, -o.Num / 1000 * gs.fontSize * gs.hscale, 0}.Mul(gs.tm)
 				}
 			}
 		case "S", "s", "f", "F", "f*", "B", "B*", "b", "b*":
@@ -652,6 +803,20 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 		}
 		ops = ops[:0]
 	}
+}
+
+// recordText appends one shown string with the text state in force. Raw
+// aliases the lexer's freshly-decoded string buffer, never the source stream.
+func recordText(s *Scan, gs gstate, raw []byte) {
+	if len(s.TextShows) >= maxTextShows {
+		return
+	}
+	s.order++
+	s.TextShows = append(s.TextShows, TextShow{
+		Raw: raw, Font: gs.font, FontID: gs.fontID, Size: gs.fontSize,
+		CharSpacing: gs.charSp, WordSpacing: gs.wordSp, Hscale: gs.hscale,
+		Rise: gs.rise, Mode: gs.tr, Trm: gs.tm.Mul(gs.ctm), Index: s.order,
+	})
 }
 
 // strokingOps are the painting operators that lay ink along the path, as well

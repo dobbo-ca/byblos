@@ -206,9 +206,10 @@ type Doc interface {
 	// Annots returns page n's annotations. They are not part of Page because
 	// nothing in classification reads them yet; see annots.go.
 	Annots(n int) ([]Annot, error)
-	// XObject and ExtGStateOpaque implement content.Env.
+	// XObject, ExtGStateOpaque and Font implement content.Env.
 	XObject(scope int, name string) (content.XObject, bool)
 	ExtGStateOpaque(scope int, name string) bool
+	Font(scope int, name string) (int, bool)
 	// ImageInfo returns the dictionary facts for an image resolved by XObject,
 	// keyed by the ID that XObject returned.
 	ImageInfo(id int) (ImageInfo, bool)
@@ -649,6 +650,21 @@ func (d *doc) ExtGStateOpaque(sc int, name string) bool {
 		}
 	}
 	return true
+}
+
+// Font resolves the named /Font resource to a stable id, the font half of
+// content.Env. The id is the font dict's object number when the resource is an
+// indirect reference, and a synthetic negative one otherwise — fresh per call,
+// exactly like the XObject path above. Every /Font in the corpus is indirect,
+// so the direct-dict case is unexercised; if a real archive ever shows direct
+// font dicts, that call site is where a per-(scope, name) cache would go, so
+// repeated Tf ops naming the same dict agree.
+func (d *doc) Font(sc int, name string) (int, bool) {
+	obj, ok := d.lookupResource(sc, "Font", name)
+	if !ok {
+		return 0, false
+	}
+	return d.identify(obj), true
 }
 
 // identify returns a stable id for an XObject: its PDF object number when it is
