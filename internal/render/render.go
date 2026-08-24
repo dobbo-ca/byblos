@@ -20,11 +20,20 @@
 // settled here: fills sample pixel centers against half-open scanline spans,
 // nonzero sums signed crossings, even-odd takes their parity.
 //
+// WHY NOT x/image/draw's NearestNeighbor.Transform for stage 4b's image
+// draws: it could replace the non-stencil sampling loop, but the stencil
+// branch would still need an inverse-mapping loop (or a mask-image adapter),
+// and the per-scanline maxFillWork charge would collapse to one up-front
+// bounding-box charge -- one loop serving both branches under one budget
+// shape is smaller than a loop plus a Transform call.
+//
 // Stage 4a scope: path construction (m l c v y re h), painting (f F f* B B*
 // b b* S s n), DeviceGray/DeviceRGB colour, CTM, and a minimal rectangular
 // clip (W/W* intersect the clip with the path's device bounding box, the
-// same approximation walk.go uses). Text, XObjects, shading and inline
-// images are later stages and are ignored here.
+// same approximation walk.go uses). Stage 4b adds Do for image XObjects,
+// sampled nearest-neighbor under the CTM; the caller supplies the DECODED
+// pixels (see ImageFor). Text, form XObjects, shading and inline images are
+// later stages and are ignored here.
 //
 // Untrusted input: the page box and scale come out of the file, so raster
 // dimensions are clamped before allocation; flattened path points and
@@ -72,14 +81,39 @@ var (
 	// pixel writes dominate large fills, so a budget that skipped them let a
 	// 387 KB stream of full-canvas fills buy ~33 minutes of CPU. 1<<28 units
 	// is four full coats of the largest permitted canvas (maxRasterPixels).
+	// Image draws charge their destination pixels here too -- the only work
+	// drawImage does is one sample per DESTINATION pixel, so no separate
+	// source-pixel budget exists (decoding already happened behind ImageFor,
+	// under the caller's own budgets).
 	maxFillWork int64 = 1 << 28
 )
+
+// Image is a decoded image XObject ready for Do to sample. Decoding is the
+// caller's: byblos's extract path already decodes flate/DCT/CCITT/JBIG2, and
+// this package only samples the result. For a stencil (/ImageMask true), Data
+// is the decoded 1-bit gray by the usual convention -- luminance below one
+// half is sample value 0, the value that marks the page under the default
+// /Decode (ISO 32000-1 8.9.6.2).
+type Image struct {
+	Data    image.Image
+	Stencil bool // /ImageMask: paint the fill colour through the stencil
+	Invert  bool // stencil /Decode [1 0]: paint where the sample is 1, not 0
+}
+
+// ImageFor resolves a Do operand to a decoded image. ok=false skips the draw
+// cleanly -- an unresolved name, a form XObject, or a codec byblos does not
+// decode (JPX) must not stop the rest of the page from rendering. Page calls
+// the resolver once per Do, so a stream repeating one name pays the decode
+// each time: implementations must cache by name (or bound their own decode
+// work), because only the resulting destination writes are budgeted here.
+type ImageFor func(name string) (Image, bool)
 
 // Page interprets the vector path operators of the decoded content stream src
 // and rasterises them onto a white, opaque canvas. box is the page box in PDF
 // points (user space, y up); scale is device pixels per point, so the canvas
 // is box's size times scale with device row 0 at the TOP of the page.
-func Page(ctx context.Context, src []byte, box content.Box, scale float64) (*image.RGBA, error) {
+// images resolves Do operands; nil renders paths only.
+func Page(ctx context.Context, src []byte, box content.Box, scale float64, images ImageFor) (*image.RGBA, error) {
 	w, h, err := rasterSize(box, scale)
 	if err != nil {
 		return nil, err
@@ -88,7 +122,7 @@ func Page(ctx context.Context, src []byte, box content.Box, scale float64) (*ima
 	for i := range img.Pix {
 		img.Pix[i] = 0xff
 	}
-	r := &renderer{img: img}
+	r := &renderer{img: img, images: images}
 	// User space to device space: scale, then flip y so user URY lands on
 	// device row 0. Row-vector convention, like content.Matrix.
 	base := content.Matrix{scale, 0, 0, -scale, -box.LLX * scale, box.URY * scale}
@@ -187,6 +221,7 @@ type subpath struct {
 // renderer carries the canvas and the per-call budgets.
 type renderer struct {
 	img      *image.RGBA
+	images   ImageFor
 	points   int64 // flattened points held for the current path
 	fillWork int64 // active-edge x scanline units spent
 }
@@ -398,6 +433,11 @@ func (r *renderer) run(ctx context.Context, src []byte, gs gstate) error {
 			}
 		case "h":
 			pth.close()
+
+		case "Do":
+			if err := r.drawImage(lastName(ops), gs); err != nil {
+				return err
+			}
 
 		case "W", "W*":
 			// Both rules collapse to the same device bounding box here.
@@ -737,6 +777,136 @@ func (r *renderer) strokeSubpaths(subs []subpath, gs gstate, clip clipRect) erro
 		}
 	}
 	return nil
+}
+
+// drawImage paints an image XObject under the CTM (stage 4b, byb-8b9.2). The
+// image occupies the unit square in its own space (ISO 32000-1 8.9.5.2), so
+// each destination pixel center inside the placed square's device bounding
+// box is mapped BACK through the CTM's inverse and sampled nearest-neighbor
+// -- the inverse mapping is what makes rotation, flip and shear exact, where
+// forward-mapping source pixels would leave seams. Source row 0 is the top of
+// the unit square (v near 1), the same orientation image.Image uses.
+func (r *renderer) drawImage(name string, gs gstate) error {
+	if r.images == nil || name == "" {
+		return nil
+	}
+	im, ok := r.images(name)
+	if !ok || im.Data == nil {
+		return nil // unresolved, undecodable, or not an image: skip the draw
+	}
+	sb := im.Data.Bounds()
+	sw, sh := sb.Dx(), sb.Dy()
+	if sw <= 0 || sh <= 0 {
+		return nil
+	}
+	m := gs.ctm
+	det := m[0]*m[3] - m[1]*m[2]
+	if det == 0 || math.IsNaN(det) || math.IsInf(det, 0) {
+		return nil // a singular CTM places the image with zero area
+	}
+	// Destination range: the unit square's device bounding box intersected
+	// with the clip, under the same pixel-center convention as fills. The
+	// intersection happens IN FLOATS, checked before any int conversion: a
+	// huge-but-finite translation (a 301-digit operand passes matrixOperands'
+	// Inf/NaN check) would overflow the conversion, which on amd64 wraps to
+	// minInt64 and turns the loop below into a ~9e18-iteration hang. After
+	// the guard both bounds sit inside the clip, which deviceClip bounded to
+	// the canvas, so the conversions are safe; the float comparison also
+	// rejects NaN bounds.
+	ub := m.UnitSquareBox()
+	clip := r.deviceClip(gs.clip)
+	fx0 := math.Max(ub.LLX, clip.x0)
+	fx1 := math.Min(ub.URX, clip.x1)
+	fy0 := math.Max(ub.LLY, clip.y0)
+	fy1 := math.Min(ub.URY, clip.y1)
+	if !(fx0 < fx1 && fy0 < fy1) {
+		return nil
+	}
+	x0 := int(math.Ceil(fx0 - 0.5))
+	x1 := int(math.Ceil(fx1 - 0.5))
+	y0 := int(math.Ceil(fy0 - 0.5))
+	y1 := int(math.Ceil(fy1 - 0.5))
+	if x1 <= x0 || y1 <= y0 {
+		return nil
+	}
+	at := samplerFor(im.Data)
+	for y := y0; y < y1; y++ {
+		r.fillWork += int64(x1 - x0)
+		if r.fillWork > maxFillWork {
+			return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+		}
+		dy := float64(y) + 0.5 - m[5]
+		for x := x0; x < x1; x++ {
+			// Row-vector inverse: [u v] = [x-e, y-f] * [[a b],[c d]]^-1.
+			dx := float64(x) + 0.5 - m[4]
+			u := (dx*m[3] - dy*m[2]) / det
+			v := (dy*m[0] - dx*m[1]) / det
+			if !(u >= 0 && u < 1 && v >= 0 && v < 1) {
+				continue
+			}
+			sx := sb.Min.X + min(int(u*float64(sw)), sw-1)
+			sy := sb.Min.Y + min(int((1-v)*float64(sh)), sh-1)
+			sr, sg, sbl, sa := at(sx, sy)
+			if im.Stencil {
+				// The default /Decode [0 1] paints where the decoded sample
+				// is 0; Invert (/Decode [1 0]) paints where it is 1
+				// (ISO 32000-1 8.9.6.2).
+				one := sr+sg+sbl >= 3*0x8000
+				if one == im.Invert {
+					r.img.SetRGBA(x, y, gs.fill.rgba)
+				}
+				continue
+			}
+			r.compose(x, y, sr, sg, sbl, sa)
+		}
+	}
+	return nil
+}
+
+// samplerFor returns src's pixels as premultiplied 16-bit channels. The
+// concrete fast paths exist because the At interface boxes one color.Color
+// heap allocation per call -- measured at exactly one alloc per sampled
+// destination pixel, ~2.5 GB of garbage for one budget-ceiling page.
+func samplerFor(src image.Image) func(x, y int) (r, g, b, a uint32) {
+	switch d := src.(type) {
+	case *image.RGBA:
+		return func(x, y int) (uint32, uint32, uint32, uint32) {
+			c := d.RGBAAt(x, y)
+			return uint32(c.R) * 0x101, uint32(c.G) * 0x101, uint32(c.B) * 0x101, uint32(c.A) * 0x101
+		}
+	case *image.NRGBA:
+		return func(x, y int) (uint32, uint32, uint32, uint32) {
+			c := d.NRGBAAt(x, y)
+			a := uint32(c.A)
+			pm := func(v uint8) uint32 { return uint32(v) * 0x101 * a / 0xff } // color.NRGBA.RGBA's arithmetic
+			return pm(c.R), pm(c.G), pm(c.B), a * 0x101
+		}
+	case *image.Gray:
+		return func(x, y int) (uint32, uint32, uint32, uint32) {
+			g := uint32(d.GrayAt(x, y).Y) * 0x101
+			return g, g, g, 0xffff
+		}
+	default:
+		return func(x, y int) (uint32, uint32, uint32, uint32) { return src.At(x, y).RGBA() }
+	}
+}
+
+// compose source-over composites one premultiplied 16-bit source colour onto
+// the opaque canvas -- decoded PNGs can carry alpha even though byblos adds
+// no SMask handling in this stage.
+func (r *renderer) compose(x, y int, sr, sg, sb, sa uint32) {
+	switch sa {
+	case 0:
+	case 0xffff:
+		r.img.SetRGBA(x, y, color.RGBA{uint8(sr >> 8), uint8(sg >> 8), uint8(sb >> 8), 255})
+	default:
+		d := r.img.RGBAAt(x, y)
+		inv := 0xffff - sa
+		blend := func(s uint32, dc uint8) uint8 {
+			return uint8((s + uint32(dc)*0x101*inv/0xffff) >> 8)
+		}
+		r.img.SetRGBA(x, y, color.RGBA{blend(sr, d.R), blend(sg, d.G), blend(sb, d.B), blend(sa, d.A)})
+	}
 }
 
 // deviceScale is walk.go's: how much the CTM magnifies lengths, exact for
