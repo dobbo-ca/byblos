@@ -97,6 +97,18 @@ func TestBoxRectRoundsToNearestAndWidensOnlyToStayNonEmpty(t *testing.T) {
 		// A hair either side of an integer boundary: the widened rectangle is
 		// still the smallest one containing the box.
 		{"a sub-point box straddling an integer", contentBox(9.9, 9.9, 10.1, 10.1), image.Rect(9, 9, 11, 11)},
+		// byb-wtp divergence 2: rounding each edge independently can move the
+		// reported width a whole point away from round(hi-lo), the value
+		// poppler's page-size arithmetic agrees with. round(0.3) = 0 and
+		// round(595.6) = 596 independently, an off-by-one width of 596 where
+		// the continuous extent 595.3 rounds to 595.
+		{"a wide sub-point offset matches poppler's continuous width",
+			contentBox(0.3, 0, 595.6, 792), image.Rect(0, 0, 595, 792)},
+		// Edges round to different integers (10 and 11) but the continuous
+		// extent (0.4) rounds to 0: round(lo) + round(hi-lo) must not collapse
+		// this the same way the l == h branch above does not.
+		{"edges round apart but the continuous extent rounds to zero",
+			contentBox(10.3, 0, 10.7, 792), image.Rect(10, 0, 11, 792)},
 
 		// A box with NO extent on an axis marks nothing, and stays empty. This is
 		// what the clipped-away guard is for and it must survive the widening.

@@ -355,11 +355,32 @@ func boxRect(b content.Box) image.Rectangle {
 // Both edges move when they collapse, not just the far one: 10.6 and 10.9 round
 // to the same 11 and ceil(10.9) is 11 as well, so widening the far edge alone
 // would leave the interval empty.
+//
+// The far edge is round(lo) + round(hi-lo), not round(hi): rounding both edges
+// independently can move the reported extent a whole point away from
+// round(hi-lo), the value poppler's page-size arithmetic agrees with (byb-wtp).
+// 0.3 and 595.6 round independently to 0 and 596, a width of 596, where the
+// continuous extent 595.3 rounds to 595.
+//
+// round(hi-lo) can itself be 0 for a positive extent whose rounded edges
+// still land on different integers (10.3 and 10.7 round to 10 and 11, but
+// hi-lo is 0.4, which rounds to 0): that would collapse the interval this
+// function exists to keep open, so a positive extent is never reported
+// narrower than 1.
 func roundExtent(lo, hi float64) (int, int) {
-	if l, h := round(lo), round(hi); l != h || hi <= lo {
+	l, h := round(lo), round(hi)
+	switch {
+	case hi <= lo:
 		return l, h
+	case l == h:
+		return int(math.Floor(lo)), int(math.Ceil(hi))
+	default:
+		w := round(hi - lo)
+		if w < 1 {
+			w = 1
+		}
+		return l, l + w
 	}
-	return int(math.Floor(lo)), int(math.Ceil(hi))
 }
 
 func round(v float64) int { return int(math.Round(v)) }
