@@ -247,14 +247,6 @@ type doc struct {
 	refs     map[int]types.IndirectRef    // xref identity of those streams, for writing
 	nextID   int                          // synthetic ids for direct (non-indirect) image objects
 	fontRefs map[string]types.IndirectRef // embedded fonts, keyed by TrueTypeFont.BaseFont
-	fontIDs  map[fontKey]int              // Font's resolutions, so a direct font dict keeps one synthetic id
-}
-
-// fontKey identifies a font resolution: the scope the name was used in and the
-// name itself.
-type fontKey struct {
-	scope int
-	name  string
 }
 
 type scope struct {
@@ -289,7 +281,6 @@ func Open(rs io.ReadSeeker) (d Doc, err error) {
 		streams: map[int]*types.StreamDict{},
 		refs:    map[int]types.IndirectRef{},
 		nextID:  -1,
-		fontIDs: map[fontKey]int{},
 	}, nil
 }
 
@@ -663,21 +654,17 @@ func (d *doc) ExtGStateOpaque(sc int, name string) bool {
 
 // Font resolves the named /Font resource to a stable id, the font half of
 // content.Env. The id is the font dict's object number when the resource is an
-// indirect reference, and a synthetic negative id otherwise — cached per scope
-// and name, because identify mints a fresh synthetic id per call and every Tf
-// naming the same direct font dict must agree.
+// indirect reference, and a synthetic negative one otherwise — fresh per call,
+// exactly like the XObject path above. Every /Font in the corpus is indirect,
+// so the direct-dict case is unexercised; if a real archive ever shows direct
+// font dicts, that call site is where a per-(scope, name) cache would go, so
+// repeated Tf ops naming the same dict agree.
 func (d *doc) Font(sc int, name string) (int, bool) {
-	key := fontKey{scope: sc, name: name}
-	if id, ok := d.fontIDs[key]; ok {
-		return id, true
-	}
 	obj, ok := d.lookupResource(sc, "Font", name)
 	if !ok {
 		return 0, false
 	}
-	id := d.identify(obj)
-	d.fontIDs[key] = id
-	return id, true
+	return d.identify(obj), true
 }
 
 // identify returns a stable id for an XObject: its PDF object number when it is

@@ -362,6 +362,7 @@ type Scan struct {
 	// between them move the text matrix. TextChars, TextOps and InkedTextOps
 	// above are unchanged by it: they are the counters classification already
 	// reads, and this is the record byb-lez.5/.7 and the renderer read.
+	// Capped at maxTextShows; the counters keep counting past the cap.
 	TextShows []TextShow
 	// Paints is in paint order too, and interleaves with Images through the
 	// shared Index. Clipping alone does not appear here.
@@ -383,6 +384,12 @@ const (
 	// close; truncating one costs a little TextChars precision on absurd input
 	// and nothing else.
 	maxOperands = 8192
+	// maxTextShows bounds Scan.TextShows: each entry retains its Raw bytes and
+	// text state (~30x the stream on a hostile many-Tj input), and a real
+	// page's OCR layer is a few thousand shows. Past the cap the shows still
+	// count into TextChars/TextOps/InkedTextOps; only the per-string record
+	// stops growing.
+	maxTextShows = 1 << 16
 )
 
 // Walk interprets a decoded content stream, resolving resource names in scope
@@ -801,6 +808,9 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 // recordText appends one shown string with the text state in force. Raw
 // aliases the lexer's freshly-decoded string buffer, never the source stream.
 func recordText(s *Scan, gs gstate, raw []byte) {
+	if len(s.TextShows) >= maxTextShows {
+		return
+	}
 	s.order++
 	s.TextShows = append(s.TextShows, TextShow{
 		Raw: raw, Font: gs.font, FontID: gs.fontID, Size: gs.fontSize,

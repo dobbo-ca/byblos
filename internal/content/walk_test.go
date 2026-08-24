@@ -1506,3 +1506,22 @@ func TestWalkOrdersTextAgainstPlacements(t *testing.T) {
 			s.TextShows[0].Index, s.Images[0].Index, s.TextShows[1].Index)
 	}
 }
+
+// A hostile many-Tj stream must not grow TextShows without bound: each entry
+// retains its Raw bytes and text state, a ~30x retained-heap amplification of
+// the stream. The counters keep counting past the cap.
+func TestWalkCapsTextShows(t *testing.T) {
+	const extra = 5
+	src := "BT " + strings.Repeat("(a) Tj ", maxTextShows+extra) + "ET"
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.TextShows) != maxTextShows {
+		t.Errorf("TextShows = %d entries; want the cap, %d", len(s.TextShows), maxTextShows)
+	}
+	if s.TextOps != maxTextShows+extra || s.TextChars != maxTextShows+extra {
+		t.Errorf("TextOps = %d, TextChars = %d; want both %d, counting past the cap",
+			s.TextOps, s.TextChars, maxTextShows+extra)
+	}
+}
