@@ -17,7 +17,7 @@ func wantNames() []string {
 		"invisible-text", "invisible-text-in-form",
 		"invisible-text-form-inherits", "invisible-text-bracketed",
 		"mixed",
-		"dup-raster", "jbig2", "stacked", "stacked-in-form",
+		"dup-raster", "jbig2", "jpx", "stacked", "stacked-in-form",
 		"stacked-smask", "stacked-alpha", "mrc", "mrc-inset-base",
 		"indirect-kids", "malformed", "scan-reversed-cropbox",
 		"blank-page", "booklet", "scan-bilevel",

@@ -23,7 +23,7 @@ import (
 // returns min(input, pdfcpu-optimized-output) and records which branch it
 // took on Provenance.Optimized. Measured directly against this corpus
 // (candidate = a document carrying a freshly-written Provenance, vs the raw
-// input) exactly TWO of the 35 readable corpus documents take the
+// input) exactly TWO of the 36 readable corpus documents take the
 // non-pass-through branch once the provenance-record cost is accounted for:
 // "dup-raster" (raw 2785 B, pdfcpu 1865 B, candidate 2143 B) and "booklet"
 // (raw 12135 B, pdfcpu 10504 B, candidate 10783 B). Every other document,
@@ -61,7 +61,7 @@ const passThroughFixture = "born-digital"
 // document, Optimize's output is never larger than its input. This holds by
 // construction once Optimize takes the smaller of the two candidates; an
 // implementation that always returns pdfcpu's rewrite (ignoring the size
-// policy) fails it on 32 of these 35 readable corpus documents.
+// policy) fails it on 34 of these 36 readable corpus documents.
 func TestOptimizeNeverLargerThanInput(t *testing.T) {
 	for _, d := range corpus.All() {
 		if d.Name == "malformed" {
@@ -224,7 +224,7 @@ func TestOptimizeProvenanceSurvivesPassThrough(t *testing.T) {
 // pdfcpu read-validate-optimize-write pass, so its output is already at
 // pdfcpu's fixed point -- a SECOND Optimize call on WriteProvenance's own
 // output has nothing left to shrink and always takes the pass-through
-// branch (measured: every one of the 35 readable corpus documents,
+// branch (measured: every one of the 36 readable corpus documents,
 // pre-loaded with a provenance record via WriteProvenance, takes
 // pass-through). DupRasterWithInfo sidesteps that by setting the Info entry
 // directly in the trailer, so the input has never been through pdfcpu at

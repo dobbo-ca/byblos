@@ -32,7 +32,7 @@ type OptimizeOptions struct {
 	// Two consequences a caller has to know about:
 	//
 	//   - The output is larger than it would have been WITHOUT linearizing:
-	//     measured over the 35 readable corpus documents, +649 to +2071 bytes
+	//     measured over the 36 readable corpus documents, +649 to +2071 bytes
 	//     against the same document rewritten and not linearized, with no
 	//     exceptions. Linearization adds a second cross-reference section, a
 	//     parameter dictionary and a hint stream, and it forbids the object
@@ -242,7 +242,7 @@ func OptimizeContext(ctx context.Context, w io.Writer, r io.ReadSeeker, opts Opt
 		// Measured on this implementation's own output, linearizing a corpus
 		// document costs +649 to +2071 bytes over the same document rewritten
 		// and not linearized, and +7 to +1007 over the input itself -- so all
-		// 35 readable corpus documents exceed their input, and under the rule
+		// 36 readable corpus documents exceed their input, and under the rule
 		// every one of them would be handed back to the caller
 		// un-linearized. Linearization is a
 		// correctness requirement for the born-digital path, not a size

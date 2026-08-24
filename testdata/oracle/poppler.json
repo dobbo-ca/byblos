@@ -328,6 +328,28 @@
       ],
       "has_text": false
     },
+    "jpx": {
+      "pages": 1,
+      "page_width_pt": 612,
+      "page_height_pt": 792,
+      "images": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "bpc": 8
+        }
+      ],
+      "rasters": [
+        {
+          "page": 1,
+          "width": 306,
+          "height": 396,
+          "pixels_sha256": "161db54cad71549a39501f1deddd1dec8e1ed4275634ae01e54c90dbd204fbdd"
+        }
+      ],
+      "has_text": false
+    },
     "malformed": {
       "pages": 0,
       "page_width_pt": 0,
