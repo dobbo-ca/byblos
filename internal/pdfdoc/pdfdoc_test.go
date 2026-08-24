@@ -365,6 +365,36 @@ func TestExtGStateOpaque(t *testing.T) {
 	}
 }
 
+// Font resolves a /Font resource name to the stable id content.Walk records
+// on each TextShow (byb-lez.6); byb-lez.5 keys its font reads by it.
+func TestFontResolvesToAStableID(t *testing.T) {
+	d := open(t, "born-digital")
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v", err)
+	}
+	id, ok := d.Font(p.Scope, "F1")
+	if !ok {
+		t.Fatal("Font(F1) not resolved; the fixture declares it")
+	}
+	if again, _ := d.Font(p.Scope, "F1"); again != id {
+		t.Errorf("Font(F1) = %d then %d; want a stable id", id, again)
+	}
+	if _, ok := d.Font(p.Scope, "Nope"); ok {
+		t.Error("Font(undeclared name) resolved; want false")
+	}
+	s, err := content.Walk(context.Background(), p.Content, p.Scope, d)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.TextShows) == 0 {
+		t.Fatal("TextShows empty; the fixture shows text")
+	}
+	if s.TextShows[0].FontID != id {
+		t.Errorf("TextShows[0].FontID = %d; want %d", s.TextShows[0].FontID, id)
+	}
+}
+
 func TestImageInfoReportsTransparencyEntries(t *testing.T) {
 	d := open(t, "stacked-smask")
 	p, err := d.Page(1)

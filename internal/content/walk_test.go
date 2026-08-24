@@ -22,6 +22,9 @@ func (e mapEnv) XObject(scope int, name string) (XObject, bool) {
 // documents that care carry a gsEnv instead.
 func (e mapEnv) ExtGStateOpaque(scope int, name string) bool { return true }
 
+// mapEnv resolves no fonts either; the tests that care carry a fontEnv.
+func (e mapEnv) Font(scope int, name string) (int, bool) { return 0, false }
+
 // gsEnv names the /ExtGState resources that introduce transparency. Everything
 // else is opaque, which is also how a real document behaves: a graphics state
 // that says nothing about /ca, /CA or /SMask leaves painting opaque.
@@ -1317,4 +1320,189 @@ func TestWalkMissingFormBBoxDoesNotClip(t *testing.T) {
 		t.Fatalf("Images = %+v; want one", s.Images)
 	}
 	boxEq(t, s.Images[0].Box, 0, 0, 1000, 1000)
+}
+
+func matrixEq(t *testing.T, got Matrix, want Matrix) {
+	t.Helper()
+	const eps = 1e-9
+	for i := range got {
+		if math.Abs(got[i]-want[i]) > eps {
+			t.Errorf("matrix = %v; want %v", got, want)
+			return
+		}
+	}
+}
+
+// showOrigin asserts where the shown string starts in device space: text-space
+// (0,0) through Trm, rise excluded.
+func showOrigin(t *testing.T, ts TextShow, x, y float64) {
+	t.Helper()
+	gx, gy := ts.Trm.Apply(0, 0)
+	const eps = 1e-9
+	if math.Abs(gx-x) > eps || math.Abs(gy-y) > eps {
+		t.Errorf("origin(%q) = (%g, %g); want (%g, %g)", ts.Raw, gx, gy, x, y)
+	}
+}
+
+// The bead's acceptance fixture (byb-lez.6): hand-computed Tm/Td/TJ origins,
+// a BT reset between two text objects, and a " with non-zero Tw/Tc.
+//
+// Walk does not know glyph widths (fonts are byb-lez.5's business), so a
+// string deposits no horizontal advance of its own; the origins here are
+// computed under exactly that model, from the positioning operators alone.
+func TestWalkTracksTextPositions(t *testing.T) {
+	src := "BT /F1 12 Tf 50 700 Td (One) Tj [ (Two) -1000 (Three) ] TJ ET\n" +
+		"BT /F1 10 Tf 2 0 0 2 100 500 Tm 14 TL (A) Tj 3 4 (Quote) \" ET"
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.TextShows) != 5 {
+		t.Fatalf("TextShows = %d entries; want 5", len(s.TextShows))
+	}
+	one, two, three, a, quote := s.TextShows[0], s.TextShows[1], s.TextShows[2], s.TextShows[3], s.TextShows[4]
+	if string(one.Raw) != "One" || one.Font != "F1" || one.Size != 12 {
+		t.Errorf("show 0 = %+v; want (One) in F1 at 12", one)
+	}
+	showOrigin(t, one, 50, 700)
+	// A TJ number is subtracted from the displacement, in thousandths of text
+	// space scaled by the font size: -1000 moves the next string RIGHT by
+	// 12pt (ISO 32000-1 9.4.3).
+	showOrigin(t, two, 50, 700)
+	showOrigin(t, three, 62, 700)
+	// BT reset the matrices; Tm then set both, and " advanced by the leading
+	// (14, doubled by Tm's scale) before showing.
+	if a.Size != 10 {
+		t.Errorf("show 3 Size = %g; want 10", a.Size)
+	}
+	showOrigin(t, a, 100, 500)
+	matrixEq(t, a.Trm, Matrix{2, 0, 0, 2, 100, 500})
+	if string(quote.Raw) != "Quote" || quote.WordSpacing != 3 || quote.CharSpacing != 4 {
+		t.Errorf("show 4 = %+v; want (Quote) with Tw 3 Tc 4", quote)
+	}
+	showOrigin(t, quote, 100, 472)
+}
+
+// Td, TD and T* differ only in what they do to the leading, and a walk that
+// conflates them puts every later T* line in the wrong place: TD sets the
+// leading to -ty, Td leaves it alone, and T* advances by whatever the leading
+// is now.
+func TestWalkTdVsTDVsTStar(t *testing.T) {
+	src := "BT /F1 10 Tf 0 -20 TD (a) Tj T* (b) Tj 0 -5 Td (c) Tj T* (d) Tj ET"
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.TextShows) != 4 {
+		t.Fatalf("TextShows = %d entries; want 4", len(s.TextShows))
+	}
+	showOrigin(t, s.TextShows[0], 0, -20) // TD moved and set TL=20
+	showOrigin(t, s.TextShows[1], 0, -40) // T* advanced by TL
+	showOrigin(t, s.TextShows[2], 0, -45) // Td moved 5 but left TL=20
+	showOrigin(t, s.TextShows[3], 0, -65) // T* still advances by 20, not 5
+}
+
+// ' advances to the next line BEFORE showing (ISO 32000-1 9.4.3); it is not
+// just a Tj.
+func TestWalkApostropheAdvancesBeforeShowing(t *testing.T) {
+	src := "BT /F1 10 Tf 20 TL 0 -30 Td (x) ' ET"
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.TextShows) != 1 {
+		t.Fatalf("TextShows = %d entries; want 1", len(s.TextShows))
+	}
+	showOrigin(t, s.TextShows[0], 0, -50)
+}
+
+// Positions compose: Trm is Tm composed with the CTM in force, so nesting
+// q/cm/Q around a text object multiplies through, Q restores the outer
+// composition, and BT resets the text matrix without touching the CTM.
+func TestWalkTextPositionsComposeUnderQAndBT(t *testing.T) {
+	src := "q 2 0 0 2 10 10 cm " +
+		"BT 1 0 0 1 5 5 Tm (a) Tj ET " +
+		"q 1 0 0 1 100 0 cm BT 1 0 0 1 5 5 Tm (b) Tj ET Q " +
+		"BT (c) Tj ET Q " +
+		"BT (d) Tj ET"
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.TextShows) != 4 {
+		t.Fatalf("TextShows = %d entries; want 4", len(s.TextShows))
+	}
+	ctm1 := Matrix{2, 0, 0, 2, 10, 10}
+	ctm2 := Matrix{1, 0, 0, 1, 100, 0}.Mul(ctm1)
+	tm := Matrix{1, 0, 0, 1, 5, 5}
+	matrixEq(t, s.TextShows[0].Trm, tm.Mul(ctm1))
+	matrixEq(t, s.TextShows[1].Trm, tm.Mul(ctm2))
+	matrixEq(t, s.TextShows[2].Trm, ctm1) // BT reset Tm; Q restored the CTM
+	matrixEq(t, s.TextShows[3].Trm, Identity)
+}
+
+// The text state parameters live in the graphics state (ISO 32000-1 table
+// 52), so Q restores them like everything else on gstate.
+func TestWalkQRestoresTextState(t *testing.T) {
+	src := "BT /F1 12 Tf 2 Tc 3 Tw 50 Tz 4 TL 5 Ts " +
+		"q /F2 8 Tf 9 Tc 1 Tw 200 Tz 2 TL 0 Ts Q (a) Tj ET"
+	s, err := Walk(context.Background(), []byte(src), 0, mapEnv{{}})
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.TextShows) != 1 {
+		t.Fatalf("TextShows = %d entries; want 1", len(s.TextShows))
+	}
+	ts := s.TextShows[0]
+	if ts.Font != "F1" || ts.Size != 12 || ts.CharSpacing != 2 || ts.WordSpacing != 3 ||
+		ts.Hscale != 0.5 || ts.Rise != 5 {
+		t.Errorf("show = %+v; want F1 12 Tc 2 Tw 3 Tz 50 Ts 5 restored by Q", ts)
+	}
+}
+
+// fontEnv resolves font names so a walk can attach an identity to Tf.
+type fontEnv struct {
+	mapEnv
+	fonts map[string]int
+}
+
+func (e fontEnv) Font(scope int, name string) (int, bool) {
+	id, ok := e.fonts[name]
+	return id, ok
+}
+
+func TestWalkResolvesFontsThroughEnv(t *testing.T) {
+	env := fontEnv{mapEnv: mapEnv{{}}, fonts: map[string]int{"F1": 7}}
+	s, err := Walk(context.Background(), []byte("BT /F1 12 Tf (a) Tj /F9 9 Tf (b) Tj ET"), 0, env)
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.TextShows) != 2 {
+		t.Fatalf("TextShows = %d entries; want 2", len(s.TextShows))
+	}
+	if s.TextShows[0].FontID != 7 {
+		t.Errorf("FontID = %d; want 7", s.TextShows[0].FontID)
+	}
+	// A name the env cannot resolve still records the show, with no identity:
+	// byb-lez.5 needs to see "text I could not read", not silence.
+	if s.TextShows[1].Font != "F9" || s.TextShows[1].FontID != 0 {
+		t.Errorf("show 1 = %+v; want F9 with FontID 0", s.TextShows[1])
+	}
+}
+
+// Text shows share the painting order with images and paths, so a renderer
+// can interleave them (stage 4c reads occlusion off this order).
+func TestWalkOrdersTextAgainstPlacements(t *testing.T) {
+	src := "BT (a) Tj ET /Im0 Do BT (b) Tj ET"
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
+	if err != nil {
+		t.Fatalf("Walk() error = %v", err)
+	}
+	if len(s.TextShows) != 2 || len(s.Images) != 1 {
+		t.Fatalf("TextShows = %d, Images = %d; want 2, 1", len(s.TextShows), len(s.Images))
+	}
+	if !(s.TextShows[0].Index < s.Images[0].Index && s.Images[0].Index < s.TextShows[1].Index) {
+		t.Errorf("order = text %d, image %d, text %d; want strictly increasing",
+			s.TextShows[0].Index, s.Images[0].Index, s.TextShows[1].Index)
+	}
 }

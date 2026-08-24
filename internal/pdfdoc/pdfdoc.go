@@ -206,9 +206,10 @@ type Doc interface {
 	// Annots returns page n's annotations. They are not part of Page because
 	// nothing in classification reads them yet; see annots.go.
 	Annots(n int) ([]Annot, error)
-	// XObject and ExtGStateOpaque implement content.Env.
+	// XObject, ExtGStateOpaque and Font implement content.Env.
 	XObject(scope int, name string) (content.XObject, bool)
 	ExtGStateOpaque(scope int, name string) bool
+	Font(scope int, name string) (int, bool)
 	// ImageInfo returns the dictionary facts for an image resolved by XObject,
 	// keyed by the ID that XObject returned.
 	ImageInfo(id int) (ImageInfo, bool)
@@ -246,6 +247,14 @@ type doc struct {
 	refs     map[int]types.IndirectRef    // xref identity of those streams, for writing
 	nextID   int                          // synthetic ids for direct (non-indirect) image objects
 	fontRefs map[string]types.IndirectRef // embedded fonts, keyed by TrueTypeFont.BaseFont
+	fontIDs  map[fontKey]int              // Font's resolutions, so a direct font dict keeps one synthetic id
+}
+
+// fontKey identifies a font resolution: the scope the name was used in and the
+// name itself.
+type fontKey struct {
+	scope int
+	name  string
 }
 
 type scope struct {
@@ -280,6 +289,7 @@ func Open(rs io.ReadSeeker) (d Doc, err error) {
 		streams: map[int]*types.StreamDict{},
 		refs:    map[int]types.IndirectRef{},
 		nextID:  -1,
+		fontIDs: map[fontKey]int{},
 	}, nil
 }
 
@@ -649,6 +659,25 @@ func (d *doc) ExtGStateOpaque(sc int, name string) bool {
 		}
 	}
 	return true
+}
+
+// Font resolves the named /Font resource to a stable id, the font half of
+// content.Env. The id is the font dict's object number when the resource is an
+// indirect reference, and a synthetic negative id otherwise — cached per scope
+// and name, because identify mints a fresh synthetic id per call and every Tf
+// naming the same direct font dict must agree.
+func (d *doc) Font(sc int, name string) (int, bool) {
+	key := fontKey{scope: sc, name: name}
+	if id, ok := d.fontIDs[key]; ok {
+		return id, true
+	}
+	obj, ok := d.lookupResource(sc, "Font", name)
+	if !ok {
+		return 0, false
+	}
+	id := d.identify(obj)
+	d.fontIDs[key] = id
+	return id, true
 }
 
 // identify returns a stable id for an XObject: its PDF object number when it is
