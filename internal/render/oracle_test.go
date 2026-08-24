@@ -328,6 +328,83 @@ func TestTextAgreesWithPdftoppm(t *testing.T) {
 	}
 }
 
+// oracleCFF is the bare-CFF (Type1C) counterpart of oracleTTF: 'A' a square,
+// 'B' a triangle, 'C' a diamond of four CUBIC curves -- three distinct
+// asymmetric shapes, with C pinning the SegmentOpCubeTo path against
+// poppler's own rendering of the same charstrings.
+func oracleCFF() []byte {
+	square := t2cs(0, 0, "rmoveto", 600, "hlineto", 500, "vlineto", -600, "hlineto", "endchar")
+	triangle := t2cs(0, 0, "rmoveto", 600, 0, "rlineto", -300, 500, "rlineto", "endchar")
+	diamond := t2cs(250, 0, "rmoveto",
+		150, 0, 100, 100, 0, 150, "rrcurveto",
+		0, 150, -100, 100, -150, 0, "rrcurveto",
+		-150, 0, -100, -100, 0, -150, "rrcurveto",
+		0, -150, 100, -100, 150, 0, "rrcurveto", "endchar")
+	return buildCFF(cffOpts{
+		charstrings: [][]byte{t2cs("endchar"), square, triangle, diamond},
+		sids:        []uint16{34, 35, 36}, // 'A' 'B' 'C' under the standard encoding
+	})
+}
+
+// type1CPDF embeds oracleCFF as /FontFile3 /Subtype /Type1C -- a page 4c's
+// TrueType-only renderer could not render at all -- showing the same
+// textOracleContent as textPDF.
+func type1CPDF() []byte {
+	cff := string(oracleCFF())
+	const textContent = textOracleContent
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
+			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /BbOracle /FirstChar 65" +
+			" /LastChar 67 /Widths [600 700 550] /FontDescriptor 6 0 R >>",
+		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 32" +
+			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
+			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 7 0 R >>",
+		fmt.Sprintf("<< /Subtype /Type1C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
+	})
+}
+
+// TestType1CTextAgreesWithPdftoppm is byb-8b9.4's acceptance: a page of
+// bare-CFF text -- which stage 4c could not render at all -- rasterises
+// within tolerance of pdftoppm, and the blank null must fail the metric. The
+// renderer sees the same /FontFile3 bytes and /Widths the PDF carries,
+// through the FontFor seam; TestType1CProgramTakesTheCFFPath pins that these
+// bytes go down the 4d path and no other.
+func TestType1CTextAgreesWithPdftoppm(t *testing.T) {
+	pdf := type1CPDF()
+	oracle := pdftoppmPNG(t, pdf)
+
+	fonts := func(name string) (Font, bool) {
+		if name != "F1" {
+			return Font{}, false
+		}
+		return Font{Program: oracleCFF(), FirstChar: 65, Widths: []float64{600, 700, 550}}, true
+	}
+	box := content.Box{URX: 200, URY: 200}
+	got, err := Page(context.Background(), []byte(textOracleContent), box, 1, nil, fonts)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	const tolerance = 0.05
+	frac := mismatchFraction(t, got, oracle)
+	t.Logf("Type1C text mismatch vs pdftoppm: %.2f%% of pixels", frac*100)
+	if frac > tolerance {
+		t.Errorf("Type1C text page disagrees with pdftoppm on %.1f%% of pixels; tolerance %.0f%%",
+			frac*100, tolerance*100)
+	}
+
+	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
+	if err != nil {
+		t.Fatalf("Page(blank): %v", err)
+	}
+	if frac := mismatchFraction(t, blank, oracle); frac <= tolerance {
+		t.Errorf("a BLANK raster is within tolerance of pdftoppm (%.1f%% mismatch); the Type1C oracle metric is broken", frac*100)
+	}
+}
+
 // oneImagePDF: a page whose ONLY content is one 4x4 image drawn 1:1 -- the
 // MediaBox is 4x4 points and the CTM `4 0 0 4 0 0`, so at scale 1 every
 // device pixel center maps to exactly one source pixel. All 16 pixels are
