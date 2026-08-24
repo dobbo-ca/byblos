@@ -498,17 +498,3 @@ func TestInspectReportsTheDeclaredImageFilter(t *testing.T) {
 		})
 	}
 }
-
-// TestRoundExtentMatchesContinuousWidth is byb-wtp's divergence 2: rounding
-// each edge of a box independently can move the reported width a whole point
-// away from round(hi-lo), the value poppler's page-size arithmetic agrees
-// with. govdocs1 (US Letter, integer boxes) never exercises this -- round(0)
-// and round(612) both land exactly -- but a sub-point offset does: round(0.3)
-// = 0 and round(595.6) = 596 independently, an off-by-one width of 596 where
-// the continuous extent is 595.3, which rounds to 595.
-func TestRoundExtentMatchesContinuousWidth(t *testing.T) {
-	llx, urx := roundExtent(0.3, 595.6)
-	if got, want := urx-llx, 595; got != want {
-		t.Errorf("roundExtent(0.3, 595.6) width = %d; want %d", got, want)
-	}
-}

@@ -361,6 +361,12 @@ func boxRect(b content.Box) image.Rectangle {
 // round(hi-lo), the value poppler's page-size arithmetic agrees with (byb-wtp).
 // 0.3 and 595.6 round independently to 0 and 596, a width of 596, where the
 // continuous extent 595.3 rounds to 595.
+//
+// round(hi-lo) can itself be 0 for a positive extent whose rounded edges
+// still land on different integers (10.3 and 10.7 round to 10 and 11, but
+// hi-lo is 0.4, which rounds to 0): that would collapse the interval this
+// function exists to keep open, so a positive extent is never reported
+// narrower than 1.
 func roundExtent(lo, hi float64) (int, int) {
 	l, h := round(lo), round(hi)
 	switch {
@@ -369,7 +375,11 @@ func roundExtent(lo, hi float64) (int, int) {
 	case l == h:
 		return int(math.Floor(lo)), int(math.Ceil(hi))
 	default:
-		return l, l + round(hi-lo)
+		w := round(hi - lo)
+		if w < 1 {
+			w = 1
+		}
+		return l, l + w
 	}
 }
 
