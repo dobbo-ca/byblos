@@ -1007,8 +1007,8 @@ func jbig2Payload() []byte {
 }
 
 // jbig2 is a page-covering 1-bpc raster stored with /Filter /JBIG2Decode. It
-// is the corpus's only bitonal image (ImageRef.Bitonal true) and its only
-// undecodable codec (ErrUnsupportedImageCodec).
+// is the corpus's only bitonal image (ImageRef.Bitonal true) and one of its
+// undecodable codecs (ErrUnsupportedImageCodec) -- the other is jpx, below.
 //
 // Known gap, now half closed: no document in All() sets /ImageMask true, the
 // other disjunct of ImageRef.Bitonal. A stencil mask is not extractable at all —
@@ -1032,19 +1032,6 @@ func jbig2() []byte {
 	return w.finish(cat)
 }
 
-// jpxPayload is 64 bytes of deterministic filler, on the same footing as
-// jbig2Payload: not a valid JPEG 2000 codestream, and it does not need to be,
-// because nothing decodes it. What matters is that the /Filter says
-// JPXDecode, because that is what drives pdfcpu to hand back opaque bytes
-// instead of an error.
-func jpxPayload() []byte {
-	p := make([]byte, 64)
-	for i := range p {
-		p[i] = byte((i*17 + 11) % 251)
-	}
-	return p
-}
-
 // jpx is a page-covering raster stored with /Filter /JPXDecode, /ColorSpace
 // /DeviceRGB and 8 bpc -- the shape a real JPEG 2000 scan declares. It is the
 // corpus's only unconditional codec divert: unlike jbig2(), byblos has no
@@ -1066,7 +1053,7 @@ func jpx() []byte {
 	w.fillStream(cont, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
 	w.fillRawStream(img, fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d"+
 		" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode", ScanImageW, ScanImageH),
-		jpxPayload())
+		jbig2Payload())
 	return w.finish(cat)
 }
 

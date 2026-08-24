@@ -419,7 +419,7 @@ func TestExtractPageRasterRejectsJBIG2(t *testing.T) {
 // raster diverts unconditionally, on the declared filter alone, unlike the
 // jbig2 arm above which decodes some streams and only diverts on the rest.
 //
-// The corpus payload is 64 bytes of filler (corpus.jpxPayload), not a real
+// The corpus payload is 64 bytes of filler (corpus.jbig2Payload, reused), not a real
 // JPEG 2000 codestream -- it does not need to be, because nothing ever tries
 // to decode it: this asserts THAT it diverts on the "jpx" branch specifically
 // (and not the earlier ErrUnsupportedCodec or default image.Decode branches),

@@ -111,7 +111,7 @@ type linCase struct {
 }
 
 // linearizeCases is the sweep every structural test runs over. It is
-// deliberately not just corpus.All(): 29 of the 37 corpus documents have a
+// deliberately not just corpus.All(): 31 of the 37 corpus documents have a
 // single page, where part 7 is empty, every per-page hint column is zero-width
 // and the first-page partition is trivially satisfied by ANY layout. A
 // linearizer that is correct only on one-page documents passes a corpus-only
