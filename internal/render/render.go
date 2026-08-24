@@ -20,6 +20,13 @@
 // settled here: fills sample pixel centers against half-open scanline spans,
 // nonzero sums signed crossings, even-odd takes their parity.
 //
+// WHY NOT x/image/draw's NearestNeighbor.Transform for stage 4b's image
+// draws: it could replace the non-stencil sampling loop, but the stencil
+// branch would still need an inverse-mapping loop (or a mask-image adapter),
+// and the per-scanline maxFillWork charge would collapse to one up-front
+// bounding-box charge -- one loop serving both branches under one budget
+// shape is smaller than a loop plus a Transform call.
+//
 // Stage 4a scope: path construction (m l c v y re h), painting (f F f* B B*
 // b b* S s n), DeviceGray/DeviceRGB colour, CTM, and a minimal rectangular
 // clip (W/W* intersect the clip with the path's device bounding box, the
@@ -74,14 +81,11 @@ var (
 	// pixel writes dominate large fills, so a budget that skipped them let a
 	// 387 KB stream of full-canvas fills buy ~33 minutes of CPU. 1<<28 units
 	// is four full coats of the largest permitted canvas (maxRasterPixels).
-	// Image draws charge their destination pixels here too.
+	// Image draws charge their destination pixels here too -- the only work
+	// drawImage does is one sample per DESTINATION pixel, so no separate
+	// source-pixel budget exists (decoding already happened behind ImageFor,
+	// under the caller's own budgets).
 	maxFillWork int64 = 1 << 28
-	// maxImagePixels bounds the SOURCE pixels image draws may touch across the
-	// whole Page call, charged per Do before any sampling -- the decoded-pixel
-	// budget discipline extract.go and internal/jbig2 apply, at the seam where
-	// this package first reads a decoded raster. 1<<26 matches maxRasterPixels:
-	// one full canvas's worth of 12-megapixel photos and then some.
-	maxImagePixels int64 = 1 << 26
 )
 
 // Image is a decoded image XObject ready for Do to sample. Decoding is the
@@ -92,8 +96,8 @@ var (
 // /Decode (ISO 32000-1 8.9.6.2).
 type Image struct {
 	Data    image.Image
-	Stencil bool      // /ImageMask: paint the fill colour through the stencil
-	Decode  []float64 // stencil /Decode as written; nil means the default [0 1]
+	Stencil bool // /ImageMask: paint the fill colour through the stencil
+	Invert  bool // stencil /Decode [1 0]: paint where the sample is 1, not 0
 }
 
 // ImageFor resolves a Do operand to a decoded image. ok=false skips the draw
@@ -213,11 +217,10 @@ type subpath struct {
 
 // renderer carries the canvas and the per-call budgets.
 type renderer struct {
-	img       *image.RGBA
-	images    ImageFor
-	points    int64 // flattened points held for the current path
-	fillWork  int64 // active-edge x scanline units spent
-	imgPixels int64 // source pixels charged by image draws
+	img      *image.RGBA
+	images   ImageFor
+	points   int64 // flattened points held for the current path
+	fillWork int64 // active-edge x scanline units spent
 }
 
 // path is the current path under construction, all points already in device
@@ -793,19 +796,20 @@ func (r *renderer) drawImage(name string, gs gstate) error {
 	if sw <= 0 || sh <= 0 {
 		return nil
 	}
-	// Source pixels are charged before any sampling, per draw -- the same
-	// decoded-pixel discipline as the path budgets: refuse before the work.
-	r.imgPixels += int64(sw) * int64(sh)
-	if r.imgPixels > maxImagePixels {
-		return fmt.Errorf("render: image draws exceed %d source pixels", maxImagePixels)
-	}
 	m := gs.ctm
 	det := m[0]*m[3] - m[1]*m[2]
 	if det == 0 || math.IsNaN(det) || math.IsInf(det, 0) {
 		return nil // a singular CTM places the image with zero area
 	}
 	// Destination range: the unit square's device bounding box intersected
-	// with the clip, under the same pixel-center convention as fills.
+	// with the clip, under the same pixel-center convention as fills. The
+	// intersection happens IN FLOATS, checked before any int conversion: a
+	// huge-but-finite translation (a 301-digit operand passes matrixOperands'
+	// Inf/NaN check) would overflow the conversion, which on amd64 wraps to
+	// minInt64 and turns the loop below into a ~9e18-iteration hang. After
+	// the guard both bounds sit inside the clip, which deviceClip bounded to
+	// the canvas, so the conversions are safe; the float comparison also
+	// rejects NaN bounds.
 	ub := m.UnitSquareBox()
 	clip := r.deviceClip(gs.clip)
 	x0 := int(math.Ceil(math.Max(ub.LLX, clip.x0) - 0.5))
@@ -815,9 +819,7 @@ func (r *renderer) drawImage(name string, gs gstate) error {
 	if x1 <= x0 || y1 <= y0 {
 		return nil
 	}
-	// A stencil /Decode of [1 0] paints where the sample is 1; the default
-	// [0 1] paints where it is 0 (ISO 32000-1 8.9.6.2).
-	stencilInverted := len(im.Decode) >= 2 && im.Decode[0] > im.Decode[1]
+	at := samplerFor(im.Data)
 	for y := y0; y < y1; y++ {
 		r.fillWork += int64(x1 - x0)
 		if r.fillWork > maxFillWork {
@@ -834,25 +836,55 @@ func (r *renderer) drawImage(name string, gs gstate) error {
 			}
 			sx := sb.Min.X + min(int(u*float64(sw)), sw-1)
 			sy := sb.Min.Y + min(int((1-v)*float64(sh)), sh-1)
+			sr, sg, sbl, sa := at(sx, sy)
 			if im.Stencil {
-				sr, sg, sbl, _ := im.Data.At(sx, sy).RGBA()
+				// The default /Decode [0 1] paints where the decoded sample
+				// is 0; Invert (/Decode [1 0]) paints where it is 1
+				// (ISO 32000-1 8.9.6.2).
 				one := sr+sg+sbl >= 3*0x8000
-				if one == stencilInverted {
+				if one == im.Invert {
 					r.img.SetRGBA(x, y, gs.fill.rgba)
 				}
 				continue
 			}
-			r.compose(x, y, im.Data.At(sx, sy))
+			r.compose(x, y, sr, sg, sbl, sa)
 		}
 	}
 	return nil
 }
 
-// compose source-over composites one premultiplied source colour onto the
-// opaque canvas -- decoded PNGs can carry alpha even though byblos adds no
-// SMask handling in this stage.
-func (r *renderer) compose(x, y int, c color.Color) {
-	sr, sg, sb, sa := c.RGBA()
+// samplerFor returns src's pixels as premultiplied 16-bit channels. The
+// concrete fast paths exist because the At interface boxes one color.Color
+// heap allocation per call -- measured at exactly one alloc per sampled
+// destination pixel, ~2.5 GB of garbage for one budget-ceiling page.
+func samplerFor(src image.Image) func(x, y int) (r, g, b, a uint32) {
+	switch d := src.(type) {
+	case *image.RGBA:
+		return func(x, y int) (uint32, uint32, uint32, uint32) {
+			c := d.RGBAAt(x, y)
+			return uint32(c.R) * 0x101, uint32(c.G) * 0x101, uint32(c.B) * 0x101, uint32(c.A) * 0x101
+		}
+	case *image.NRGBA:
+		return func(x, y int) (uint32, uint32, uint32, uint32) {
+			c := d.NRGBAAt(x, y)
+			a := uint32(c.A)
+			pm := func(v uint8) uint32 { return uint32(v) * 0x101 * a / 0xff } // color.NRGBA.RGBA's arithmetic
+			return pm(c.R), pm(c.G), pm(c.B), a * 0x101
+		}
+	case *image.Gray:
+		return func(x, y int) (uint32, uint32, uint32, uint32) {
+			g := uint32(d.GrayAt(x, y).Y) * 0x101
+			return g, g, g, 0xffff
+		}
+	default:
+		return func(x, y int) (uint32, uint32, uint32, uint32) { return src.At(x, y).RGBA() }
+	}
+}
+
+// compose source-over composites one premultiplied 16-bit source colour onto
+// the opaque canvas -- decoded PNGs can carry alpha even though byblos adds
+// no SMask handling in this stage.
+func (r *renderer) compose(x, y int, sr, sg, sb, sa uint32) {
 	switch sa {
 	case 0:
 	case 0xffff:

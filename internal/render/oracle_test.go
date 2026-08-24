@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dobbo-ca/byblos"
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
@@ -155,22 +156,8 @@ func TestRenderAgreesWithPdftoppm(t *testing.T) {
 // comparison, so only PLACEMENT geometry can disagree -- which is what stage
 // 4b (byb-8b9.2) adds.
 func imagePDF() []byte {
-	rgb := func(r, g, b byte) []byte {
-		px := bytes.Repeat([]byte{r, g, b}, 4*4)
-		var buf bytes.Buffer
-		zw := zlib.NewWriter(&buf)
-		if _, err := zw.Write(px); err != nil {
-			panic(err)
-		}
-		if err := zw.Close(); err != nil {
-			panic(err)
-		}
-		return buf.Bytes()
-	}
-	imgObj := func(data []byte) string {
-		return fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width 4 /Height 4"+
-			" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>"+
-			"\nstream\n%s\nendstream", len(data), data)
+	imgObj := func(r, g, b byte) string {
+		return flateImageObj(4, 4, bytes.Repeat([]byte{r, g, b}, 4*4))
 	}
 	// 51.9615 = 60*cos30, 30 = 60*sin30: a 60pt square rotated 30 degrees CCW.
 	const imageContent = "q 80 0 0 60 20 110 cm /Im0 Do Q " +
@@ -181,9 +168,45 @@ func imagePDF() []byte {
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
 			" /Resources << /XObject << /Im0 5 0 R /Im1 6 0 R >> >> /Contents 4 0 R >>",
 		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(imageContent), imageContent),
-		imgObj(rgb(255, 0, 0)),
-		imgObj(rgb(0, 0, 255)),
+		imgObj(255, 0, 0),
+		imgObj(0, 0, 255),
 	})
+}
+
+// flateImageObj builds a flate RGB /Image XObject object body from raw
+// 3-byte-per-pixel samples.
+func flateImageObj(w, h int, px []byte) string {
+	var buf bytes.Buffer
+	zw := zlib.NewWriter(&buf)
+	if _, err := zw.Write(px); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d"+
+		" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>"+
+		"\nstream\n%s\nendstream", w, h, buf.Len(), buf.Bytes())
+}
+
+// pdfdocImages resolves Do names through the SAME decode seam the extract
+// path uses: pdfdoc.XObject -> RawImage -> image.Decode.
+func pdfdocImages(d pdfdoc.Doc, p *pdfdoc.Page) ImageFor {
+	return func(name string) (Image, bool) {
+		xo, ok := d.XObject(p.Scope, name)
+		if !ok || !xo.Image {
+			return Image{}, false
+		}
+		data, fileType, err := d.RawImage(xo.ID)
+		if err != nil || fileType == "jbig2" || fileType == "jpx" {
+			return Image{}, false
+		}
+		im, _, err := image.Decode(bytes.NewReader(data))
+		if err != nil {
+			return Image{}, false
+		}
+		return Image{Data: im}, true
+	}
 }
 
 // TestImagesAgreeWithPdftoppm is byb-8b9.2's acceptance: a page with two
@@ -203,23 +226,8 @@ func TestImagesAgreeWithPdftoppm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Page(1): %v", err)
 	}
-	images := func(name string) (Image, bool) {
-		xo, ok := d.XObject(p.Scope, name)
-		if !ok || !xo.Image {
-			return Image{}, false
-		}
-		data, fileType, err := d.RawImage(xo.ID)
-		if err != nil || fileType == "jbig2" || fileType == "jpx" {
-			return Image{}, false
-		}
-		im, _, err := image.Decode(bytes.NewReader(data))
-		if err != nil {
-			return Image{}, false
-		}
-		return Image{Data: im}, true
-	}
 	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
-	got, err := Page(context.Background(), p.Content, box, 1, images)
+	got, err := Page(context.Background(), p.Content, box, 1, pdfdocImages(d, p))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -237,5 +245,66 @@ func TestImagesAgreeWithPdftoppm(t *testing.T) {
 	}
 	if frac := mismatchFraction(t, blank, oracle); frac <= tolerance {
 		t.Errorf("a BLANK raster is within tolerance of pdftoppm (%.1f%% mismatch); the image oracle metric is broken", frac*100)
+	}
+}
+
+// oneImagePDF: a page whose ONLY content is one 4x4 image drawn 1:1 -- the
+// MediaBox is 4x4 points and the CTM `4 0 0 4 0 0`, so at scale 1 every
+// device pixel center maps to exactly one source pixel. All 16 pixels are
+// distinct, so a flip, transpose or off-by-one cannot pass by luck.
+func oneImagePDF() []byte {
+	var px []byte
+	for i := byte(0); i < 16; i++ {
+		px = append(px, i*16, 255-i*16, i*8+40)
+	}
+	const c = "q 4 0 0 4 0 0 cm /Im0 Do Q"
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 4 4]" +
+			" /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(c), c),
+		flateImageObj(4, 4, px),
+	})
+}
+
+// TestOneImageMatchesExtractPageRaster pins byb-8b9.2's second acceptance
+// clause: a page with one image still matches ExtractPageRaster's existing
+// result exactly. Rendering that page 1:1 through the same pdfdoc decode
+// seam must reproduce the extracted raster pixel for pixel, so a later stage
+// cannot wire render.Page into the extract path with a different orientation
+// or placement convention without this failing.
+func TestOneImageMatchesExtractPageRaster(t *testing.T) {
+	pdf := oneImagePDF()
+	pr, err := byblos.ExtractPageRaster(bytes.NewReader(pdf), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster: %v", err)
+	}
+	d, err := pdfdoc.Open(bytes.NewReader(pdf))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
+	got, err := Page(context.Background(), p.Content, box, 1, pdfdocImages(d, p))
+	if err != nil {
+		t.Fatalf("render.Page: %v", err)
+	}
+	eb, gb := pr.Image.Bounds(), got.Bounds()
+	if eb.Dx() != gb.Dx() || eb.Dy() != gb.Dy() {
+		t.Fatalf("size: extract %v vs render %v", eb, gb)
+	}
+	for y := 0; y < eb.Dy(); y++ {
+		for x := 0; x < eb.Dx(); x++ {
+			er, eg, ebl, _ := pr.Image.At(eb.Min.X+x, eb.Min.Y+y).RGBA()
+			rr, rg, rb, _ := got.At(gb.Min.X+x, gb.Min.Y+y).RGBA()
+			if er != rr || eg != rg || ebl != rb {
+				t.Fatalf("pixel (%d,%d): extract (%d,%d,%d) vs render (%d,%d,%d)",
+					x, y, er>>8, eg>>8, ebl>>8, rr>>8, rg>>8, rb>>8)
+			}
+		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"context"
 	"image"
 	"image/color"
+	"strings"
 	"testing"
 )
 
@@ -138,8 +139,8 @@ func TestImageShear(t *testing.T) {
 }
 
 // TestImageMaskStencil: /ImageMask true paints the CURRENT FILL COLOUR where
-// the decoded sample is 0 (ISO 32000-1 8.9.6.2), and a /Decode of [1 0]
-// inverts which samples paint. Unpainted samples leave the background.
+// the decoded sample is 0 (ISO 32000-1 8.9.6.2), and Invert (a /Decode of
+// [1 0]) inverts which samples paint. Unpainted samples leave the background.
 func TestImageMaskStencil(t *testing.T) {
 	mask := image.NewGray(image.Rect(0, 0, 2, 2))
 	mask.SetGray(0, 0, color.Gray{Y: 0}) // sample 0: marks
@@ -155,7 +156,7 @@ func TestImageMaskStencil(t *testing.T) {
 	})
 
 	inverted := renderImages(t, src,
-		map[string]Image{"M": {Data: mask, Stencil: true, Decode: []float64{1, 0}}})
+		map[string]Image{"M": {Data: mask, Stencil: true, Invert: true}})
 	assertRegions(t, inverted, []region{
 		{30, 50, 40, 60, red},
 		{10, 30, 60, 80, red},
@@ -214,17 +215,38 @@ func TestImageAlphaComposites(t *testing.T) {
 	}
 }
 
-// TestImageSourcePixelBudget: source pixels are charged before sampling, in
-// the decoded-pixel budget discipline of extract.go -- a hostile page cannot
-// loop a huge decoded image through Do forever.
-func TestImageSourcePixelBudget(t *testing.T) {
-	defer func(v int64) { maxImagePixels = v }(maxImagePixels)
-	maxImagePixels = 3 // twoByTwo has 4
-	src := "q 40 0 0 40 10 20 cm /Im0 Do Q"
-	if _, err := Page(context.Background(), []byte(src), box100, 1,
-		func(string) (Image, bool) { return Image{Data: twoByTwo()}, true }); err == nil {
-		t.Fatal("Page accepted an image draw beyond the source-pixel budget")
-	}
+// TestImageHugeTranslationSkips: a finite-but-huge translation operand (301
+// digits -- PDF numbers have no exponent form, and matrixOperands rejects
+// only Inf/NaN) places the image far off-canvas. The device bounds must be
+// intersected in float space BEFORE int conversion: unclamped, the
+// conversion wraps to minInt64 on amd64, the empty-range check passes, and
+// the draw loop hangs for ~9e18 iterations. arm64 saturates the conversion
+// instead, so there this test passed even before the clamp existed; the
+// regression it pins is amd64's (linux CI and prod).
+func TestImageHugeTranslationSkips(t *testing.T) {
+	huge := "1" + strings.Repeat("0", 300)
+	img := renderImages(t, "q 1 0 0 1 "+huge+" 0 cm /Im0 Do Q",
+		map[string]Image{"Im0": {Data: twoByTwo()}})
+	assertRegions(t, img, nil)
+}
+
+// TestImageRGBAFastPath: samplerFor's premultiplied *image.RGBA fast path
+// must place the same quadrants as the generic At path (twoByTwo's NRGBA and
+// the stencil test's Gray cover the other two fast paths).
+func TestImageRGBAFastPath(t *testing.T) {
+	im := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	im.Set(0, 0, red)
+	im.Set(1, 0, blue)
+	im.Set(0, 1, black)
+	im.Set(1, 1, green)
+	img := renderImages(t, "q 40 0 0 40 10 20 cm /Im0 Do Q",
+		map[string]Image{"Im0": {Data: im}})
+	assertRegions(t, img, []region{
+		{10, 30, 40, 60, red},
+		{30, 50, 40, 60, blue},
+		{10, 30, 60, 80, black},
+		{30, 50, 60, 80, green},
+	})
 }
 
 // TestImageWriteBudget: destination writes go through the same maxFillWork
