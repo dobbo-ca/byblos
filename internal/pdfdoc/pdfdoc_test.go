@@ -516,6 +516,81 @@ func TestPageWithoutContentsIsEmptyNotAnError(t *testing.T) {
 	}
 }
 
+// ISO 32000-1 7.7.3.3 says the CropBox is to be intersected with the
+// MediaBox, and poppler does that. A CropBox that overhangs the MediaBox
+// must not enlarge the page's reported bounds beyond it. See byb-wtp.
+func TestCropBoxIsClampedToMediaBox(t *testing.T) {
+	src := "%PDF-1.7\n" +
+		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" +
+		"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n" +
+		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+		"/CropBox [-100 -100 900 1000] >>\nendobj\n"
+	var xref strings.Builder
+	offs := []int{
+		strings.Index(src, "1 0 obj"),
+		strings.Index(src, "2 0 obj"),
+		strings.Index(src, "3 0 obj"),
+	}
+	start := len(src)
+	xref.WriteString("xref\n0 4\n0000000000 65535 f \n")
+	for _, o := range offs {
+		xref.WriteString(pad10(o) + " 00000 n \n")
+	}
+	xref.WriteString("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n" + itoa(start) + "\n%%EOF\n")
+
+	d, err := Open(strings.NewReader(src + xref.String()))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v", err)
+	}
+	want := Rect{0, 0, 612, 792}
+	if p.MediaBox != want {
+		t.Errorf("MediaBox = %+v; want %+v", p.MediaBox, want)
+	}
+	if p.CropBox != want {
+		t.Errorf("CropBox = %+v; want %+v (clamped to MediaBox)", p.CropBox, want)
+	}
+}
+
+// A CropBox that falls entirely outside the MediaBox has no intersection
+// with it. poppler falls back to the MediaBox rather than reporting an
+// empty page. See byb-wtp.
+func TestCropBoxOutsideMediaBoxFallsBackToMediaBox(t *testing.T) {
+	src := "%PDF-1.7\n" +
+		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" +
+		"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n" +
+		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+		"/CropBox [700 900 1000 1200] >>\nendobj\n"
+	var xref strings.Builder
+	offs := []int{
+		strings.Index(src, "1 0 obj"),
+		strings.Index(src, "2 0 obj"),
+		strings.Index(src, "3 0 obj"),
+	}
+	start := len(src)
+	xref.WriteString("xref\n0 4\n0000000000 65535 f \n")
+	for _, o := range offs {
+		xref.WriteString(pad10(o) + " 00000 n \n")
+	}
+	xref.WriteString("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n" + itoa(start) + "\n%%EOF\n")
+
+	d, err := Open(strings.NewReader(src + xref.String()))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1) error = %v", err)
+	}
+	want := Rect{0, 0, 612, 792}
+	if p.CropBox != want {
+		t.Errorf("CropBox = %+v; want %+v (MediaBox fallback)", p.CropBox, want)
+	}
+}
+
 // A page whose /Contents stream decodes to zero bytes is blank, not broken.
 // The key is there, the stream is there, the stream is well-formed, and it
 // inflates to nothing — a duplex scanner's back side. pdfcpu's PageContent
