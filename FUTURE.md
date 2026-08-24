@@ -47,9 +47,11 @@ exactly the upgrade set.
 
 **Capability string:** none. Do not assign one.
 
-This is what `ocrmypdf --jbig2-lossy` does, and what Kleio's current aggressive
-preset uses today. It achieves the headline ~100:1 ratios by unifying glyphs that
-are *nearly* identical rather than exactly identical.
+This is what `ocrmypdf --jbig2-lossy` does. Kleio does not use it: Kleio removed
+`--jbig2-lossy` (see `compress_internal_test.go:62`, which asserts its absence),
+and ocrmypdf 17.8.1 ignores the flag as deprecated. It achieves the headline
+~100:1 ratios by unifying glyphs that are *nearly* identical rather than exactly
+identical.
 
 **Why rejected:** it can silently alter document content. The 2013 Xerox scanner
 defect — in which scanned digits were replaced with different digits, producing a

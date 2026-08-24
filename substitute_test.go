@@ -208,8 +208,8 @@ func TestReplaceImagesSubstitutesAnImageOnALaterPage(t *testing.T) {
 //
 // This is not a test of QuantizeIndexed; it is a test that the seam carries
 // the whole shape -- palette, 4 bits per component, /DecodeParms -- and that
-// the page still extracts afterwards, which a JBIG2 substitution would not
-// (extract.go diverts codecs Byblos cannot decode).
+// the page still extracts afterwards. A JBIG2 substitution now extracts too;
+// see TestExtractPageRasterDecodesASubstitutedJBIG2Page in jbig2_decode_test.go.
 func TestReplaceImagesCarriesAQuantizedIndexedImageIntoAnExistingPDF(t *testing.T) {
 	in := corpusDoc(t, "scan")
 
