@@ -34,8 +34,8 @@ import (
 // TestCorpusCountClaimsMatchTheCorpus (root package, designspec_pin_test.go)
 // then fail until every quoted figure in the tree agrees.
 const (
-	Count         = 36
-	ReadableCount = 35
+	Count         = 37
+	ReadableCount = 36
 )
 
 // Geometry shared by every generated document. US Letter at 72 points/inch.
@@ -205,6 +205,7 @@ func All() []Doc {
 		{"mixed", "two pages: born-digital then scan", mixed()},
 		{"dup-raster", "two pages holding a byte-identical raster as two objects: both must extract", dupRaster()},
 		{"jbig2", "one page-covering JBIG2 raster: 1 bpc, and a codec byblos cannot decode", jbig2()},
+		{"jpx", "one page-covering JPXDecode raster: 8 bpc DeviceRGB, and the codec byblos unconditionally diverts (byb-ybu)", jpx()},
 		{"stacked", "two page-covering images at the identical CTM: the second occludes the first", stackedPair(false, 0)},
 		{"stacked-in-form", "the occluding image is painted inside a Form XObject: paint order must survive the recursion", stackedInForm()},
 		{"stacked-smask", "the occluding image carries an /SMask, so it cannot be assumed to hide what is below: must divert", stackedPair(true, 0)},
@@ -1028,6 +1029,44 @@ func jbig2() []byte {
 	w.fillRawStream(img, fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d"+
 		" /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode", ScanImageW, ScanImageH),
 		jbig2Payload())
+	return w.finish(cat)
+}
+
+// jpxPayload is 64 bytes of deterministic filler, on the same footing as
+// jbig2Payload: not a valid JPEG 2000 codestream, and it does not need to be,
+// because nothing decodes it. What matters is that the /Filter says
+// JPXDecode, because that is what drives pdfcpu to hand back opaque bytes
+// instead of an error.
+func jpxPayload() []byte {
+	p := make([]byte, 64)
+	for i := range p {
+		p[i] = byte((i*17 + 11) % 251)
+	}
+	return p
+}
+
+// jpx is a page-covering raster stored with /Filter /JPXDecode, /ColorSpace
+// /DeviceRGB and 8 bpc -- the shape a real JPEG 2000 scan declares. It is the
+// corpus's only unconditional codec divert: unlike jbig2(), byblos has no
+// JPEG 2000 decoder in either direction, so every page reaching this codec
+// diverts with ErrUnsupportedImageCodec regardless of what the bytes hold
+// (extract.go's jpx case).
+//
+// The survey behind byb-ybu found jpx the codec that matters most on scan-shaped
+// pages -- 84.0% on ia and 54.8% on commons, against 7.4% and 12.4% for jbig2 --
+// yet no corpus document exercised the divert arm that guards it.
+func jpx() []byte {
+	w := newWriter()
+	cat, pages, page, cont, img := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", page))
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, img, cont))
+	w.fillStream(cont, "", []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q\n", PageWidthPt, PageHeightPt)))
+	w.fillRawStream(img, fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d"+
+		" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode", ScanImageW, ScanImageH),
+		jpxPayload())
 	return w.finish(cat)
 }
 

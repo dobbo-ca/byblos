@@ -414,6 +414,40 @@ func TestExtractPageRasterRejectsJBIG2(t *testing.T) {
 	}
 }
 
+// TestExtractPageRasterRejectsJPX pins the jpx arm of extract.go's ExtractImage
+// switch: byblos has no JPEG 2000 decoder in either direction, so a JPXDecode
+// raster diverts unconditionally, on the declared filter alone, unlike the
+// jbig2 arm above which decodes some streams and only diverts on the rest.
+//
+// The corpus payload is 64 bytes of filler (corpus.jpxPayload), not a real
+// JPEG 2000 codestream -- it does not need to be, because nothing ever tries
+// to decode it: this asserts THAT it diverts on the "jpx" branch specifically
+// (and not the earlier ErrUnsupportedCodec or default image.Decode branches),
+// not merely that it diverts somehow.
+func TestExtractPageRasterRejectsJPX(t *testing.T) {
+	data := corpusDoc(t, "jpx")
+	_, err := ExtractPageRaster(bytes.NewReader(data), 1)
+	if !errors.Is(err, ErrUnsupportedImageCodec) {
+		t.Fatalf("error = %v; want ErrUnsupportedImageCodec", err)
+	}
+	if errors.Is(err, ErrNotSingleRaster) {
+		t.Error("a JPX page-covering scan IS a single raster; it must not also report ErrNotSingleRaster")
+	}
+	// The jpx branch is the one that wraps *NotImplemented; the coarse
+	// pdfdoc.ErrUnsupportedCodec branch above it in the switch never names a
+	// codec at all, so this also tells the two divert sites apart.
+	var ni *NotImplemented
+	if !errors.As(err, &ni) {
+		t.Fatalf("error = %v; want it to wrap a *NotImplemented", err)
+	}
+	if ni.Capability != "decode-jpx" {
+		t.Errorf("NotImplemented.Capability = %q; want %q", ni.Capability, "decode-jpx")
+	}
+	if want := ErrUnsupportedImageCodec.Error() + ": jpx ("; !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error = %q; want the prefix %q from the jpx branch", err, want)
+	}
+}
+
 // Page 2 of the mixed document is a clean scan even though page 1 is not.
 // Classification must be per-page.
 func TestExtractPageRasterIsPerPage(t *testing.T) {

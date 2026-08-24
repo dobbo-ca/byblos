@@ -111,7 +111,7 @@ type linCase struct {
 }
 
 // linearizeCases is the sweep every structural test runs over. It is
-// deliberately not just corpus.All(): 29 of the 36 corpus documents have a
+// deliberately not just corpus.All(): 29 of the 37 corpus documents have a
 // single page, where part 7 is empty, every per-page hint column is zero-width
 // and the first-page partition is trivially satisfied by ANY layout. A
 // linearizer that is correct only on one-page documents passes a corpus-only
@@ -1692,7 +1692,7 @@ func pdfimagesRows(t *testing.T, bin, name string, b []byte) int {
 // existing size policy sets for this feature. Optimize returns
 // min(input, rewritten) today (optimize.go). Linearization makes every document
 // in this corpus BIGGER -- measured on byblos's own output, +7 to +1007 bytes
-// against the input over the 35 readable documents (e.g. mixed 1965 -> 2949,
+// against the input over the 36 readable documents (e.g. mixed 1965 -> 2949,
 // born-digital 691 -> 1698, scan 1512 -> 2511; the +7 is dup-raster, the one
 // document pdfcpu's rewrite shrinks enough to nearly pay for the linearization).
 // Against the un-linearized candidate the cost is +649 to +2071 with no
