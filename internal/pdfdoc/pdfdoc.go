@@ -246,6 +246,14 @@ type doc struct {
 	refs     map[int]types.IndirectRef    // xref identity of those streams, for writing
 	nextID   int                          // synthetic ids for direct (non-indirect) image objects
 	fontRefs map[string]types.IndirectRef // embedded fonts, keyed by TrueTypeFont.BaseFont
+
+	// The input's Info dates and whether it carried an /ID, captured at Open
+	// for Write's deterministic pin (byb-c53). Captured HERE and not per
+	// write: pdfcpu's ensureInfoDict/ensureFileID overwrite the live context
+	// on every write, so a second Write would otherwise mistake the first
+	// write's wall-clock stamps for input data.
+	creationDate, modDate string
+	hadID                 bool
 }
 
 type scope struct {
@@ -274,12 +282,16 @@ func Open(rs io.ReadSeeker) (d Doc, err error) {
 	if root, err := ctx.XRefTable.Pages(); err == nil && root != nil {
 		normalizePageTree(ctx.XRefTable, *root, map[int]bool{})
 	}
+	creation, mod := infoDates(ctx)
 	return &doc{
-		ctx:     ctx,
-		images:  map[int]ImageInfo{},
-		streams: map[int]*types.StreamDict{},
-		refs:    map[int]types.IndirectRef{},
-		nextID:  -1,
+		ctx:          ctx,
+		images:       map[int]ImageInfo{},
+		streams:      map[int]*types.StreamDict{},
+		refs:         map[int]types.IndirectRef{},
+		nextID:       -1,
+		creationDate: creation,
+		modDate:      mod,
+		hadID:        ctx.ID != nil,
 	}, nil
 }
 

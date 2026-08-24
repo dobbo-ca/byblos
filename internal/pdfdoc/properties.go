@@ -17,12 +17,33 @@ import (
 	"io"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 // WriteProperties adds properties to rs's Info dictionary and writes the
 // result to w, replacing any existing entries with the same keys.
+//
+// It makes api.AddProperties' calls (ReadValidateAndOptimize, PropertiesAdd,
+// write) directly rather than through it, for the same reason as Optimize
+// (byb-c53): the context must be visible between read and write so the
+// input's Info dates survive the deterministic pin. api.AddProperties'
+// remaining step, rejecting blank property keys and values, is dropped —
+// byblos' one caller passes a fixed key and marshalled JSON, neither ever
+// blank.
 func WriteProperties(rs io.ReadSeeker, w io.Writer, properties map[string]string) error {
-	return api.AddProperties(rs, w, properties, defaultConfig())
+	conf := defaultConfig()
+	conf.Cmd = model.ADDPROPERTIES
+	ctx, err := api.ReadValidateAndOptimize(rs, conf)
+	if err != nil {
+		return err
+	}
+	creation, mod := infoDates(ctx)
+	hadID := ctx.ID != nil
+	if err := pdfcpu.PropertiesAdd(ctx, properties); err != nil {
+		return err
+	}
+	return writePinned(ctx, w, creation, mod, hadID)
 }
 
 // ReadProperties returns rs's Info-dictionary properties. A key WriteProperties

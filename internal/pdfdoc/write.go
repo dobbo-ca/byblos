@@ -260,9 +260,13 @@ func (d *doc) ReplaceImage(id int, img EncodedImage) (err error) {
 // It does not optimize and does not validate. Optimize is byb-b5's, and Open
 // deliberately skips validation (see its doc comment); a file Byblos accepted
 // on the way in must not be rejected on the way out.
+//
+// The output is byte-deterministic: pdfcpu's per-run stamps are pinned after
+// the fact, using the Info dates Open captured (see deterministic.go,
+// byb-c53).
 func (d *doc) Write(w io.Writer) (err error) {
 	defer catchPanic("write", &err)
-	if err := api.WriteContext(d.ctx, w); err != nil {
+	if err := writePinned(d.ctx, w, d.creationDate, d.modDate, d.hadID); err != nil {
 		return fmt.Errorf("byblos/pdfdoc: write: %w", err)
 	}
 	return nil
