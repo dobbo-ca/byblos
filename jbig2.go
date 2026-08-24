@@ -80,6 +80,29 @@ func EncodeJBIG2Generic(b *Bitmap) ([]byte, error) {
 	})
 }
 
+// EncodeJBIG2Image is EncodeJBIG2Generic, packaged as a ready EncodedImage:
+// the seven dictionary entries documented on EncodeJBIG2Generic, transcribed
+// once here instead of by every caller. Width and Height come from b's
+// dimensions, BPC is 1, ColorSpace is DeviceGray, Filter is JBIG2Decode, Data
+// is EncodeJBIG2Generic's output, and DecodeParms stays zero -- no /Decode
+// array either, per EncodeJBIG2Generic's doc comment. Like
+// EncodeJBIG2Generic, it does not copy b.Pix (and zeroes each row's padding
+// in place) -- pass a copy of b if that matters to the caller.
+func EncodeJBIG2Image(b *Bitmap) (EncodedImage, error) {
+	data, err := EncodeJBIG2Generic(b)
+	if err != nil {
+		return EncodedImage{}, err
+	}
+	return EncodedImage{
+		Width:      b.Width,
+		Height:     b.Height,
+		BPC:        1,
+		ColorSpace: ColorSpace{Name: "DeviceGray"},
+		Filter:     "JBIG2Decode",
+		Data:       data,
+	}, nil
+}
+
 // ErrUnsupportedJBIG2Feature reports a JBIG2 stream that parsed correctly and
 // uses a coding feature byblos does not implement: a symbol dictionary or text
 // region, refinement, halftones, MMR, or a generic region coded with anything
