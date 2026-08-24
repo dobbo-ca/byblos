@@ -26,27 +26,26 @@ type Font struct {
 	// font program's own advance.
 	FirstChar int
 	Widths    []float64
-	// Runes maps a character code to the rune looked up in the font's cmap,
-	// per the font dict's /Encoding. A zero entry falls back to rune(code)
-	// (Latin-1, which agrees with WinAnsi/Standard over ASCII).
-	Runes [256]rune
 }
 
 // FontFor resolves a Tf operand to an embedded font. ok=false skips that
-// font's glyphs cleanly -- a non-embedded font, a Type1/CFF program (stages
-// 4d-4f), or an unresolved name must not stop the rest of the page.
+// font's shows entirely, advance included -- with no Font there are no
+// /Widths to advance by -- where a supplied-but-unparsable Program (see
+// textFont) keeps its widths advancing. Either way a non-embedded font, a
+// Type1/CFF program (stages 4d-4f), or an unresolved name must not stop the
+// rest of the page.
 type FontFor func(name string) (Font, bool)
 
 // textFont is one Tf resolution: the parsed program plus the PDF-side widths.
-// fnt may be nil (program absent or unparsable): the widths still advance so
-// later shows keep their positions, but no glyph inks.
+// fnt may be nil (program absent, unparsable, or not an indexable TrueType --
+// see parseGlyfIndex): the widths still advance so later shows keep their
+// positions, but no glyph inks.
 type textFont struct {
 	fnt   *sfnt.Font
 	upem  float64
 	buf   sfnt.Buffer
 	first int
 	width []float64
-	runes [256]rune
 }
 
 // resolveFont resolves and caches a Tf operand. A nil cache entry records a
@@ -67,12 +66,21 @@ func (r *renderer) resolveFont(name string) *textFont {
 		r.fontsBy[name] = nil
 		return nil
 	}
-	tf := &textFont{first: src.FirstChar, width: src.Widths, runes: src.Runes}
-	// sfnt.Parse bounds its own work against the hostile-font shapes it was
-	// fuzzed for; a parse failure degrades to widths-only, never an error.
-	if f, err := sfnt.Parse(src.Program); err == nil {
-		tf.fnt = f
-		tf.upem = float64(f.UnitsPerEm())
+	tf := &textFont{first: src.FirstChar, width: src.Widths}
+	// Refuse before allocating, and before sfnt.Parse: Parse itself loads
+	// whole glyphs ('x' and 'H', the OS/2 metrics fallback), so a hostile
+	// compound bomb must be caught FIRST -- see glyf.go. A program whose
+	// glyphs cannot all be bounded degrades to widths-only exactly like an
+	// unparsable one: CFF flavour (stages 4d-4f), a collection, malformed
+	// tables, or an expansion past the path budget. Past that gate,
+	// sfnt.Parse bounds its own remaining work against the hostile shapes it
+	// was fuzzed for, and a parse failure degrades the same way, never an
+	// error.
+	if g := parseGlyfIndex(src.Program); g != nil && g.boundedBy(maxPathPoints) {
+		if f, err := sfnt.Parse(src.Program); err == nil {
+			tf.fnt = f
+			tf.upem = float64(f.UnitsPerEm())
+		}
 	}
 	r.fontsBy[name] = tf
 	return tf
@@ -146,18 +154,24 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	if f.fnt == nil {
 		return nil
 	}
-	rn := f.runes[code]
-	if rn == 0 {
-		rn = rune(code)
-	}
-	gi, err := f.fnt.GlyphIndex(&f.buf, rn)
+	// rune(code) is Latin-1, which agrees with WinAnsi/Standard over ASCII;
+	// an /Encoding-aware mapping waits for a caller that can supply one.
+	gi, err := f.fnt.GlyphIndex(&f.buf, rune(code))
 	if err != nil || gi == 0 {
 		return nil
 	}
-	// ppem = unitsPerEm hands segment coordinates back in exact font units
-	// (each 26.6 value is the glyf coordinate <<6, no rounding), keeping the
-	// only scaling in float space under glyphMatrix.
-	segs, err := f.fnt.LoadGlyph(&f.buf, gi, fixed.I(int(f.upem)), nil)
+	// LoadGlyph materialises the glyph's whole expansion up front, which is
+	// safe only because resolveFont refused any font with a glyph expanding
+	// past maxPathPoints (glyf.go); the flattened points below still pay the
+	// per-point charge, which curve flattening can amplify past the on-disk
+	// count.
+	// ppem = fixed.Int26_6(upem) hands segment coordinates back in raw font
+	// units with no rounding (sfnt.go:598's documented convention), keeping
+	// the only scaling in float space under glyphMatrix. fixed.I(upem) would
+	// mean the same thing 64x larger, overflowing sfnt's int32 coordinate
+	// scaling for legal coordinates beyond 2^31/(64*upem) font units -- 16384
+	// at Arial's upem 2048.
+	segs, err := f.fnt.LoadGlyph(&f.buf, gi, fixed.Int26_6(f.upem), nil)
 	if err != nil {
 		return nil
 	}
@@ -166,7 +180,7 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	defer pth.reset(r)
 	ok := true
 	pt := func(p fixed.Point26_6) point {
-		x, y := m.Apply(float64(p.X)/64, float64(p.Y)/64)
+		x, y := m.Apply(float64(p.X), float64(p.Y))
 		// One finite check covers every hostile text parameter at the only
 		// place they meet the scanline filler: a NaN or Inf here (a huge Tfs,
 		// an Inf TJ adjustment poisoning tm) would otherwise reach fillEdges'
@@ -195,8 +209,9 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 			c1 := point{p0.x + 2*(q.x-p0.x)/3, p0.y + 2*(q.y-p0.y)/3}
 			c2 := point{end.x + 2*(q.x-end.x)/3, end.y + 2*(q.y-end.y)/3}
 			err = pth.curveTo(r, c1, c2, end)
-		case sfnt.SegmentOpCubeTo:
-			err = pth.curveTo(r, pt(seg.Args[0]), pt(seg.Args[1]), pt(seg.Args[2]))
+			// No SegmentOpCubeTo case: sfnt emits cubics only for CFF
+			// outlines, which resolveFont does not admit (no glyf index);
+			// stage 4d restores it.
 		}
 		if err != nil {
 			return err

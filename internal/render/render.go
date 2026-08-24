@@ -461,7 +461,7 @@ func (r *renderer) run(ctx context.Context, src []byte, gs gstate) error {
 			gs.tm, gs.tlm = content.Identity, content.Identity
 		case "Tf":
 			gs.font = r.resolveFont(lastName(ops))
-			if v, ok := lastFinite(ops); ok {
+			if v, ok := lastNumber(ops); ok {
 				gs.fontSize = v
 			}
 		case "Td":
@@ -480,27 +480,27 @@ func (r *renderer) run(ctx context.Context, src []byte, gs gstate) error {
 		case "T*":
 			gs.nextLine(0, -gs.leading)
 		case "TL":
-			if v, ok := lastFinite(ops); ok {
+			if v, ok := lastNumber(ops); ok {
 				gs.leading = v
 			}
 		case "Tc":
-			if v, ok := lastFinite(ops); ok {
+			if v, ok := lastNumber(ops); ok {
 				gs.charSp = v
 			}
 		case "Tw":
-			if v, ok := lastFinite(ops); ok {
+			if v, ok := lastNumber(ops); ok {
 				gs.wordSp = v
 			}
 		case "Tz":
-			if v, ok := lastFinite(ops); ok {
+			if v, ok := lastNumber(ops); ok {
 				gs.hscale = v / 100
 			}
 		case "Ts":
-			if v, ok := lastFinite(ops); ok {
+			if v, ok := lastNumber(ops); ok {
 				gs.rise = v
 			}
 		case "Tr":
-			if v, ok := lastFinite(ops); ok {
+			if v, ok := lastNumber(ops); ok {
 				gs.tr = int(v)
 			}
 		case "Tj", "'", "\"":
@@ -1068,19 +1068,16 @@ func matrixOperands(ops []content.Token) (content.Matrix, bool) {
 	return m, true
 }
 
-// lastFinite is the last numeric operand, rejecting NaN and Inf: text state
-// parameters multiply into device coordinates, and a non-finite one admitted
-// here would be caught only glyph-by-glyph in fillGlyph.
-func lastFinite(ops []content.Token) (float64, bool) {
+// lastNumber is the last numeric operand, walk.go's convention. Non-finite
+// values pass -- like TJ's raw adjustments they can only poison tm, and
+// fillGlyph already skips any glyph whose device coordinates come out
+// non-finite.
+func lastNumber(ops []content.Token) (float64, bool) {
 	nums := numberOperands(ops)
 	if len(nums) == 0 {
 		return 0, false
 	}
-	v := nums[len(nums)-1]
-	if math.IsNaN(v) || math.IsInf(v, 0) {
-		return 0, false
-	}
-	return v, true
+	return nums[len(nums)-1], true
 }
 
 func lastName(ops []content.Token) string {

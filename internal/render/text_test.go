@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"image/color"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -76,19 +77,41 @@ func buildGlyf(contours [][]gpt) []byte {
 	return b
 }
 
-// buildTTF assembles a TrueType font with unitsPerEm 1000: glyphs[i] becomes
-// glyph i+1 mapped from rune firstRune+i (one contiguous cmap format-4
-// segment, gen.go's idDelta trick), with hmtx advance advances[i]. Glyph 0
-// (.notdef) is empty.
-func buildTTF(firstRune rune, glyphs [][][]gpt, advances []uint16) []byte {
-	const unitsPerEm = 1000
+// buildCompound encodes a compound glyph of n copies of glyph child, each
+// offset (0,0): flags are ARG_1_AND_2_ARE_WORDS|ARGS_ARE_XY_VALUES plus
+// MORE_COMPONENTS on all but the last record.
+func buildCompound(child uint16, n int) []byte {
+	var b []byte
+	b = tbe16(b, 0xFFFF) // numberOfContours = -1
+	for i := 0; i < 4; i++ {
+		b = tbe16(b, 0) // bbox, unchecked by the loaders exercised here
+	}
+	for i := 0; i < n; i++ {
+		flags := uint16(0x0001 | 0x0002)
+		if i < n-1 {
+			flags |= 0x0020 // MORE_COMPONENTS
+		}
+		b = tbe16(b, flags)
+		b = tbe16(b, child)
+		b = tbe16(b, 0) // dx
+		b = tbe16(b, 0) // dy
+	}
+	return b
+}
+
+// buildTTF assembles a TrueType font: glyphs[i] (raw glyf bytes, see
+// buildGlyf/buildCompound) becomes glyph i+1 mapped from rune firstRune+i
+// (one contiguous cmap format-4 segment, gen.go's idDelta trick), with hmtx
+// advance advances[i]. Glyph 0 (.notdef) is empty.
+func buildTTF(upem uint16, firstRune rune, glyphs [][]byte, advances []uint16) []byte {
+	unitsPerEm := upem
 	numGlyphs := len(glyphs) + 1
 
 	var glyf []byte
 	loca := tbe16(nil, 0) // .notdef: empty, offset 0
 	loca = tbe16(loca, 0)
 	for _, g := range glyphs {
-		glyf = append(glyf, buildGlyf(g)...)
+		glyf = append(glyf, g...)
 		loca = tbe16(loca, uint16(len(glyf)/2))
 	}
 
@@ -233,7 +256,7 @@ func squareGlyph() [][]gpt {
 // /Widths value in thousandths -- unitsPerEm is 1000 so the two scales agree).
 func testFont() Font {
 	return Font{
-		Program:   buildTTF('A', [][][]gpt{squareGlyph()}, []uint16{600}),
+		Program:   buildTTF(1000, 'A', [][]byte{buildGlyf(squareGlyph())}, []uint16{600}),
 		FirstChar: 'A',
 		Widths:    []float64{600},
 	}
@@ -401,28 +424,139 @@ func TestTextWidthsOverrideFontAdvance(t *testing.T) {
 	assertExactPixels(t, img, 100, 100, []rect{{10, 40, 20, 50}, {28, 40, 38, 50}})
 }
 
-// TestHostileGlyphTripsPointBudget: a glyph with an absurd contour count must
-// trip the flattened-point budget as an error, not hang or allocate without
-// bound -- glyph outlines are budgeted exactly like path operator points.
+// TestHostileGlyphTripsPointBudget: a glyph whose FLATTENED outline exceeds
+// the point budget must trip it as an error, not hang -- glyph outlines are
+// budgeted exactly like path operator points. The glyph stays under the
+// budget on disk (800 points, so resolveFont's expansion gate admits it) and
+// blows past it through curve flattening: 400 tall skinny quadratics that,
+// drawn large enough (fontSize 2000), each subdivide several times, past 1000
+// device points total.
 func TestHostileGlyphTripsPointBudget(t *testing.T) {
 	defer func(old int64) { maxPathPoints = old }(maxPathPoints)
 	maxPathPoints = 1000
 
-	var contours [][]gpt
-	for i := 0; i < 500; i++ {
-		x := int16(i % 100)
-		contours = append(contours, []gpt{{x, 0, false}, {x + 5, 0, false}, {x, 5, false}})
+	var c []gpt
+	for i := 0; i < 400; i++ {
+		c = append(c, gpt{int16(2 * i), 0, false}, gpt{int16(2*i + 1), 800, true})
 	}
 	f := Font{
-		Program:   buildTTF('A', [][][]gpt{contours}, []uint16{600}),
+		Program:   buildTTF(1000, 'A', [][]byte{buildGlyf([][]gpt{c})}, []uint16{600}),
 		FirstChar: 'A',
 		Widths:    []float64{600},
 	}
-	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
-	box := content.Box{URX: 100, URY: 100}
+	src := "BT /F1 2000 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
+	box := content.Box{URX: 5000, URY: 5000}
 	_, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
 	if err == nil || !strings.Contains(err.Error(), "points") {
 		t.Fatalf("hostile glyph: got err %v, want the path-point budget error", err)
+	}
+}
+
+// TestHostileCompoundGlyphRefusedBeforeParse: a compound-glyph bomb (7 levels
+// of 9 components each, ~9^7 expanded instances from ~1 KB of font) must make
+// the font degrade to widths-only WITHOUT the expansion ever materialising.
+// The bomb glyph is deliberately mapped to 'H': sfnt.Parse itself loads 'x'
+// and 'H' for its OS/2 metrics fallback, so a post-Parse check is already too
+// late -- measured at 3.7 GB allocated inside Parse for this exact font. The
+// allocation ceiling is what pins the refusal happening before Parse.
+func TestHostileCompoundGlyphRefusedBeforeParse(t *testing.T) {
+	glyphs := [][]byte{buildGlyf(squareGlyph())} // glyph 1 ('A'): 4-point leaf
+	advances := []uint16{600}
+	for i := 0; i < 7; i++ { // glyphs 2..8 ('B'..'H'): 9 copies of the previous
+		glyphs = append(glyphs, buildCompound(uint16(i+1), 9))
+		advances = append(advances, 600)
+	}
+	f := Font{
+		Program:   buildTTF(1000, 'A', glyphs, advances),
+		FirstChar: 'A',
+		Widths:    []float64{600},
+	}
+	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (H) Tj ET 30 30 10 10 re f"
+	box := content.Box{URX: 100, URY: 100}
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	runtime.ReadMemStats(&m1)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	if delta := m1.TotalAlloc - m0.TotalAlloc; delta > 8<<20 {
+		t.Fatalf("compound bomb allocated %d bytes; the refusal must land before sfnt.Parse expands it", delta)
+	}
+	// The bomb's glyphs skip; the rest of the page still renders.
+	assertExactPixels(t, img, 100, 100, []rect{{30, 60, 40, 70}})
+}
+
+// TestHostileOffCanvasGlyphsTripFillWork: a stream re-showing a wholly
+// off-canvas glyph is the one case fillEdges' own scanline accounting never
+// sees (its y-range clamps to the canvas), and pth.reset returns the point
+// budget after every glyph -- so the per-glyph fillWork charge in fillGlyph
+// is the only budget that accrues, and it must trip.
+func TestHostileOffCanvasGlyphsTripFillWork(t *testing.T) {
+	defer func(old int64) { maxFillWork = old }(maxFillWork)
+	maxFillWork = 1000
+
+	src := "BT /F1 20 Tf 1 0 0 1 5000 5000 Tm (" + strings.Repeat("A", 300) + ") Tj ET"
+	box := content.Box{URX: 100, URY: 100}
+	_, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(testFont()))
+	if err == nil || !strings.Contains(err.Error(), "fill work") {
+		t.Fatalf("off-canvas glyph stream: got err %v, want the fill-work budget error", err)
+	}
+}
+
+// TestTextLargeCoordsAtHighUpem pins the LoadGlyph ppem convention: at upem
+// 2048 (Arial's) a legal glyph coordinate of 20000 font units overflows
+// sfnt's int32 scaling under fixed.I(upem) -- coordinates beyond
+// 2^31/(64*upem) = 16384 came back sign-flipped -- where fixed.Int26_6(upem)
+// returns raw font units exactly.
+//
+// Hand computation, 100x100 page at scale 1: square 0..20000 units =
+// 20000/2048 em, at 8pt = 78.125pt from Tm origin (10,10): x 10..88.125,
+// user y 10..88.125 -> device y 11.875..90.
+func TestTextLargeCoordsAtHighUpem(t *testing.T) {
+	big := [][]gpt{{{0, 0, false}, {20000, 0, false}, {20000, 20000, false}, {0, 20000, false}}}
+	f := Font{
+		Program:   buildTTF(2048, 'A', [][]byte{buildGlyf(big)}, []uint16{600}),
+		FirstChar: 'A',
+		Widths:    []float64{600},
+	}
+	src := "BT /F1 8 Tf 1 0 0 1 10 10 Tm (A) Tj ET"
+	box := content.Box{URX: 100, URY: 100}
+	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	assertExactPixels(t, img, 100, 100, []rect{{10, 12, 88, 90}})
+}
+
+// TestTextNonFiniteParamsSkipGlyphsCleanly: hostile text parameters that
+// drive a glyph's device coordinates non-finite must skip that glyph -- no
+// panic, no error, no stray ink -- and the rest of the page still renders.
+// 1e308 is finite, so it passes the operand parsers; the overflow to Inf
+// happens where the parameters multiply into the text rendering matrix, which
+// is exactly where fillGlyph's guard sits.
+func TestTextNonFiniteParamsSkipGlyphsCleanly(t *testing.T) {
+	huge := "1" + strings.Repeat("0", 308) // 1e308: finite, overflows when scaled
+	box := content.Box{URX: 100, URY: 100}
+	for _, tc := range []struct {
+		name, src string
+		rects     []rect
+	}{
+		// Tfs 1e308 x Tz 1000 overflows the Trm to Inf: the glyph skips, the
+		// path fill after ET still lands.
+		{"inf-trm", "BT /F1 " + huge + " Tf 100000 Tz 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f",
+			[]rect{{30, 60, 40, 70}}},
+		// A huge TJ adjustment poisons tm for the second show only.
+		{"huge-tj", "BT /F1 20 Tf 1 0 0 1 10 50 Tm [(A) " + huge + " (A)] TJ ET 30 30 10 10 re f",
+			[]rect{{10, 40, 20, 50}, {30, 60, 40, 70}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			img, err := Page(context.Background(), []byte(tc.src), box, 1, nil, fontsFor(testFont()))
+			if err != nil {
+				t.Fatalf("Page: %v", err)
+			}
+			assertExactPixels(t, img, 100, 100, tc.rects)
+		})
 	}
 }
 

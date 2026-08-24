@@ -259,7 +259,9 @@ func oracleTTF() []byte {
 		{250, 0, false}, {500, 0, true}, {500, 250, false}, {500, 500, true},
 		{250, 500, false}, {0, 500, true}, {0, 250, false}, {0, 0, true},
 	}}
-	return buildTTF('A', [][][]gpt{square, triangle, diamond}, []uint16{600, 700, 550})
+	return buildTTF(1000, 'A',
+		[][]byte{buildGlyf(square), buildGlyf(triangle), buildGlyf(diamond)},
+		[]uint16{600, 700, 550})
 }
 
 // textOracleContent shows two lines of text at different sizes, with a TJ
