@@ -102,7 +102,10 @@ type Image struct {
 
 // ImageFor resolves a Do operand to a decoded image. ok=false skips the draw
 // cleanly -- an unresolved name, a form XObject, or a codec byblos does not
-// decode (JPX) must not stop the rest of the page from rendering.
+// decode (JPX) must not stop the rest of the page from rendering. Page calls
+// the resolver once per Do, so a stream repeating one name pays the decode
+// each time: implementations must cache by name (or bound their own decode
+// work), because only the resulting destination writes are budgeted here.
 type ImageFor func(name string) (Image, bool)
 
 // Page interprets the vector path operators of the decoded content stream src
@@ -812,10 +815,17 @@ func (r *renderer) drawImage(name string, gs gstate) error {
 	// rejects NaN bounds.
 	ub := m.UnitSquareBox()
 	clip := r.deviceClip(gs.clip)
-	x0 := int(math.Ceil(math.Max(ub.LLX, clip.x0) - 0.5))
-	x1 := int(math.Ceil(math.Min(ub.URX, clip.x1) - 0.5))
-	y0 := int(math.Ceil(math.Max(ub.LLY, clip.y0) - 0.5))
-	y1 := int(math.Ceil(math.Min(ub.URY, clip.y1) - 0.5))
+	fx0 := math.Max(ub.LLX, clip.x0)
+	fx1 := math.Min(ub.URX, clip.x1)
+	fy0 := math.Max(ub.LLY, clip.y0)
+	fy1 := math.Min(ub.URY, clip.y1)
+	if !(fx0 < fx1 && fy0 < fy1) {
+		return nil
+	}
+	x0 := int(math.Ceil(fx0 - 0.5))
+	x1 := int(math.Ceil(fx1 - 0.5))
+	y0 := int(math.Ceil(fy0 - 0.5))
+	y1 := int(math.Ceil(fy1 - 0.5))
 	if x1 <= x0 || y1 <= y0 {
 		return nil
 	}
