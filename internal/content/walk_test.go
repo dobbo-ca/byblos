@@ -3,8 +3,10 @@ package content
 import (
 	"context"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mapEnv is a fake resource tree: one map of name to XObject per scope.
@@ -1525,3 +1527,73 @@ func TestWalkCapsTextShows(t *testing.T) {
 			s.TextOps, s.TextChars, maxTextShows+extra)
 	}
 }
+
+// TestWalkRefusesDeepGStateStack pins byb-9ml's first half. `q` is two bytes
+// and saved a 328-byte gstate with no bound at all, so a content stream of
+// nothing but `q ` -- which flate compresses about 1000:1, making an 8.6 KB
+// PDF -- drove peak heap to 3.3 GB and returned a NIL error. The cap is
+// measured, not guessed: 31,705 real page-walks put the maximum at 18.
+func TestWalkRefusesDeepGStateStack(t *testing.T) {
+	src := strings.Repeat("q ", maxGStateDepth+1)
+	s, err := Walk(context.Background(), []byte(src), 0, imageEnv(1))
+	if err == nil {
+		t.Fatalf("Walk accepted %d nested q with no error", maxGStateDepth+1)
+	}
+	if !strings.Contains(err.Error(), "q nesting") {
+		t.Errorf("error = %v; want it to name q nesting", err)
+	}
+	// The partial scan still comes back: inspectPage relies on that for a
+	// damaged stream, and refusing must not become discarding (byb-3jq).
+	if s == nil {
+		t.Error("Walk returned a nil Scan alongside the error")
+	}
+	// One below the cap is still fine, so the bound is where it says it is.
+	if _, err := Walk(context.Background(), []byte(strings.Repeat("q ", maxGStateDepth)), 0, imageEnv(1)); err != nil {
+		t.Errorf("Walk refused %d nested q, which is within the cap: %v", maxGStateDepth, err)
+	}
+}
+
+// TestWalkRefusesFormInvocationFanOut pins byb-9ml's second half, and it is
+// the one maxFormDepth could not catch: DEPTH was bounded at 8 and WIDTH was
+// not, so eight chained forms each invoking the next `fan` times cost fan^7
+// walks. 505 bytes at fan 10 appended 10,000,000 Paints and reached 5.6 GB
+// with a nil error; 3.7 KB at fan 40 is 1.6e11 walks, about sixteen hours.
+//
+// The fixture below is that shape in miniature -- 8 levels, fan 6, which is
+// 6^7 = 279,936 walks uncapped. It is deliberately SMALL: it completes in
+// 0.1s without the cap and simply reports a nil error, so this test states
+// what it can prove. The 5.6 GB and the sixteen hours are on the bead, not
+// here -- a test that reproduced them would be a test that OOMs CI.
+func TestWalkRefusesFormInvocationFanOut(t *testing.T) {
+	const levels, fan = 8, 6
+	env := make(mapEnv, 1)
+	env[0] = map[string]XObject{}
+	for i := 1; i <= levels; i++ {
+		body := "0 0 m f "
+		if i < levels {
+			body = strings.Repeat("/F"+itoa(i+1)+" Do ", fan)
+		}
+		env[0]["F"+itoa(i)] = XObject{Content: []byte(body), Scope: 0}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := Walk(ctx, []byte("/F1 Do"), 0, env)
+	if err == nil {
+		t.Fatal("Walk accepted a form fan-out of 6^7 invocations with no error")
+	}
+	if !strings.Contains(err.Error(), "form XObject invocations") {
+		t.Errorf("error = %v; want it to name the invocation cap (a deadline here means the cap did not fire)", err)
+	}
+}
+
+// A form invoked many times in a FLAT stream is legitimate -- a repeated
+// letterhead or stamp -- so the cap must bound the tree without refusing that.
+func TestWalkAllowsFlatFormRepetition(t *testing.T) {
+	env := mapEnv{{"F1": {Content: []byte("0 0 m f "), Scope: 0}}}
+	src := strings.Repeat("/F1 Do ", maxFormInvocations)
+	if _, err := Walk(context.Background(), []byte(src), 0, env); err != nil {
+		t.Errorf("Walk refused %d flat form invocations, which is within the cap: %v", maxFormInvocations, err)
+	}
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
