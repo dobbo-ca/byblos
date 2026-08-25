@@ -20,9 +20,13 @@
 // inkCTM and the byb-2mt three-way rotation guard, and classify here lacked
 // the quad-vs-quad under-layer check -- for an unmeasured stretch, and
 // census_test.go carried zero tests of classify, paintsHidden or inkHidden
-// to catch it. TestPaintsHiddenRotatedCoverExcludesUnrotatedInk and
+// to catch it. TestPaintsHiddenRotatedCoverExcludesUnrotatedInk,
+// TestPaintsHiddenSameRotationWashStillHidden and
 // TestClassifyRotatedTopExcludesUnderLayerOutsideItsTrueQuad below are what
-// make "a future drift is a test failure here" true going forward.
+// make "a future drift is a test failure here" true going forward: the
+// first pins the ContainsBox disjunct of byb-2mt's three-way guard, the
+// second pins the sameRotation disjunct (and the inkCTM plumbing that feeds
+// it), and the third pins classify's own quad-vs-quad under-layer check.
 package main
 
 import (
