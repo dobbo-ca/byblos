@@ -698,11 +698,15 @@ const maxCIDWidthEntries = 65536
 
 // RenderFont resolves the named /Font resource for rendering. A composite
 // /Subtype /Type0 font (byb-6z1) is resolved through its descendant CIDFont
-// when /Encoding is Identity-H or Identity-V, per render.Font's own contract
-// (text.go) that only the Identity CMaps give code boundaries without
-// decoding an embedded or predefined CMap. Any other /Encoding -- a CMap
-// stream, or a predefined CJK CMap name -- returns ok=false rather than a
-// wrong or fallback resolution, exactly as that contract requires.
+// when /Encoding is Identity-H, per render.Font's own contract (text.go)
+// that only the Identity CMaps give code boundaries without decoding an
+// embedded or predefined CMap. Any other /Encoding -- a CMap stream, a
+// predefined CJK CMap name, or Identity-V -- returns ok=false rather than a
+// wrong or fallback resolution. Identity-V is refused, not resolved with
+// horizontal metrics: render.Font's "population-based" deferral for it
+// (text.go) was written before anything fed it a real PDF, and doing so
+// measures 3.7x further from poppler than refusing (byb-6z1 review finding
+// 1) -- worth revisiting only alongside actual vertical-layout support.
 func (d *doc) RenderFont(sc int, name string) (RenderFont, bool) {
 	rf, err := d.renderFont(sc, name)
 	return rf, err == nil
@@ -727,8 +731,8 @@ func (d *doc) renderFont(sc int, name string) (rf RenderFont, err error) {
 	widthDict := dict
 	if st := dict.NameEntry("Subtype"); st != nil && *st == "Type0" {
 		enc, isName := d.deref(dict["Encoding"]).(types.Name)
-		if !isName || (enc.Value() != "Identity-H" && enc.Value() != "Identity-V") {
-			return rf, fmt.Errorf("byblos/pdfdoc: /Font %q Type0 /Encoding is not Identity-H/-V", name)
+		if !isName || enc.Value() != "Identity-H" {
+			return rf, fmt.Errorf("byblos/pdfdoc: /Font %q Type0 /Encoding is not Identity-H", name)
 		}
 		descFonts := d.arrayEntry(dict, "DescendantFonts")
 		if len(descFonts) != 1 {
@@ -1052,17 +1056,26 @@ func (d *doc) arrayEntry(dict types.Dict, key string) types.Array {
 //	c [w1 w2 ... wn]   n consecutive CIDs starting at c
 //	cFirst cLast w     every CID in [cFirst, cLast] gets w
 //
-// capped at maxCIDWidthEntries total entries -- see its comment for why the
-// range form must be bounded. A malformed head (a non-number where a CID is
-// expected) stops the scan rather than misreading the rest of the array as
-// something it is not.
+// A malformed head (a non-number where a CID is expected) stops the scan
+// rather than misreading the rest of the array as something it is not.
+//
+// budget, not len(out), is what bounds the work: both forms can target the
+// same CIDs repeatedly (a repeated range, or a shared indirect sub-array
+// referenced many times), and len(out) stops growing on a repeat while the
+// loop keeps re-walking every CID it names. Gating on len(out) alone lets
+// ~20 bytes of /W (a repeated `0 65534 500` triple, or one shared `9 0 R`
+// sub-array referenced N times) burn O(N*65536) time for O(1) input growth
+// (byb-6z1 review, bug class 6). budget is decremented once per CID visited,
+// by either form, so total work across the whole array is capped at
+// maxCIDWidthEntries regardless of how many times a range repeats.
 func (d *doc) cidWidths(dict types.Dict) map[uint16]float64 {
 	arr := d.arrayEntry(dict, "W")
 	if len(arr) == 0 {
 		return nil
 	}
 	out := map[uint16]float64{}
-	for i := 0; i < len(arr) && len(out) < maxCIDWidthEntries; {
+	budget := maxCIDWidthEntries
+	for i := 0; i < len(arr) && budget > 0; {
 		c, ok := d.number(arr[i])
 		if !ok || c < 0 || c > 65535 {
 			break
@@ -1074,13 +1087,14 @@ func (d *doc) cidWidths(dict types.Dict) map[uint16]float64 {
 		if sub, isArray := d.deref(arr[i]).(types.Array); isArray {
 			cid := int(c)
 			for _, wo := range sub {
-				if cid > 65535 || len(out) >= maxCIDWidthEntries {
+				if cid > 65535 || budget <= 0 {
 					break
 				}
 				if w, ok := d.number(wo); ok {
 					out[uint16(cid)] = w
 				}
 				cid++
+				budget--
 			}
 			i++
 			continue
@@ -1098,12 +1112,19 @@ func (d *doc) cidWidths(dict types.Dict) map[uint16]float64 {
 			break
 		}
 		i++
-		hi := int(last)
-		if hi > 65535 {
-			hi = 65535
+		// Clamp in float space, before converting to int: last can be a
+		// float wildly out of int range (e.g. 1e300), and Go's float64->int
+		// conversion of an out-of-range value is implementation-defined --
+		// arm64 saturates, amd64 wraps to a negative -- so converting first
+		// and clamping after gave a different rendered layout per
+		// architecture (byb-6z1 review finding 4).
+		if last > 65535 {
+			last = 65535
 		}
-		for cid := int(c); cid <= hi && len(out) < maxCIDWidthEntries; cid++ {
+		hi := int(last)
+		for cid := int(c); cid <= hi && budget > 0; cid++ {
 			out[uint16(cid)] = w
+			budget--
 		}
 	}
 	return out

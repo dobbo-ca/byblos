@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -560,6 +561,138 @@ func hostileWCIDPDF() []byte {
 			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
 		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
 	})
+}
+
+// hostileWCIDRepeatedRangePDF builds a /W that repeats the SAME range 5000
+// times: `0 65534 500` fills CIDs 0..65534 on its first occurrence, and
+// every later occurrence re-walks the identical 65535 CIDs writing the same
+// values. len(out) stops growing after the first repeat, so a bound gated
+// on len(out) alone never trips -- only a bound on total work visited does
+// (byb-6z1 review finding: bug class 6, the "multiplicative gate bomb").
+func hostileWCIDRepeatedRangePDF() []byte {
+	cff := string(oracleCIDCFF())
+	const textContent = cidTextOracleContent
+	var w strings.Builder
+	w.WriteString("/W [")
+	for i := 0; i < 5000; i++ {
+		w.WriteString("0 65534 500 ")
+	}
+	w.WriteString("]")
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
+			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
+		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
+			" /DescendantFonts [6 0 R] >>",
+		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
+			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
+			" /DW 1000 " + w.String() + " /FontDescriptor 7 0 R >>",
+		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
+			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
+			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
+		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
+	})
+}
+
+// TestRenderFontBoundsHostileWCIDRepeatedRange pins the total-work budget in
+// cidWidths against a repeated range: gating solely on len(out) lets 5000
+// repeats of the same 65535-CID range each re-walk in full (measured ~0.64ms
+// per repeat when unbounded, so 5000 repeats is seconds, not this test's 2s
+// ceiling), because len(out) stops growing after the first repeat.
+func TestRenderFontBoundsHostileWCIDRepeatedRange(t *testing.T) {
+	d, err := pdfdoc.Open(bytes.NewReader(hostileWCIDRepeatedRangePDF()))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	start := time.Now()
+	rf, ok := d.RenderFont(p.Scope, "F1")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("RenderFont took %v on a 5000x-repeated /W range fixture; total work is not bounded", elapsed)
+	}
+	if !ok {
+		t.Fatal("RenderFont refused the hostile-/W fixture")
+	}
+	if len(rf.W) != 65535 {
+		t.Fatalf("W has %d entries, want exactly 65535 (CIDs 0..65534)", len(rf.W))
+	}
+}
+
+// TestRenderFontRefusesIdentityV pins byb-6z1 review finding 1: a Type0
+// /Encoding /Identity-V must be refused (ok=false), not resolved with
+// horizontal metrics -- doing so measured 3.7x further from poppler than
+// refusing. "Identity-V" is the same byte length as "Identity-H", so this
+// swaps it in cidCFFPDF's raw bytes without touching xref offsets.
+func TestRenderFontRefusesIdentityV(t *testing.T) {
+	pdf := bytes.Replace(cidCFFPDF(), []byte("/Encoding /Identity-H"), []byte("/Encoding /Identity-V"), 1)
+	d, err := pdfdoc.Open(bytes.NewReader(pdf))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	if _, ok := d.RenderFont(p.Scope, "F1"); ok {
+		t.Fatal("RenderFont accepted /Encoding /Identity-V; want ok=false")
+	}
+}
+
+// hostileWCIDHugeFloatPDF's /W range-form cLast is 1e300: a float wildly out
+// of int range. Go's float64->int conversion of an out-of-range value is
+// implementation-defined, so clamping cLast to the CID space AFTER
+// converting it to int (rather than before, in float space) makes the
+// result arch-dependent -- verified with GOARCH=amd64: int(1e300) saturates
+// to +MaxInt64 on arm64 (clamp still applies) but wraps to -MaxInt64-1 on
+// amd64 (clamp never applies, the range silently contributes zero widths)
+// (byb-6z1 review finding 4).
+func hostileWCIDHugeFloatPDF() []byte {
+	cff := string(oracleCIDCFF())
+	const textContent = cidTextOracleContent
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
+			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
+		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
+			" /DescendantFonts [6 0 R] >>",
+		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
+			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
+			" /DW 1000 /W [0 1e300 500] /FontDescriptor 7 0 R >>",
+		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
+			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
+			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
+		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
+	})
+}
+
+// TestRenderFontCIDWidthHugeFloatArchIndependent pins that a /W range with an
+// out-of-range float cLast (1e300) flattens the SAME way regardless of
+// GOARCH: len(W) must be exactly 65536 (CIDs 0..65535, the whole CID space),
+// not 0 (amd64's wrapped-negative outcome under the pre-fix ordering).
+func TestRenderFontCIDWidthHugeFloatArchIndependent(t *testing.T) {
+	d, err := pdfdoc.Open(bytes.NewReader(hostileWCIDHugeFloatPDF()))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	rf, ok := d.RenderFont(p.Scope, "F1")
+	if !ok {
+		t.Fatal("RenderFont refused the hostile-/W fixture")
+	}
+	const want = 65536
+	if len(rf.W) != want {
+		t.Fatalf("W has %d entries, want exactly %d (arch-independent clamp)", len(rf.W), want)
+	}
 }
 
 // TestRenderFontBoundsHostileWCIDRange pins byb-6z1's /W range-form bound. A
