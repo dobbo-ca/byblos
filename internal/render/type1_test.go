@@ -216,7 +216,7 @@ func TestType1ProgramTakesTheType1Path(t *testing.T) {
 func TestType1GlyphOriginsExact(t *testing.T) {
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(t1SquareFont()))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(t1SquareFont()))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestType1CurveAndSubrRender(t *testing.T) {
 	f := Font{Program: raw, FirstChar: 'A', Widths: []float64{600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestType1FlexCollapsesToCurves(t *testing.T) {
 	f := Font{Program: raw, FirstChar: 'A', Widths: []float64{600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestType1CustomEncoding(t *testing.T) {
 	f := Font{Program: raw, FirstChar: 'A', Widths: []float64{600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestHostileType1SubrBombBudgeted(t *testing.T) {
 	font := Font{Program: raw, FirstChar: 'A', Widths: []float64{600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
-	img, perr := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(font))
+	img, perr := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(font))
 	if perr != nil {
 		t.Fatalf("Page: %v", perr)
 	}
@@ -400,7 +400,7 @@ func TestType1WorkChargedPerShow(t *testing.T) {
 	f := Font{Program: raw, FirstChar: 'A', Widths: []float64{600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (AA) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	_, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err == nil || !strings.Contains(err.Error(), "fill work exceeds") {
 		t.Fatalf("two shows of a ~60000-work zero-segment glyph under a 100000 budget must trip fill work, got %v", err)
 	}
@@ -427,7 +427,7 @@ func TestType1MalformedNoPanic(t *testing.T) {
 	box := content.Box{URX: 100, URY: 100}
 	for i, p := range cases {
 		f := Font{Program: p, FirstChar: 'A', Widths: []float64{600}}
-		if _, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f)); err != nil {
+		if _, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f)); err != nil {
 			t.Fatalf("case %d: Page: %v", i, err)
 		}
 	}
@@ -447,7 +447,7 @@ func TestType1SeacDeferred(t *testing.T) {
 	f := Font{Program: raw, FirstChar: 'A', Widths: []float64{600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestType1TextAgreesWithPdftoppm(t *testing.T) {
 		return font, true
 	}
 	box := content.Box{URX: 200, URY: 200}
-	got, err := Page(context.Background(), []byte(textOracleContent), box, 1, nil, fonts)
+	got, err := Page(context.Background(), []byte(textOracleContent), box, 0, 1, nil, fonts)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -518,7 +518,7 @@ func TestType1TextAgreesWithPdftoppm(t *testing.T) {
 			frac*100, tolerance*100)
 	}
 
-	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
+	blank, err := Page(context.Background(), nil, box, 0, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page(blank): %v", err)
 	}
@@ -649,7 +649,7 @@ func TestType1NoWidthsUsesHsbwAdvance(t *testing.T) {
 	f.FirstChar, f.Widths = 0, nil
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (AA) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}

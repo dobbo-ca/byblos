@@ -260,7 +260,7 @@ func TestType1CProgramTakesTheCFFPath(t *testing.T) {
 func TestType1CGlyphOriginsExact(t *testing.T) {
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(cffSquareFont()))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(cffSquareFont()))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestType1CCubicOutlineRenders(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestType1CSubrsRender(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestType1CHintsSkippedNotExecuted(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestType1CEncodings(t *testing.T) {
 		}, 'A'},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			img, err := Page(context.Background(), show(tc.code), box, 1, nil, fontsFor(tc.f))
+			img, err := Page(context.Background(), show(tc.code), box, 0, 1, nil, fontsFor(tc.f))
 			if err != nil {
 				t.Fatalf("Page: %v", err)
 			}
@@ -427,7 +427,7 @@ func TestHostileCFFSubrBombRefusedBeforeParse(t *testing.T) {
 	f := Font{Program: bomb, FirstChar: 'A', Widths: []float64{600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestHostileCFFSelfRecursionCheap(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestCFFCIDKeyedRenders(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <0007> Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -543,7 +543,7 @@ func TestType0IdentityDecoding(t *testing.T) {
 		{"trailing-odd-byte-dropped", show("000700"), []rect{{10, 40, 20, 50}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			img, err := Page(context.Background(), tc.src, box, 1, nil, fontsFor(f))
+			img, err := Page(context.Background(), tc.src, box, 0, 1, nil, fontsFor(f))
 			if err != nil {
 				t.Fatalf("Page: %v", err)
 			}
@@ -555,7 +555,7 @@ func TestType0IdentityDecoding(t *testing.T) {
 		// 0x0020 (CID 32, no glyph) must advance by DW alone, putting the
 		// following square at 30, not 30+40.
 		src := []byte("BT /F1 20 Tf 40 Tw 1 0 0 1 10 50 Tm <00200007> Tj ET")
-		img, err := Page(context.Background(), src, box, 1, nil, fontsFor(cidSquareFont()))
+		img, err := Page(context.Background(), src, box, 0, 1, nil, fontsFor(cidSquareFont()))
 		if err != nil {
 			t.Fatalf("Page: %v", err)
 		}
@@ -566,7 +566,7 @@ func TestType0IdentityDecoding(t *testing.T) {
 		// CID by 500, not the 1000 default: square at 20, not 30.
 		f := cidSquareFont()
 		f.DW = 500
-		img, err := Page(context.Background(), show("00090007"), box, 1, nil, fontsFor(f))
+		img, err := Page(context.Background(), show("00090007"), box, 0, 1, nil, fontsFor(f))
 		if err != nil {
 			t.Fatalf("Page: %v", err)
 		}
@@ -640,7 +640,7 @@ func TestType0OverPlainCFFNeverInks(t *testing.T) {
 	// GID), 'A' would ink the square at 10..20.
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <0041> Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -665,7 +665,7 @@ func TestHostileCIDCFFSubrBombBehindFDSelect(t *testing.T) {
 	f := Font{Program: bomb, Type0: true, W: map[uint16]float64{7: 600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <0007> Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -726,7 +726,7 @@ func TestCIDZeroSegmentGlyphChargesFillWork(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <00070007> Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	_, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err == nil || !strings.Contains(err.Error(), "fill work exceeds") {
 		t.Fatalf("two shows of a ~60000-work zero-segment glyph under a 100000 budget must trip fill work, got %v", err)
 	}
@@ -765,7 +765,7 @@ func TestCIDFDPastFDArraySkipsCleanly(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <0007> Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -785,7 +785,7 @@ func TestCFFWorkGateBudgetTrips(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -804,7 +804,7 @@ func TestCFFWidthPrefixDoesNotShiftOutline(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -831,7 +831,7 @@ func TestCFFHugeCoordinatesStayBounded(t *testing.T) {
 	}
 	src := "BT /F1 2000 Tf 1 0 0 1 10 50 Tm (" + strings.Repeat("A", 50) + ") Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	if _, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f)); err != nil {
+	if _, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f)); err != nil {
 		// A tripped budget is acceptable; a hang or panic is not, and the
 		// test binary's timeout is the harness for those.
 		t.Logf("Page returned %v (budget trips are fine)", err)
@@ -994,7 +994,7 @@ func TestCFFZeroSegmentGlyphChargesFillWork(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (AA) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	_, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err == nil || !strings.Contains(err.Error(), "fill work exceeds") {
 		t.Fatalf("two shows of a ~60000-work zero-segment glyph under a 100000 budget must trip fill work, got %v", err)
 	}

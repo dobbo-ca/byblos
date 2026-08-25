@@ -30,7 +30,7 @@ func twoByTwo() image.Image {
 
 func renderImages(t *testing.T, src string, imgs map[string]Image) *image.RGBA {
 	t.Helper()
-	img, err := Page(context.Background(), []byte(src), box100, 1, func(name string) (Image, bool) {
+	img, err := Page(context.Background(), []byte(src), box100, 0, 1, func(name string) (Image, bool) {
 		im, ok := imgs[name]
 		return im, ok
 	}, nil)
@@ -256,7 +256,7 @@ func TestImageWriteBudget(t *testing.T) {
 	defer func(v int64) { maxFillWork = v }(maxFillWork)
 	maxFillWork = 16
 	src := "q 100 0 0 100 0 0 cm /Im0 Do Q"
-	if _, err := Page(context.Background(), []byte(src), box100, 1,
+	if _, err := Page(context.Background(), []byte(src), box100, 0, 1,
 		func(string) (Image, bool) { return Image{Data: twoByTwo()}, true }, nil); err == nil {
 		t.Fatal("Page accepted image write work beyond the budget")
 	}

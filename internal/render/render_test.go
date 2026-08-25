@@ -18,7 +18,7 @@ var box100 = content.Box{LLX: 0, LLY: 0, URX: 100, URY: 100}
 
 func render100(t *testing.T, src string) *image.RGBA {
 	t.Helper()
-	img, err := Page(context.Background(), []byte(src), box100, 1, nil, nil)
+	img, err := Page(context.Background(), []byte(src), box100, 0, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestRasterDimensionsClamped(t *testing.T) {
 		{"negative scale", box100, -1},
 		{"empty box", content.Box{}, 1},
 	} {
-		if _, err := Page(context.Background(), nil, tc.box, tc.scale, nil, nil); err == nil {
+		if _, err := Page(context.Background(), nil, tc.box, 0, tc.scale, nil, nil); err == nil {
 			t.Errorf("%s: Page returned nil error; want a refusal", tc.name)
 		}
 	}
@@ -226,7 +226,7 @@ func TestPathPointBudget(t *testing.T) {
 	defer func(v int64) { maxPathPoints = v }(maxPathPoints)
 	maxPathPoints = 64
 	src := "0 g 10 50 m " + strings.Repeat("80 10 20 10 20 50 c 80 10 20 10 20 50 c ", 8) + "f"
-	if _, err := Page(context.Background(), []byte(src), box100, 1, nil, nil); err == nil {
+	if _, err := Page(context.Background(), []byte(src), box100, 0, 1, nil, nil); err == nil {
 		t.Fatal("Page accepted a path beyond the point budget")
 	}
 }
@@ -242,7 +242,7 @@ func TestFillWorkBudget(t *testing.T) {
 		fmt.Fprintf(&b, "%d 100 l %d 0 l ", i, i+1)
 	}
 	b.WriteString("f")
-	if _, err := Page(context.Background(), []byte(b.String()), box100, 1, nil, nil); err == nil {
+	if _, err := Page(context.Background(), []byte(b.String()), box100, 0, 1, nil, nil); err == nil {
 		t.Fatal("Page accepted fill work beyond the budget")
 	}
 }
@@ -252,7 +252,7 @@ func TestContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	src := strings.Repeat("10 20 30 40 re f ", 100)
-	if _, err := Page(ctx, []byte(src), box100, 1, nil, nil); err == nil {
+	if _, err := Page(ctx, []byte(src), box100, 0, 1, nil, nil); err == nil {
 		t.Fatal("Page ignored a cancelled context")
 	}
 }
@@ -354,7 +354,7 @@ func TestVYCurveOperators(t *testing.T) {
 func TestFillPixelWorkBudget(t *testing.T) {
 	defer func(v int64) { maxFillWork = v }(maxFillWork)
 	maxFillWork = 350
-	if _, err := Page(context.Background(), []byte("0 g 0 0 100 100 re f"), box100, 1, nil, nil); err == nil {
+	if _, err := Page(context.Background(), []byte("0 g 0 0 100 100 re f"), box100, 0, 1, nil, nil); err == nil {
 		t.Fatal("Page accepted pixel-fill work beyond the budget")
 	}
 }
@@ -364,7 +364,7 @@ func TestFillPixelWorkBudget(t *testing.T) {
 func TestStrokeWorkBudget(t *testing.T) {
 	defer func(v int64) { maxFillWork = v }(maxFillWork)
 	maxFillWork = 16
-	if _, err := Page(context.Background(), []byte("0 g 4 w 10 10 m 90 90 l S"), box100, 1, nil, nil); err == nil {
+	if _, err := Page(context.Background(), []byte("0 g 4 w 10 10 m 90 90 l S"), box100, 0, 1, nil, nil); err == nil {
 		t.Fatal("Page accepted stroke work beyond the budget")
 	}
 }
@@ -373,9 +373,43 @@ func TestStrokeWorkBudget(t *testing.T) {
 // partway still paints the part it reached; the canvas comes back with the
 // error unset for plain garbage operators, which are simply ignored.
 func TestMalformedStreamStillReturnsCanvas(t *testing.T) {
-	img, err := Page(context.Background(), []byte("nonsense ops here 1 0 0 rg 10 20 30 40 re f"), box100, 1, nil, nil)
+	img, err := Page(context.Background(), []byte("nonsense ops here 1 0 0 rg 10 20 30 40 re f"), box100, 0, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
 	assertRect(t, img, 10, 40, 40, 80, red)
+}
+
+// TestFillHugeSpanStillPaints is the fill-side twin of
+// TestImageHugeTranslationSkips, and it exists because fillEdges had the
+// float-space clamp on ONE axis. The y bounds intersect the clip in floats
+// before the int conversion; the scanline crossings on x did not. A rect
+// 10^31 points wide -- finite, and PDF numbers have no exponent form, so the
+// operand is written out -- puts the right-hand crossing past 2^63, where
+// amd64's CVTTSD2SI wraps to minInt64, min() takes it, and every span is
+// dropped: an all-black page renders fully WHITE. arm64's FCVTZS saturates
+// instead, so this passes there either way; the regression it pins is
+// amd64's (linux CI and prod), the same convention imagedraw_test.go uses.
+//
+// Note the failure is one-way -- it drops ink, it never paints ink that
+// should not exist -- which is why no visual test caught it.
+func TestFillHugeSpanStillPaints(t *testing.T) {
+	huge := "1" + strings.Repeat("0", 31)
+	img, err := Page(context.Background(), []byte("0 g 0 0 "+huge+" 100 re f"), box100, 0, 1, nil, nil)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	b := img.Bounds()
+	inked := 0
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if r, _, _, _ := img.At(x, y).RGBA(); r>>8 < 128 {
+				inked++
+			}
+		}
+	}
+	if want := b.Dx() * b.Dy(); inked != want {
+		t.Errorf("a rect %s points wide inked %d of %d pixels; the whole canvas must be black",
+			huge, inked, want)
+	}
 }

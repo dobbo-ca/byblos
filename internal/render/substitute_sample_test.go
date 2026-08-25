@@ -10,9 +10,9 @@ package render
 // THE SAMPLE, stated exactly: every 7th row of $BYBLOS_SAMPLE/manifest.tsv
 // (the same 811-document selection scan.sh used for the byb-8b9.6 decision
 // measurement), kept when pdffonts reports >= 1 page-1 font and NONE
-// embedded. Documents whose page carries /Rotate are excluded and counted:
-// render.Page does not apply page rotation yet, so the comparison would
-// measure rotation, not fonts.
+// embedded. /Rotate is applied (byb-sfo), so rotated pages are measured like
+// any other; only a /Rotate that is not a multiple of 90 is excluded, and
+// render.Page is the thing that refuses it.
 //
 // GATED ON BYBLOS_SAMPLE and slow (minutes): build once and run the binary
 // directly, per the harness_sample_test.go convention:
@@ -145,9 +145,6 @@ func measureOne(pdftoppm string, path string, dir string, i int) sampleResult {
 	if err != nil {
 		return sampleResult{path, 0, "Page(1): " + err.Error()}
 	}
-	if p.Rotate%360 != 0 {
-		return sampleResult{path, 0, "rotated page (render.Page does not rotate yet)"}
-	}
 	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
 	long := box.URX - box.LLX
 	if h := box.URY - box.LLY; h > long {
@@ -158,14 +155,20 @@ func measureOne(pdftoppm string, path string, dir string, i int) sampleResult {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	got, err := Page(ctx, p.Content, box, 400/long, pdfdocImages(d, p), pdfdocFonts(d, p))
+	got, err := Page(ctx, p.Content, box, p.Rotate, 400/long, pdfdocImages(d, p), pdfdocFonts(d, p))
 	if err != nil {
 		return sampleResult{path, 0, "render.Page: " + err.Error()}
 	}
 	// Zero-padded and hyphen-globbed: a bare "o1*" glob also matches o12's
 	// output when workers overlap, which read as "pdftoppm wrote 2 pages".
 	prefix := filepath.Join(dir, fmt.Sprintf("o%04d", i))
-	out, err := exec.Command(pdftoppm, "-f", "1", "-l", "1", "-scale-to", "400", "-png", path, prefix).CombinedOutput()
+	// -cropbox, not the default: pdftoppm renders the MEDIA box unless asked,
+	// and byblos renders the CROP box. Without the flag the two sides framed
+	// different rectangles and every document whose CropBox is inset (a 36pt
+	// margin is common) came out a few percent off in scale -- and six came
+	// out far enough off to be thrown away as "size mismatch" instead of
+	// measured. This is what those exclusions were; the flag removes all six.
+	out, err := exec.Command(pdftoppm, "-f", "1", "-l", "1", "-cropbox", "-scale-to", "400", "-png", path, prefix).CombinedOutput()
 	if err != nil {
 		return sampleResult{path, 0, fmt.Sprintf("pdftoppm: %v: %s", err, out)}
 	}
