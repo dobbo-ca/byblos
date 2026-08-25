@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dobbo-ca/byblos"
 	"github.com/dobbo-ca/byblos/internal/content"
@@ -492,6 +493,105 @@ func TestCIDKeyedCFFTextAgreesWithPdftoppm(t *testing.T) {
 	}
 	if frac := mismatchFraction(t, blank, oracle); frac <= tolerance {
 		t.Errorf("a BLANK raster is within tolerance of pdftoppm (%.1f%% mismatch); the CID oracle metric is broken", frac*100)
+	}
+}
+
+// TestCIDKeyedCFFTextThroughPdfdocAgreesWithPdftoppm is byb-6z1's acceptance:
+// TestCIDKeyedCFFTextAgreesWithPdftoppm above hand-builds Font{Type0: true,
+// ...} to pin the RENDERER half; this drives the SAME cidCFFPDF() page
+// through pdfdocFonts, the seam byb-6z1 connects, so the Type0 /Encoding,
+// /DescendantFonts and /W/DW resolution in pdfdoc.RenderFont is what is
+// under test, not a hand-written literal. Kept beside the renderer test
+// rather than replacing it, since each pins a different half of the seam.
+func TestCIDKeyedCFFTextThroughPdfdocAgreesWithPdftoppm(t *testing.T) {
+	pdf := cidCFFPDF()
+	oracle := pdftoppmPNG(t, pdf)
+
+	d, err := pdfdoc.Open(bytes.NewReader(pdf))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	box := content.Box{URX: 200, URY: 200}
+	got, err := Page(context.Background(), []byte(cidTextOracleContent), box, 0, 1, nil, pdfdocFonts(d, p))
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	const tolerance = 0.05
+	frac := mismatchFraction(t, got, oracle)
+	t.Logf("CID-keyed CFF text (through pdfdoc) mismatch vs pdftoppm: %.2f%% of pixels", frac*100)
+	if frac > tolerance {
+		t.Errorf("CID-keyed CFF text page disagrees with pdftoppm on %.1f%% of pixels; tolerance %.0f%%",
+			frac*100, tolerance*100)
+	}
+
+	blank, err := Page(context.Background(), nil, box, 0, 1, nil, nil)
+	if err != nil {
+		t.Fatalf("Page(blank): %v", err)
+	}
+	if frac := mismatchFraction(t, blank, oracle); frac <= tolerance {
+		t.Errorf("a BLANK raster is within tolerance of pdftoppm (%.1f%% mismatch); the CID oracle metric is broken", frac*100)
+	}
+}
+
+// hostileWCIDPDF is cidCFFPDF with its /W replaced by the range form's worst
+// case (ISO 32000-1 9.7.4.3): /W [0 2147483647 500] declares every CID from
+// 0 to 2^31-1 gets width 500 from ~20 bytes of input. Unbounded, that
+// flattens to 2^31 map entries (byb-6z1's bug class 5).
+func hostileWCIDPDF() []byte {
+	cff := string(oracleCIDCFF())
+	const textContent = cidTextOracleContent
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
+			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
+		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
+			" /DescendantFonts [6 0 R] >>",
+		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
+			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
+			" /DW 1000 /W [0 2147483647 500] /FontDescriptor 7 0 R >>",
+		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
+			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
+			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
+		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
+	})
+}
+
+// TestRenderFontBoundsHostileWCIDRange pins byb-6z1's /W range-form bound. A
+// /W [0 2147483647 500] descendant must flatten to at most 65536 entries
+// (render.Font.W's CID keys are uint16 -- the whole CID space, no more), not
+// the 2^31 the declared range asks for -- and this also times the call.
+// render.Font.W's uint16 keys already cap the RESULT at 65536 distinct
+// entries no matter how the loop is written, so the entry count alone
+// cannot tell a bounded scan from one that still walks all 2^31 declared
+// CIDs to get there; only the elapsed time can. An unguarded scan of this
+// fixture measured ~20s here, so 2s is a ceiling that only a bounded loop
+// clears.
+func TestRenderFontBoundsHostileWCIDRange(t *testing.T) {
+	d, err := pdfdoc.Open(bytes.NewReader(hostileWCIDPDF()))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	start := time.Now()
+	rf, ok := d.RenderFont(p.Scope, "F1")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("RenderFont took %v on a /W [0 2147483647 500] fixture; the range-form iteration is not bounded", elapsed)
+	}
+	if !ok {
+		t.Fatal("RenderFont refused the hostile-/W fixture")
+	}
+	const maxCIDWidthEntries = 65536
+	if len(rf.W) != maxCIDWidthEntries {
+		t.Fatalf("W has %d entries, want exactly %d (the CID space cap)", len(rf.W), maxCIDWidthEntries)
 	}
 }
 
