@@ -744,8 +744,10 @@ func TestRenderFontBoundsHostileWCIDRepeatedRange(t *testing.T) {
 // TestRenderFontRefusesIdentityV pins byb-6z1 review finding 1: a Type0
 // /Encoding /Identity-V must be refused (ok=false), not resolved with
 // horizontal metrics -- doing so measured 3.7x further from poppler than
-// refusing. "Identity-V" is the same byte length as "Identity-H", so this
-// swaps it in cidCFFPDF's raw bytes without touching xref offsets.
+// refusing, and a census of all 5,672 pinned-sample documents finds 0
+// Identity-V among 4,482 Type0 dicts. "Identity-V" is the same byte length
+// as "Identity-H", so this swaps it in cidCFFPDF's raw bytes without
+// touching xref offsets.
 func TestRenderFontRefusesIdentityV(t *testing.T) {
 	pdf := bytes.Replace(cidCFFPDF(), []byte("/Encoding /Identity-H"), []byte("/Encoding /Identity-V"), 1)
 	d, err := pdfdoc.Open(bytes.NewReader(pdf))

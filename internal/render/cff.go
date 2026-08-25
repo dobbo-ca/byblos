@@ -49,9 +49,8 @@ package render
 // hide behind a crafted range table), plus a whole-font walk cap: with every
 // glyph reachable, the 256-glyph bound above becomes 256 x maxCharstringWork
 // TOTAL across the CharStrings INDEX, the same ceiling. Embedded CMap
-// streams and predefined CJK CMaps stay behind the seam (the caller must not
-// mark them Type0), and Identity-V renders with horizontal metrics -- both
-// deferred on the epic's population data; see Font in text.go.
+// streams, predefined CJK CMaps and Identity-V all stay behind the seam --
+// the caller must not mark them Type0; see Font in text.go.
 
 import (
 	"math"

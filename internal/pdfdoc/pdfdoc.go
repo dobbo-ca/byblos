@@ -703,10 +703,11 @@ const maxCIDWidthEntries = 65536
 // embedded or predefined CMap. Any other /Encoding -- a CMap stream, a
 // predefined CJK CMap name, or Identity-V -- returns ok=false rather than a
 // wrong or fallback resolution. Identity-V is refused, not resolved with
-// horizontal metrics: render.Font's "population-based" deferral for it
-// (text.go) was written before anything fed it a real PDF, and doing so
-// measures 3.7x further from poppler than refusing (byb-6z1 review finding
-// 1) -- worth revisiting only alongside actual vertical-layout support.
+// horizontal metrics: showText has no vertical mode, so it would ink glyphs
+// where poppler inks none, and a census of all 5,672 pinned-sample documents
+// finds 0 Identity-V among 4,482 Type0 dicts (byb-6z1) -- worth revisiting
+// only alongside actual vertical-layout support, on a corpus that has some.
+// See Font.Type0 in text.go.
 func (d *doc) RenderFont(sc int, name string) (RenderFont, bool) {
 	rf, err := d.renderFont(sc, name)
 	return rf, err == nil

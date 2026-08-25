@@ -38,18 +38,24 @@ type Font struct {
 	BaseFont string
 	Flags    int
 	// Type0 (byb-8b9.8) marks a composite font: a /Subtype /Type0 dict whose
-	// /Encoding is Identity-H or Identity-V and whose descendant carries the
-	// Program (a CID-keyed CFF, /FontFile3 /Subtype /CIDFontType0C). showText
-	// then decodes the string as 2-byte big-endian codes, each code the CID
+	// /Encoding is Identity-H and whose descendant carries the Program (a
+	// CID-keyed CFF, /FontFile3 /Subtype /CIDFontType0C). showText then
+	// decodes the string as 2-byte big-endian codes, each code the CID
 	// itself (the Identity CMap, ISO 32000-1 9.7.6.2), and W/DW below replace
 	// FirstChar/Widths. The caller must NOT set Type0 for an embedded-CMap
 	// /Encoding stream or a predefined CJK CMap -- return ok=false instead:
 	// with the CMap undecoded there are no code boundaries to advance by.
-	// Both that deferral and rendering Identity-V with horizontal metrics are
-	// population-based: the epic's census puts Type0-without-/ToUnicode (the
-	// only class that can carry predefined CJK CMaps) at 0.65% of shown font
-	// dicts, and the corpus is US-government English with no consumer of
-	// vertical layout (byb-8b9, pdftotext-scope spec sections 3-4).
+	// Identity-V is refused too (byb-6z1). Its CIDs decode identically, but
+	// its glyphs advance DOWN the page and showText has no vertical mode, so
+	// marking it Type0 inks every glyph where poppler inks none: 11.49% pixel
+	// disagreement against 3.08% for drawing nothing, on rasters that share
+	// no ink at all. That is byb-8b9's own deferral of vertical layout
+	// (pdftotext-scope spec section 3, "bidi and vertical writing"; C7), not
+	// a reversal of it -- the 0.65% this comment used to cite is section 3's
+	// class-F figure for predefined CJK CMaps, which the spec says must not
+	// be read as sizing CJK. Measured instead: a census of all 5,672
+	// pinned-sample documents finds 0 Identity-V among 4,482 Type0 dicts.
+	// See RenderFont in pdfdoc.go.
 	Type0 bool
 	// W and DW mirror the descendant CIDFont's /W -- flattened by the caller
 	// to CID -> width in thousandths -- and /DW (ISO 32000-1 9.7.4.3). A CID
