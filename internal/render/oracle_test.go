@@ -538,32 +538,7 @@ func TestCIDKeyedCFFTextThroughPdfdocAgreesWithPdftoppm(t *testing.T) {
 	}
 }
 
-// hostileWCIDPDF is cidCFFPDF with its /W replaced by the range form's worst
-// case (ISO 32000-1 9.7.4.3): /W [0 2147483647 500] declares every CID from
-// 0 to 2^31-1 gets width 500 from ~20 bytes of input. Unbounded, that
-// flattens to 2^31 map entries (byb-6z1's bug class 5).
-func hostileWCIDPDF() []byte {
-	cff := string(oracleCIDCFF())
-	const textContent = cidTextOracleContent
-	return wrapPDF([]string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
-			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
-		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
-			" /DescendantFonts [6 0 R] >>",
-		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
-			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
-			" /DW 1000 /W [0 2147483647 500] /FontDescriptor 7 0 R >>",
-		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
-			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
-			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
-		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
-	})
-}
-
-// hostileWCIDRepeatedRangePDF builds a /W that repeats the SAME range 5000
+// hostileWCIDRepeatedRangePDF builds a /W that repeats the SAME range 15000
 // times: `0 65534 500` fills CIDs 0..65534 on its first occurrence, and
 // every later occurrence re-walks the identical 65535 CIDs writing the same
 // values. len(out) stops growing after the first repeat, so a bound gated
@@ -574,7 +549,7 @@ func hostileWCIDRepeatedRangePDF() []byte {
 	const textContent = cidTextOracleContent
 	var w strings.Builder
 	w.WriteString("/W [")
-	for i := 0; i < 5000; i++ {
+	for i := 0; i < 15000; i++ {
 		w.WriteString("0 65534 500 ")
 	}
 	w.WriteString("]")
@@ -596,11 +571,93 @@ func hostileWCIDRepeatedRangePDF() []byte {
 	})
 }
 
+// hostileWCIDRepeatedIndirectSubArrayPDF builds a /W whose sub-array form
+// (ISO 32000-1 9.7.4.3's `c [w1 w2 ... wn]`) is ONE indirect object (9 0 R,
+// 65535 widths) reused 12000 times: `0 9 0 R 0 9 0 R ...`. Each occurrence
+// re-walks the same 65535-entry array from CID 0, so len(out) stops growing
+// after the first repeat -- the sub-array-loop twin of
+// hostileWCIDRepeatedRangePDF's range-form bomb (byb-6z1 review finding:
+// bug class 6, the "multiplicative gate bomb"), exercising G2's `budget <=
+// 0` / `budget--` in cidWidths's sub-array branch instead of G3's in the
+// range branch.
+func hostileWCIDRepeatedIndirectSubArrayPDF() []byte {
+	cff := string(oracleCIDCFF())
+	const textContent = cidTextOracleContent
+	var sub strings.Builder
+	sub.WriteString("[")
+	for i := 0; i < 65535; i++ {
+		sub.WriteString("500 ")
+	}
+	sub.WriteString("]")
+	var w strings.Builder
+	w.WriteString("/W [")
+	for i := 0; i < 12000; i++ {
+		w.WriteString("0 9 0 R ")
+	}
+	w.WriteString("]")
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
+			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
+		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
+			" /DescendantFonts [6 0 R] >>",
+		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
+			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
+			" /DW 1000 " + w.String() + " /FontDescriptor 7 0 R >>",
+		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
+			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
+			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
+		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
+		sub.String(),
+	})
+}
+
+// TestRenderFontBoundsHostileWCIDRepeatedIndirectSubArray pins the same
+// total-work budget as TestRenderFontBoundsHostileWCIDRepeatedRange, but for
+// cidWidths's sub-array branch (G2's `budget <= 0` / `budget--`) rather than
+// its range branch (G3's). See hostileWCIDRepeatedIndirectSubArrayPDF for
+// the fixture shape. Removing G2's check/decrement alone (leaving G1 and G3
+// untouched) measured 9.21s here; the unmutated fixture measures 0.02-0.03s
+// regardless of repeat count, since the budget exhausts on the first
+// repeat and every later repeat short-circuits in O(1). The 1s ceiling
+// gives a ~40x pass margin and a ~9.2x fail margin -- the same reasoning as
+// TestRenderFontBoundsHostileWCIDRepeatedRange's ceiling.
+func TestRenderFontBoundsHostileWCIDRepeatedIndirectSubArray(t *testing.T) {
+	d, err := pdfdoc.Open(bytes.NewReader(hostileWCIDRepeatedIndirectSubArrayPDF()))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	start := time.Now()
+	rf, ok := d.RenderFont(p.Scope, "F1")
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("RenderFont took %v on a 12000x-repeated indirect /W sub-array fixture; total work is not bounded", elapsed)
+	}
+	if !ok {
+		t.Fatal("RenderFont refused the hostile-/W fixture")
+	}
+	if len(rf.W) != 65535 {
+		t.Fatalf("W has %d entries, want exactly 65535 (CIDs 0..65534)", len(rf.W))
+	}
+}
+
 // TestRenderFontBoundsHostileWCIDRepeatedRange pins the total-work budget in
-// cidWidths against a repeated range: gating solely on len(out) lets 5000
-// repeats of the same 65535-CID range each re-walk in full (measured ~0.64ms
-// per repeat when unbounded, so 5000 repeats is seconds, not this test's 2s
-// ceiling), because len(out) stops growing after the first repeat.
+// cidWidths against a repeated range: gating solely on len(out) lets 15000
+// repeats of the same 65535-CID range each re-walk in full, because len(out)
+// stops growing after the first repeat. With the budget intact the outer
+// loop exits on the first repeat (budget hits 0), so the good case's time
+// does not grow with the repeat count -- measured 0.02s here regardless.
+// Without it (the pre-fix len(out) gate), measured 9.61s on this fixture,
+// scaling linearly with repeat count since every repeat still walks in
+// full. The ceiling is 1s: comfortably above the unmutated 0.02s (~50x
+// pass margin) and comfortably below the mutated 9.61s (~9.6x fail
+// margin) -- the previous 5000-repeat/2s pairing only cleared the mutation
+// by 1.6x, so a 2x-faster machine could pass a genuinely unbounded scan.
 func TestRenderFontBoundsHostileWCIDRepeatedRange(t *testing.T) {
 	d, err := pdfdoc.Open(bytes.NewReader(hostileWCIDRepeatedRangePDF()))
 	if err != nil {
@@ -612,8 +669,8 @@ func TestRenderFontBoundsHostileWCIDRepeatedRange(t *testing.T) {
 	}
 	start := time.Now()
 	rf, ok := d.RenderFont(p.Scope, "F1")
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("RenderFont took %v on a 5000x-repeated /W range fixture; total work is not bounded", elapsed)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("RenderFont took %v on a 15000x-repeated /W range fixture; total work is not bounded", elapsed)
 	}
 	if !ok {
 		t.Fatal("RenderFont refused the hostile-/W fixture")
@@ -676,6 +733,20 @@ func hostileWCIDHugeFloatPDF() []byte {
 // out-of-range float cLast (1e300) flattens the SAME way regardless of
 // GOARCH: len(W) must be exactly 65536 (CIDs 0..65535, the whole CID space),
 // not 0 (amd64's wrapped-negative outcome under the pre-fix ordering).
+//
+// This test only catches the guard's removal on amd64 -- verified by
+// deleting the `if last > 65535 { last = 65535 }` clamp and running this
+// test under linux/amd64 (Docker, golang:1.26-rc): "W has 0 entries, want
+// exactly 65536". On this repo's native arm64 (saturating float64->int
+// conversion), the same deletion still yields exactly 65536 entries, because
+// budget (maxCIDWidthEntries) independently caps the walk at 65536
+// iterations from cid=0 -- the same count the clamp would have produced --
+// so the test is VACUOUS on arm64: it cannot fail there no matter what
+// mutates. That is acceptable here because .github/workflows/ci.yml pins
+// `runs-on: ubuntu-24.04`, a GitHub-hosted amd64 runner (the arm64 cross-
+// build step there only runs `go build`, never `go test`), so CI is where
+// this guard actually gets checked. Anyone running the suite on an arm64
+// workstation should not read a local green here as this guard being live.
 func TestRenderFontCIDWidthHugeFloatArchIndependent(t *testing.T) {
 	d, err := pdfdoc.Open(bytes.NewReader(hostileWCIDHugeFloatPDF()))
 	if err != nil {
@@ -692,39 +763,6 @@ func TestRenderFontCIDWidthHugeFloatArchIndependent(t *testing.T) {
 	const want = 65536
 	if len(rf.W) != want {
 		t.Fatalf("W has %d entries, want exactly %d (arch-independent clamp)", len(rf.W), want)
-	}
-}
-
-// TestRenderFontBoundsHostileWCIDRange pins byb-6z1's /W range-form bound. A
-// /W [0 2147483647 500] descendant must flatten to at most 65536 entries
-// (render.Font.W's CID keys are uint16 -- the whole CID space, no more), not
-// the 2^31 the declared range asks for -- and this also times the call.
-// render.Font.W's uint16 keys already cap the RESULT at 65536 distinct
-// entries no matter how the loop is written, so the entry count alone
-// cannot tell a bounded scan from one that still walks all 2^31 declared
-// CIDs to get there; only the elapsed time can. An unguarded scan of this
-// fixture measured ~20s here, so 2s is a ceiling that only a bounded loop
-// clears.
-func TestRenderFontBoundsHostileWCIDRange(t *testing.T) {
-	d, err := pdfdoc.Open(bytes.NewReader(hostileWCIDPDF()))
-	if err != nil {
-		t.Fatalf("pdfdoc.Open: %v", err)
-	}
-	p, err := d.Page(1)
-	if err != nil {
-		t.Fatalf("Page(1): %v", err)
-	}
-	start := time.Now()
-	rf, ok := d.RenderFont(p.Scope, "F1")
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("RenderFont took %v on a /W [0 2147483647 500] fixture; the range-form iteration is not bounded", elapsed)
-	}
-	if !ok {
-		t.Fatal("RenderFont refused the hostile-/W fixture")
-	}
-	const maxCIDWidthEntries = 65536
-	if len(rf.W) != maxCIDWidthEntries {
-		t.Fatalf("W has %d entries, want exactly %d (the CID space cap)", len(rf.W), maxCIDWidthEntries)
 	}
 }
 
