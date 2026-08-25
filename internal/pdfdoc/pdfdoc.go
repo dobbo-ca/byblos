@@ -1075,7 +1075,12 @@ func (d *doc) cidWidths(dict types.Dict) map[uint16]float64 {
 		return nil
 	}
 	out := map[uint16]float64{}
-	budget := maxCIDWidthEntries
+	// budget bounds work, not entries covered, so it must accommodate both:
+	// maxCIDWidthEntries for the CIDs a single range/sub-array can visit,
+	// plus len(arr) so that entries after a full-space range (budget
+	// otherwise drained to 0) still get their turn to override it (byb-6z1
+	// review, correctness finding 1).
+	budget := maxCIDWidthEntries + len(arr)
 	for i := 0; i < len(arr) && budget > 0; {
 		c, ok := d.number(arr[i])
 		if !ok || c < 0 || c > 65535 {

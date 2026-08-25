@@ -435,12 +435,14 @@ func oracleCIDCFF() []byte {
 const cidTextOracleContent = "BT /F1 72 Tf 1 0 0 1 10 110 Tm <000100020003> Tj " +
 	"48 Tf 0 -90 Td [<00010002> -400 <0003>] TJ ET"
 
-// cidCFFPDF embeds oracleCIDCFF as /FontFile3 /Subtype /CIDFontType0C under a
-// Type0 font with /Encoding /Identity-H and /W widths.
-func cidCFFPDF() []byte {
+// cidWPDF embeds oracleCIDCFF as /FontFile3 /Subtype /CIDFontType0C under a
+// Type0 font with /Encoding /Identity-H, using the given literal /W value.
+// extra objects (e.g. an indirect /W sub-array) are appended after the 8
+// fixed objects, so an extra's own "9 0 R" self-reference resolves.
+func cidWPDF(w string, extra ...string) []byte {
 	cff := string(oracleCIDCFF())
 	const textContent = cidTextOracleContent
-	return wrapPDF([]string{
+	return wrapPDF(append([]string{
 		"<< /Type /Catalog /Pages 2 0 R >>",
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
@@ -450,12 +452,18 @@ func cidCFFPDF() []byte {
 			" /DescendantFonts [6 0 R] >>",
 		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
 			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
-			" /DW 1000 /W [1 [600] 2 [700] 3 [550]] /FontDescriptor 7 0 R >>",
+			" /DW 1000 " + w + " /FontDescriptor 7 0 R >>",
 		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
 			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
 			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
 		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
-	})
+	}, extra...))
+}
+
+// cidCFFPDF embeds oracleCIDCFF as /FontFile3 /Subtype /CIDFontType0C under a
+// Type0 font with /Encoding /Identity-H and /W widths.
+func cidCFFPDF() []byte {
+	return cidWPDF("/W [1 [600] 2 [700] 3 [550]]")
 }
 
 // TestCIDKeyedCFFTextAgreesWithPdftoppm is byb-8b9.8's acceptance: a
@@ -542,24 +550,7 @@ func TestCIDKeyedCFFTextThroughPdfdocAgreesWithPdftoppm(t *testing.T) {
 // case (ISO 32000-1 9.7.4.3): /W [0 2147483647 500] declares every CID from
 // 0 to 2^31-1 gets width 500 from ~20 bytes of input.
 func hostileWCIDPDF() []byte {
-	cff := string(oracleCIDCFF())
-	const textContent = cidTextOracleContent
-	return wrapPDF([]string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
-			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
-		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
-			" /DescendantFonts [6 0 R] >>",
-		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
-			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
-			" /DW 1000 /W [0 2147483647 500] /FontDescriptor 7 0 R >>",
-		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
-			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
-			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
-		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
-	})
+	return cidWPDF("/W [0 2147483647 500]")
 }
 
 // TestRenderFontBoundsHostileWCIDRange pins byb-6z1's /W range-form bound
@@ -593,9 +584,9 @@ func TestRenderFontBoundsHostileWCIDRange(t *testing.T) {
 	if !ok {
 		t.Fatal("RenderFont refused the hostile-/W fixture")
 	}
-	const maxCIDWidthEntries = 65536
-	if len(rf.W) != maxCIDWidthEntries {
-		t.Fatalf("W has %d entries, want exactly %d (the CID space cap)", len(rf.W), maxCIDWidthEntries)
+	const want = 65536
+	if len(rf.W) != want {
+		t.Fatalf("W has %d entries, want exactly %d (the CID space cap)", len(rf.W), want)
 	}
 }
 
@@ -606,30 +597,13 @@ func TestRenderFontBoundsHostileWCIDRange(t *testing.T) {
 // on len(out) alone never trips -- only a bound on total work visited does
 // (byb-6z1 review finding: bug class 6, the "multiplicative gate bomb").
 func hostileWCIDRepeatedRangePDF() []byte {
-	cff := string(oracleCIDCFF())
-	const textContent = cidTextOracleContent
 	var w strings.Builder
 	w.WriteString("/W [")
 	for i := 0; i < 15000; i++ {
 		w.WriteString("0 65534 500 ")
 	}
 	w.WriteString("]")
-	return wrapPDF([]string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
-			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
-		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
-			" /DescendantFonts [6 0 R] >>",
-		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
-			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
-			" /DW 1000 " + w.String() + " /FontDescriptor 7 0 R >>",
-		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
-			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
-			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
-		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
-	})
+	return cidWPDF(w.String())
 }
 
 // hostileWCIDRepeatedIndirectSubArrayPDF builds a /W whose sub-array form
@@ -642,8 +616,6 @@ func hostileWCIDRepeatedRangePDF() []byte {
 // 0` / `budget--` in cidWidths's sub-array branch instead of G3's in the
 // range branch.
 func hostileWCIDRepeatedIndirectSubArrayPDF() []byte {
-	cff := string(oracleCIDCFF())
-	const textContent = cidTextOracleContent
 	var sub strings.Builder
 	sub.WriteString("[")
 	for i := 0; i < 65535; i++ {
@@ -656,23 +628,7 @@ func hostileWCIDRepeatedIndirectSubArrayPDF() []byte {
 		w.WriteString("0 9 0 R ")
 	}
 	w.WriteString("]")
-	return wrapPDF([]string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
-			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
-		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
-			" /DescendantFonts [6 0 R] >>",
-		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
-			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
-			" /DW 1000 " + w.String() + " /FontDescriptor 7 0 R >>",
-		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
-			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
-			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
-		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
-		sub.String(),
-	})
+	return cidWPDF(w.String(), sub.String())
 }
 
 // TestRenderFontBoundsHostileWCIDRepeatedIndirectSubArray pins the same
@@ -741,6 +697,35 @@ func TestRenderFontBoundsHostileWCIDRepeatedRange(t *testing.T) {
 	}
 }
 
+// TestRenderFontWBudgetSurvivesOverridesAfterFullRange pins byb-6z1's land-
+// stage correctness review: cidWidths's budget is spent per CID *visited*, so a
+// legal /W whose first entry is a full-space range (`0 65535 1000`) drained
+// the whole budget before three per-CID overrides that follow it ever ran,
+// silently dropping them instead of applying them. budget now starts at
+// maxCIDWidthEntries + len(arr) so entries after a full-space range still
+// get their turn. Reverting to budget := maxCIDWidthEntries alone (dropping
+// "+ len(arr)") makes this fail: W[1]/[2]/[3] come back 1000 (the range
+// default), not the 600/700/550 overrides -- measured here.
+func TestRenderFontWBudgetSurvivesOverridesAfterFullRange(t *testing.T) {
+	pdf := cidWPDF("/W [0 65535 1000 1 [600] 2 [700] 3 [550]]")
+	d, err := pdfdoc.Open(bytes.NewReader(pdf))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	rf, ok := d.RenderFont(p.Scope, "F1")
+	if !ok {
+		t.Fatal("RenderFont refused the /W fixture")
+	}
+	if rf.W[1] != 600 || rf.W[2] != 700 || rf.W[3] != 550 {
+		t.Fatalf("overrides after a full-range default were dropped: W[1]=%v W[2]=%v W[3]=%v, want 600/700/550",
+			rf.W[1], rf.W[2], rf.W[3])
+	}
+}
+
 // TestRenderFontRefusesIdentityV pins byb-6z1 review finding 1: a Type0
 // /Encoding /Identity-V must be refused (ok=false), not resolved with
 // horizontal metrics -- doing so measured 3.7x further from poppler than
@@ -772,24 +757,7 @@ func TestRenderFontRefusesIdentityV(t *testing.T) {
 // amd64 (clamp never applies, the range silently contributes zero widths)
 // (byb-6z1 review finding 4).
 func hostileWCIDHugeFloatPDF() []byte {
-	cff := string(oracleCIDCFF())
-	const textContent = cidTextOracleContent
-	return wrapPDF([]string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
-			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
-		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
-			" /DescendantFonts [6 0 R] >>",
-		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
-			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
-			" /DW 1000 /W [0 1e300 500] /FontDescriptor 7 0 R >>",
-		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
-			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
-			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
-		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
-	})
+	return cidWPDF("/W [0 1e300 500]")
 }
 
 // TestRenderFontCIDWidthHugeFloatArchIndependent pins that a /W range with an
