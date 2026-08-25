@@ -78,6 +78,10 @@ const (
 	maxRasterDim    = 20000
 	maxRasterPixels = 1 << 26
 
+	// maxGStateDepth bounds the q graphics-state stack, byb-9ml. Kept equal
+	// to internal/content's cap of the same name rather than imported: the
+	// two packages track different gstates and only the BOUND is shared.
+	maxGStateDepth = 1024
 	// maxCurveDepth bounds recursive Bezier subdivision: at most 2^8 = 256
 	// segments per curve, so a hostile stream of `c` operators amplifies its
 	// own byte count by a bounded constant.
@@ -458,6 +462,14 @@ func (r *renderer) run(ctx context.Context, src []byte, gs gstate) error {
 		op := string(tok.Text)
 		switch op {
 		case "q":
+			// The same unbounded save byb-9ml capped in the walker, and the
+			// same 328-byte-per-two-bytes ratio: this stack held a gstate
+			// that is larger still. maxGStateDepth is content's, measured
+			// there over 31,705 real page-walks against an observed max of
+			// 18.
+			if len(stack) >= maxGStateDepth {
+				return fmt.Errorf("render: q nesting deeper than %d", maxGStateDepth)
+			}
 			stack = append(stack, gs)
 		case "Q":
 			if n := len(stack); n > 0 {

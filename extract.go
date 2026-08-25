@@ -1158,6 +1158,17 @@ const paintFillTolerancePt = 1.0
 // one raster, instead of a wash that was never visible. See
 // TestClassifyPaintOcclusionAcrossPlacements.
 func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
+	// opaqueCover depends only on the placement, so it is answered ONCE per
+	// placement here rather than once per (paint, placement) pair. It is a
+	// closure call plus a map lookup into pdfdoc, and neither Scan.Paints nor
+	// Scan.Images is capped, so leaving it in the inner loop made a 4 KB page
+	// of 32,000 fills over 32,000 placements cost 25 seconds before a single
+	// pixel was decoded (byb-kpi). The loop is still O(paints x placements);
+	// this is its constant, not its shape.
+	covers := make([]bool, len(imgs))
+	for i := range imgs {
+		covers[i] = opaqueCover(imgs[i], imageInfo)
+	}
 	for _, p := range paints {
 		ink, marks := p.Ink()
 		if !marks {
@@ -1167,7 +1178,7 @@ func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo fu
 		if p.Strokes() {
 			tol = paintTolerancePt
 		}
-		if !inkHidden(ink, p.CTM, p.Index, tol, imgs, imageInfo) {
+		if !inkHidden(ink, p.CTM, p.Index, tol, imgs, covers) {
 			return false
 		}
 	}
@@ -1179,9 +1190,13 @@ func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo fu
 // is how far the ink may stray outside a placement and still count as hidden —
 // paintFillTolerancePt or paintTolerancePt, which the caller picks by operator.
 // inkCTM is the graphics matrix the path was painted under (content.Paint.CTM).
-func inkHidden(ink content.Box, inkCTM content.Matrix, order int, tol float64, imgs []content.Placement, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
-	for _, img := range imgs {
-		if img.Index < order || !opaqueCover(img, imageInfo) {
+// covers is opaqueCover per placement, answered once by the caller; imgs is
+// indexed by pointer because a Placement is over 100 bytes and copying one per
+// iteration was measurable on its own (byb-kpi).
+func inkHidden(ink content.Box, inkCTM content.Matrix, order int, tol float64, imgs []content.Placement, covers []bool) bool {
+	for i := range imgs {
+		img := &imgs[i]
+		if img.Index < order || !covers[i] {
 			continue
 		}
 		if ink.LLX >= img.Box.LLX-tol &&

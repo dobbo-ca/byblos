@@ -1413,3 +1413,52 @@ func TestExtractPageRasterIgnoresANonPaintingAnnotation(t *testing.T) {
 		t.Errorf("DroppedAnnots = %d for a hidden zero-area annotation with no /AP; want 0", pr.DroppedAnnots)
 	}
 }
+
+// TestPaintsHiddenAnswersCoverOncePerPlacement pins byb-kpi. opaqueCover
+// depends only on the placement, and it used to be called from inside
+// inkHidden's loop -- once per (paint, placement) PAIR. Neither Scan.Paints
+// nor Scan.Images is capped, so that made classification quadratic in two
+// attacker-chosen counts: a page of 32,000 fills over 32,000 placements cost
+// 25.8 seconds in ExtractPageRaster before a single pixel was decoded.
+//
+// Counting the calls rather than timing the loop is deliberate. A timing
+// assertion on a shared CI box is a flake; the call count is exact, and it is
+// the thing that actually changed -- the loop is still O(paints x placements)
+// and this test does not claim otherwise.
+func TestPaintsHiddenAnswersCoverOncePerPlacement(t *testing.T) {
+	const nPaints, nImgs = 40, 25
+	// Only the LAST placement covers the page. The others are opaque -- so
+	// opaqueCover is asked about them -- but their boxes do not contain the
+	// ink, so the loop runs to the end for every paint. A fixture whose FIRST
+	// placement covers would return early and hide most of the difference
+	// this test exists to measure.
+	imgs := make([]content.Placement, nImgs)
+	for i := range imgs {
+		box := content.Box{LLX: 500, LLY: 600, URX: 510, URY: 610}
+		if i == nImgs-1 {
+			box = content.Box{LLX: 0, LLY: 0, URX: 612, URY: 792}
+		}
+		imgs[i] = content.Placement{
+			ID: i + 1, Opaque: true, Index: 1000 + i,
+			Box: box, CTM: content.Matrix{612, 0, 0, 792, 0, 0},
+		}
+	}
+	paints := make([]content.Paint, nPaints)
+	for i := range paints {
+		paints[i] = content.Paint{
+			Op: "f", Index: i, CTM: content.Identity,
+			Box: content.Box{LLX: 10, LLY: 10, URX: 20, URY: 20},
+		}
+	}
+	calls := 0
+	info := func(int) (pdfdoc.ImageInfo, bool) { calls++; return pdfdoc.ImageInfo{}, true }
+
+	if !paintsHidden(imgs, paints, info) {
+		t.Fatal("paintsHidden = false; the fixture is meant to hide every paint")
+	}
+	if calls != nImgs {
+		t.Errorf("imageInfo called %d times for %d placements and %d paints; want %d, once per placement."+
+			" A count near %d means opaqueCover moved back inside the per-paint loop",
+			calls, nImgs, nPaints, nImgs, nImgs*nPaints)
+	}
+}

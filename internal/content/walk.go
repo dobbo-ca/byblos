@@ -374,6 +374,11 @@ type Scan struct {
 	// order counts painting events, so that Paint.Index and Placement.Index can
 	// be compared. It is walk state, not part of what a walk reports.
 	order int
+	// forms counts Form XObject invocations across the WHOLE page, not per
+	// nesting level, which is why it lives here and not in walk's locals:
+	// doXObject recurses into a fresh walk and the count has to survive that.
+	// Walk state, like order.
+	forms int
 }
 
 const (
@@ -390,6 +395,31 @@ const (
 	// count into TextChars/TextOps/InkedTextOps; only the per-string record
 	// stops growing.
 	maxTextShows = 1 << 16
+	// maxGStateDepth bounds the q graphics-state stack. Every other budget
+	// here bounded a slice of parsed CONTENT; this one bounds a slice of
+	// SAVED STATE, and nothing did before byb-9ml: `q` is two bytes and
+	// retains a 328-byte gstate until the walk ends, so 8.4 MB of `q ` --
+	// 8.6 KB after flate, at a ratio real deflate reaches -- drove peak heap
+	// to 3.3 GB with a nil error. Measured over 31,705 page-walks (the
+	// corpus plus every 3rd row of the sample manifest, 1,891 documents):
+	// p50 1, p90 2, p99 4, MAX 18. 1024 is 56x that maximum and refuses none
+	// of them; it bounds one walk's saved state at 1024*328 = 336 KB, and
+	// maxFormDepth bounds the nesting of walks, so the product is ~3 MB.
+	maxGStateDepth = 1024
+	// maxFormInvocations bounds how many times a walk enters a Form XObject,
+	// across the whole page rather than per level. maxFormDepth above bounds
+	// the DEPTH of that recursion and says nothing about its WIDTH: eight
+	// chained forms each invoking the next `fan` times cost fan^7 walks, so
+	// 505 bytes of form content at fan 10 appended 10,000,000 Paints and
+	// reached 5.6 GB, and 3.7 KB at fan 40 is 1.6e11 walks -- about sixteen
+	// hours. Same population as above: p50 0, p90 0, p99 2, MAX 110, and
+	// that maximum is one document (govdocs1/000146.pdf p1); the next is 17.
+	// 4096 is 37x the maximum and refuses none of them.
+	//
+	// This one counter is what bounds BOTH shapes, because the walk aborts:
+	// the uncapped Scan.Paints, Scan.Images, Scan.InlineImages and
+	// Scan.Unresolved slices can only grow while a walk is running.
+	maxFormInvocations = 4096
 )
 
 // Walk interprets a decoded content stream, resolving resource names in scope
@@ -601,6 +631,9 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 		op := string(tok.Text)
 		switch op {
 		case "q":
+			if len(stack) >= maxGStateDepth {
+				return fmt.Errorf("content: q nesting deeper than %d", maxGStateDepth)
+			}
 			stack = append(stack, gs)
 		case "Q":
 			if n := len(stack); n > 0 {
@@ -912,6 +945,10 @@ func doXObject(ctx context.Context, ops []Token, scope int, env Env, gs gstate, 
 			dev = intersectBox(*gs.clip, dev)
 		}
 		gs.clip = &dev
+	}
+	s.forms++
+	if s.forms > maxFormInvocations {
+		return fmt.Errorf("content: more than %d form XObject invocations", maxFormInvocations)
 	}
 	return walk(ctx, xo.Content, xo.Scope, env, gs, depth+1, s)
 }

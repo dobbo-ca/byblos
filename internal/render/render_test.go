@@ -413,3 +413,17 @@ func TestFillHugeSpanStillPaints(t *testing.T) {
 			huge, inked, want)
 	}
 }
+
+// TestPageRefusesDeepGStateStack mirrors byb-9ml's content-walker cap. The
+// renderer keeps its own q stack of its own larger gstate, so capping only the
+// walker would have left this half open -- Page is reachable with the same
+// stream through a different door.
+func TestPageRefusesDeepGStateStack(t *testing.T) {
+	src := strings.Repeat("q ", maxGStateDepth+1)
+	if _, err := Page(context.Background(), []byte(src), box100, 0, 1, nil, nil); err == nil {
+		t.Fatalf("Page accepted %d nested q with no error", maxGStateDepth+1)
+	}
+	if _, err := Page(context.Background(), []byte(strings.Repeat("q ", maxGStateDepth)), box100, 0, 1, nil, nil); err != nil {
+		t.Errorf("Page refused %d nested q, which is within the cap: %v", maxGStateDepth, err)
+	}
+}
