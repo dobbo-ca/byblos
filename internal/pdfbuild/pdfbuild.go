@@ -231,6 +231,22 @@ func validatePage(p Page) error {
 	if img.Width <= 0 || img.Height <= 0 {
 		return fmt.Errorf("image dimensions %dx%d are not positive", img.Width, img.Height)
 	}
+	// byb-jo9: maxSampleValue computes rowLen := (img.Width*img.BPC+7)/8. BPC
+	// is capped at 8 by the FlateDecode switch below, so bounding Width here
+	// keeps that product inside int64 -- a large enough Width (e.g. 1<<61)
+	// wraps rowLen around to a small positive value, and maxInRow then
+	// slices row[:width] with the original, un-overflowed Width past that
+	// short row's capacity, which panics instead of returning an error.
+	// (Widths that only push rowLen negative, e.g. 1<<60, are already caught
+	// as an ordinary short-stream error further down, not this panic --
+	// it's specifically the wrap past zero that's unguarded.) Height is a
+	// loop counter in that same function, not a multiplicand, so it does not
+	// share this failure mode and is left as the plain >0 check above.
+	// 1<<31 matches the existing dimension bound in content/lexer.go's
+	// inlineInt.
+	if img.Width > 1<<31 {
+		return fmt.Errorf("image width %d exceeds the maximum of %d", img.Width, 1<<31)
+	}
 	if len(img.Data) == 0 {
 		return fmt.Errorf("image has no data")
 	}
