@@ -38,11 +38,12 @@ func wrapPDF(objs []string) []byte {
 }
 
 // vectorPDF wraps a content stream in a minimal one-page PDF.
-func vectorPDF(contentStream string, w, h float64) []byte {
+func vectorPDF(contentStream string, w, h float64, rotate int) []byte {
 	return wrapPDF([]string{
 		"<< /Type /Catalog /Pages 2 0 R >>",
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %g %g] /Contents 4 0 R >>", w, h),
+		fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %g %g] /Rotate %d /Contents 4 0 R >>",
+			w, h, rotate),
 		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(contentStream), contentStream),
 	})
 }
@@ -124,7 +125,7 @@ func pdftoppmPNG(t *testing.T, pdf []byte) image.Image {
 }
 
 func TestRenderAgreesWithPdftoppm(t *testing.T) {
-	oracle := pdftoppmPNG(t, vectorPDF(oracleContent, 200, 200))
+	oracle := pdftoppmPNG(t, vectorPDF(oracleContent, 200, 200, 0))
 
 	box := content.Box{LLX: 0, LLY: 0, URX: 200, URY: 200}
 	got, err := Page(context.Background(), []byte(oracleContent), box, 0, 1, nil, nil)
@@ -555,34 +556,22 @@ func TestOneImageMatchesExtractPageRaster(t *testing.T) {
 	}
 }
 
-// rotatedPDF is vectorPDF with a /Rotate on the page.
-func rotatedPDF(contentStream string, w, h float64, rotate int) []byte {
-	return wrapPDF([]string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %g %g] /Rotate %d /Contents 4 0 R >>",
-			w, h, rotate),
-		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(contentStream), contentStream),
-	})
-}
-
 // TestRotateAgreesWithPdftoppm is byb-sfo's acceptance: /Rotate turns the
 // raster CLOCKWISE for display and swaps the canvas for the quarter turns.
 // The page is 240x160, so a canvas that did not swap cannot even reach the
 // metric, and the content is asymmetric, so a turn in the WRONG direction
 // lands every shape somewhere poppler did not put it.
 //
-// The null is the mutation check built in: for each rotation, the raster
-// this renderer produces for a DIFFERENT quarter turn must FAIL the same
-// tolerance. Without it a renderer that ignored /Rotate on a square page
-// would pass.
+// The null is the mutation check built in: for each rotation, the raster this
+// renderer produces for the OPPOSITE turn must FAIL the same tolerance.
+// Without it a renderer that ignored /Rotate on a square page would pass.
 func TestRotateAgreesWithPdftoppm(t *testing.T) {
 	const w, h = 240.0, 160.0
 	box := content.Box{LLX: 0, LLY: 0, URX: w, URY: h}
 	const tolerance = 0.05
 	for _, rot := range []int{0, 90, 180, 270} {
 		t.Run(fmt.Sprintf("rotate%d", rot), func(t *testing.T) {
-			oracle := pdftoppmPNG(t, rotatedPDF(oracleContent, w, h, rot))
+			oracle := pdftoppmPNG(t, vectorPDF(oracleContent, w, h, rot))
 			got, err := Page(context.Background(), []byte(oracleContent), box, rot, 1, nil, nil)
 			if err != nil {
 				t.Fatalf("Page(rotate %d): %v", rot, err)
@@ -593,22 +582,16 @@ func TestRotateAgreesWithPdftoppm(t *testing.T) {
 				t.Errorf("rotate %d disagrees with pdftoppm on %.1f%% of pixels; tolerance %.0f%%",
 					rot, frac*100, tolerance*100)
 			}
-			// Every other quarter turn must fail against this oracle.
-			for _, wrong := range []int{0, 90, 180, 270} {
-				if wrong == rot {
-					continue
-				}
-				bad, err := Page(context.Background(), []byte(oracleContent), box, wrong, 1, nil, nil)
-				if err != nil {
-					t.Fatalf("Page(rotate %d): %v", wrong, err)
-				}
-				if bad.Bounds() != got.Bounds() {
-					continue // a 90-degree canvas cannot be confused with a 0 one
-				}
-				if f := mismatchFraction(t, bad, oracle); f <= tolerance {
-					t.Errorf("rotate %d passes the rotate-%d oracle at %.1f%% mismatch; the metric is blind to direction",
-						wrong, rot, f*100)
-				}
+			// The null: the OPPOSITE turn must FAIL this oracle. The other
+			// two have the transposed canvas and cannot be confused with it.
+			wrong := (rot + 180) % 360
+			bad, err := Page(context.Background(), []byte(oracleContent), box, wrong, 1, nil, nil)
+			if err != nil {
+				t.Fatalf("Page(rotate %d): %v", wrong, err)
+			}
+			if f := mismatchFraction(t, bad, oracle); f <= tolerance {
+				t.Errorf("rotate %d passes the rotate-%d oracle at %.1f%% mismatch; the metric is blind to direction",
+					wrong, rot, f*100)
 			}
 		})
 	}
@@ -628,4 +611,72 @@ func TestRotateNotAMultipleOf90(t *testing.T) {
 			t.Errorf("Page(rotate %d): %v; want it normalised", rot, err)
 		}
 	}
+}
+
+// TestRotateFractionalCanvasAgreesWithPdftoppm is the case
+// TestRotateAgreesWithPdftoppm structurally cannot see. Its page is 240x160 at
+// scale 1, so the canvas is exact and the ceil slack is zero. Here the page is
+// 240.4x160.6: the canvas rounds up on both axes, and translating the turn by
+// the CEILED dimension instead of the exact device extent shifts the whole
+// raster one pixel and puts the blank slack on the edge opposite poppler's.
+// Almost every real page is this case -- the sample harness renders at
+// 400/long, which is integral for essentially nothing.
+func TestRotateFractionalCanvasAgreesWithPdftoppm(t *testing.T) {
+	const w, h = 240.4, 160.6
+	box := content.Box{LLX: 0, LLY: 0, URX: w, URY: h}
+	const tolerance = 0.05
+	for _, rot := range []int{0, 90, 180, 270} {
+		t.Run(fmt.Sprintf("rotate%d", rot), func(t *testing.T) {
+			oracle := pdftoppmPNG(t, vectorPDF(oracleContent, w, h, rot))
+			got, err := Page(context.Background(), []byte(oracleContent), box, rot, 1, nil, nil)
+			if err != nil {
+				t.Fatalf("Page(rotate %d): %v", rot, err)
+			}
+			frac := mismatchFraction(t, got, oracle)
+			t.Logf("rotate %d on a fractional canvas: mismatch %.2f%%", rot, frac*100)
+			if frac > tolerance {
+				t.Errorf("rotate %d disagrees with pdftoppm on %.1f%% of pixels; tolerance %.0f%%",
+					rot, frac*100, tolerance*100)
+			}
+			// REGISTRATION, not just overlap, and this is the assertion that
+			// does the work. The defect is a whole-raster TRANSLATION of one
+			// device pixel, which is under 1.6% of this page and slips under
+			// the tolerance above; only the ink position catches it. The
+			// ORIGIN of the ink box must match poppler EXACTLY -- a
+			// translation moves it and antialiasing does not. The far corner
+			// gets a pixel of slack because poppler carries one more
+			// half-covered row there than this unantialiased renderer does,
+			// at every rotation including 0.
+			gx0, gy0, gx1, gy1 := inkBox(got)
+			ox0, oy0, ox1, oy1 := inkBox(oracle)
+			if gx0 != ox0 || gy0 != oy0 || abs32(gx1-ox1) > 1 || abs32(gy1-oy1) > 1 {
+				t.Errorf("rotate %d ink box (%d,%d)-(%d,%d); poppler (%d,%d)-(%d,%d): the raster is shifted",
+					rot, gx0, gy0, gx1, gy1, ox0, oy0, ox1, oy1)
+			}
+		})
+	}
+}
+
+// inkBox is the bounding box of every pixel that is not near-white.
+func inkBox(img image.Image) (x0, y0, x1, y1 int) {
+	b := img.Bounds()
+	x0, y0, x1, y1 = b.Max.X, b.Max.Y, b.Min.X, b.Min.Y
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl, _ := img.At(x, y).RGBA()
+			if r>>8 > 200 && g>>8 > 200 && bl>>8 > 200 {
+				continue
+			}
+			x0, y0 = min(x0, x), min(y0, y)
+			x1, y1 = max(x1, x), max(y1, y)
+		}
+	}
+	return
+}
+
+func abs32(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

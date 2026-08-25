@@ -379,3 +379,37 @@ func TestMalformedStreamStillReturnsCanvas(t *testing.T) {
 	}
 	assertRect(t, img, 10, 40, 40, 80, red)
 }
+
+// TestFillHugeSpanStillPaints is the fill-side twin of
+// TestImageHugeTranslationSkips, and it exists because fillEdges had the
+// float-space clamp on ONE axis. The y bounds intersect the clip in floats
+// before the int conversion; the scanline crossings on x did not. A rect
+// 10^31 points wide -- finite, and PDF numbers have no exponent form, so the
+// operand is written out -- puts the right-hand crossing past 2^63, where
+// amd64's CVTTSD2SI wraps to minInt64, min() takes it, and every span is
+// dropped: an all-black page renders fully WHITE. arm64's FCVTZS saturates
+// instead, so this passes there either way; the regression it pins is
+// amd64's (linux CI and prod), the same convention imagedraw_test.go uses.
+//
+// Note the failure is one-way -- it drops ink, it never paints ink that
+// should not exist -- which is why no visual test caught it.
+func TestFillHugeSpanStillPaints(t *testing.T) {
+	huge := "1" + strings.Repeat("0", 31)
+	img, err := Page(context.Background(), []byte("0 g 0 0 "+huge+" 100 re f"), box100, 0, 1, nil, nil)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	b := img.Bounds()
+	inked := 0
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if r, _, _, _ := img.At(x, y).RGBA(); r>>8 < 128 {
+				inked++
+			}
+		}
+	}
+	if want := b.Dx() * b.Dy(); inked != want {
+		t.Errorf("a rect %s points wide inked %d of %d pixels; the whole canvas must be black",
+			huge, inked, want)
+	}
+}

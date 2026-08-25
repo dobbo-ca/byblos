@@ -133,7 +133,7 @@ type ImageFor func(name string) (Image, bool)
 // images resolves Do operands and fonts resolves Tf operands; either may be
 // nil to render without images or without text.
 func Page(ctx context.Context, src []byte, box content.Box, rotate int, scale float64, images ImageFor, fonts FontFor) (*image.RGBA, error) {
-	w, h, err := rasterSize(box, scale)
+	w, h, fw, fh, err := rasterSize(box, scale)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +152,7 @@ func Page(ctx context.Context, src []byte, box content.Box, rotate int, scale fl
 	// User space to device space: scale, then flip y so user URY lands on
 	// device row 0, then turn the whole device space for /Rotate.
 	// Row-vector convention, like content.Matrix.
-	base := content.Matrix{scale, 0, 0, -scale, -box.LLX * scale, box.URY * scale}.Mul(displayTurn(rot, w, h))
+	base := content.Matrix{scale, 0, 0, -scale, -box.LLX * scale, box.URY * scale}.Mul(displayTurn(rot, fw, fh))
 	// ISO 32000-1 8.4.1's initial graphics state for the parts tracked here:
 	// DeviceGray black for both colours, line width 1.
 	ink := colorState{space: "DeviceGray", rgba: color.RGBA{0, 0, 0, 255}}
@@ -163,37 +163,45 @@ func Page(ctx context.Context, src []byte, box content.Box, rotate int, scale fl
 	return img, err
 }
 
-// displayTurn maps the unrotated device space of a page onto the displayed
-// one for /Rotate. w and h are the FINAL canvas dimensions, already swapped
-// for the quarter turns, so the ceil slack rasterSize leaves stays inside
-// the canvas. An exact quarter turn permutes the device grid onto itself:
-// no resampling happens here, only a change of which pixel a mark lands in.
-func displayTurn(rot, w, h int) content.Matrix {
-	fw, fh := float64(w), float64(h)
+// displayTurn maps the unrotated device space of a page onto the displayed one
+// for /Rotate. An exact quarter turn permutes the device grid onto itself: no
+// resampling happens here, only a change of which pixel a mark lands in.
+//
+// fw and fh are the EXACT unrotated device extents, NOT the ceiled canvas
+// dimensions, and that distinction is the whole subtlety. rasterSize rounds the
+// canvas UP on both axes, so a page whose size times scale is not an integer
+// carries up to a pixel of slack. Poppler leaves that slack on the far edge of
+// each axis BEFORE the turn, and translating by the ceiled dimension instead
+// puts it on the near edge -- a whole-raster shift of one device pixel for 90,
+// 180 and 270, invisible on the integral 240x160 oracle page and present on
+// almost every real page at the sample harness's 400/long scale.
+func displayTurn(rot int, fw, fh float64) content.Matrix {
 	switch rot {
 	case 90:
-		return content.Matrix{0, 1, -1, 0, fw, 0}
+		return content.Matrix{0, 1, -1, 0, fh, 0}
 	case 180:
 		return content.Matrix{-1, 0, 0, -1, fw, fh}
 	case 270:
-		return content.Matrix{0, -1, 1, 0, 0, fh}
+		return content.Matrix{0, -1, 1, 0, 0, fw}
 	}
 	return content.Identity
 }
 
-func rasterSize(box content.Box, scale float64) (int, int, error) {
+// rasterSize returns the canvas in whole pixels AND the exact device extents it
+// was rounded up from. displayTurn needs the unrounded pair: see its comment.
+func rasterSize(box content.Box, scale float64) (w, h int, fw, fh float64, err error) {
 	if !(scale > 0) || math.IsInf(scale, 0) {
-		return 0, 0, fmt.Errorf("render: scale %v is not a positive finite number", scale)
+		return 0, 0, 0, 0, fmt.Errorf("render: scale %v is not a positive finite number", scale)
 	}
-	fw := (box.URX - box.LLX) * scale
-	fh := (box.URY - box.LLY) * scale
+	fw = (box.URX - box.LLX) * scale
+	fh = (box.URY - box.LLY) * scale
 	if !(fw >= 1) || !(fh >= 1) {
-		return 0, 0, fmt.Errorf("render: page box %+v at scale %v rasterises below one pixel", box, scale)
+		return 0, 0, 0, 0, fmt.Errorf("render: page box %+v at scale %v rasterises below one pixel", box, scale)
 	}
 	if fw > maxRasterDim || fh > maxRasterDim || fw*fh > maxRasterPixels {
-		return 0, 0, fmt.Errorf("render: raster %gx%g exceeds the size clamp", fw, fh)
+		return 0, 0, 0, 0, fmt.Errorf("render: raster %gx%g exceeds the size clamp", fw, fh)
 	}
-	return int(math.Ceil(fw)), int(math.Ceil(fh)), nil
+	return int(math.Ceil(fw)), int(math.Ceil(fh)), fw, fh, nil
 }
 
 // gstate is the graphics state this stage tracks, saved and restored as a
@@ -845,8 +853,12 @@ func (r *renderer) fillEdges(edges []edge, evenOdd bool, clip clipRect, col colo
 			if !inside || i+1 >= len(xs) {
 				continue
 			}
-			xa := max(px0, int(math.Ceil(c.x-0.5)))
-			xb := min(px1, int(math.Ceil(xs[i+1].x-0.5)))
+			// Clamp in FLOATS before the int conversion, the same way the
+			// y bounds above do and for the reason drawImage spells out: on
+			// amd64 a device x past 2^63 wraps to MinInt64, and min() then
+			// takes it and drops the span. A finite huge CTM reaches this.
+			xa := max(px0, int(math.Ceil(math.Max(c.x, clip.x0)-0.5)))
+			xb := min(px1, int(math.Ceil(math.Min(xs[i+1].x, clip.x1)-0.5)))
 			if xb <= xa {
 				continue
 			}
