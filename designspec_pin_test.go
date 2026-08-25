@@ -658,7 +658,12 @@ func TestCorpusCountClaimsMatchTheCorpus(t *testing.T) {
 	//              including bd notes quoting the corpus size on the day they
 	//              were written. Those are history and must not be rewritten.
 	//   testdata/corpus  generated output (make corpus), gitignored.
-	skipDir := map[string]bool{".git": true, "plans": true}
+	//   .claude    holds .claude/worktrees, the per-session git worktrees other
+	//              sessions check out INSIDE this repo. Those are copies of the
+	//              tree at some other commit; scanning them fails this test on
+	//              figures that are correct on main. Same reason ci.yml scopes
+	//              its gofmt gate to git ls-files.
+	skipDir := map[string]bool{".git": true, "plans": true, ".claude": true}
 
 	claims := 0
 	files := map[string]bool{}
