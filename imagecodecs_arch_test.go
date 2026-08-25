@@ -60,10 +60,13 @@ func TestNoFormatRegisteringImageDecoderIsImported(t *testing.T) {
 	// needs: checked by grep for image.RegisterFormat over font/ and math/ in
 	// x/image v0.41.0 -- zero hits, and sfnt's transitive deps beyond the
 	// stdlib are x/image/font, math/fixed and x/text/encoding/charmap, none
-	// of which register either.
+	// of which register either. font itself is stage 4f (byb-8b9.7): w0 needs
+	// font.Hinting for sfnt.GlyphAdvance; same grep, zero hits, no init(),
+	// and it was already linked as sfnt's dependency.
 	allowed := map[string]bool{
 		"golang.org/x/image/ccitt":      true,
 		"golang.org/x/image/draw":       true,
+		"golang.org/x/image/font":       true,
 		"golang.org/x/image/font/sfnt":  true,
 		"golang.org/x/image/math/fixed": true,
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 
+	"golang.org/x/image/font"
 	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 
@@ -26,9 +27,16 @@ type Font struct {
 	// FirstChar and Widths mirror the font dict's /FirstChar and /Widths, in
 	// thousandths of text space (ISO 32000-1 9.2.4). A code outside the array
 	// advances by /MissingWidth's default, 0 -- the spec's fallback, not the
-	// font program's own advance.
+	// font program's own advance. A dict with NO /Widths at all (the
+	// standard-14 shape) instead advances by the resolved program's own
+	// metrics; see w0.
 	FirstChar int
 	Widths    []float64
+	// BaseFont and Flags mirror the font dict's /BaseFont and its
+	// /FontDescriptor /Flags. Stage 4f reads them only when Program is empty,
+	// to pick a bundled substitute face; see substitute.go.
+	BaseFont string
+	Flags    int
 }
 
 // FontFor resolves a Tf operand to an embedded font. ok=false skips that
@@ -45,6 +53,7 @@ type FontFor func(name string) (Font, bool)
 // positions, but no glyph inks.
 type textFont struct {
 	fnt   *sfnt.Font
+	t1    *t1Font // stage 4e: classic Type 1; nil means fnt (or nothing)
 	upem  float64
 	gwork []int64 // per-GID gated charstring work (CFF only); fillGlyph charges it
 	buf   sfnt.Buffer
@@ -58,6 +67,7 @@ type textFont struct {
 // walk steps for a hostile CFF -- once per program, not once per name.
 type fontProg struct {
 	fnt   *sfnt.Font
+	t1    *t1Font
 	upem  float64
 	gwork []int64
 }
@@ -80,7 +90,26 @@ func (r *renderer) resolveFont(name string) *textFont {
 		r.fontsBy[name] = nil
 		return nil
 	}
-	key := sha256.Sum256(src.Program)
+	program := src.Program
+	var key [sha256.Size]byte
+	if len(program) == 0 {
+		// Stage 4f: no embedded program -- substitute a bundled face by name,
+		// else by descriptor flags (substitute.go). The face PATH is the cache
+		// key (the prefix keeps an embedded program from aliasing it), so the
+		// ~400 KB embed copy and hash happen once per face, not once per Tf
+		// name; the file is read only on a miss. The deferred faces leave
+		// program empty and degrade to widths-only below, like any program no
+		// stage parses.
+		face := substituteFace(src.BaseFont, src.Flags)
+		key = sha256.Sum256([]byte("substitute:" + face))
+		if _, hit := r.progsBy[key]; !hit && face != "" {
+			if b, err := substituteFonts.ReadFile(face); err == nil {
+				program = b
+			}
+		}
+	} else {
+		key = sha256.Sum256(program)
+	}
 	prog, hit := r.progsBy[key]
 	if !hit {
 		prog = &fontProg{}
@@ -98,23 +127,26 @@ func (r *renderer) resolveFont(name string) *textFont {
 				prog.upem = float64(f.UnitsPerEm())
 			}
 		}
-		if g := parseGlyfIndex(src.Program); g != nil {
+		if g := parseGlyfIndex(program); g != nil {
 			if g.boundedBy(maxPathPoints) {
-				parse(src.Program)
+				parse(program)
 			}
-		} else if otf, gwork := cffToSFNT(src.Program); otf != nil {
+		} else if otf, gwork := cffToSFNT(program); otf != nil {
 			// Stage 4d: a bare CFF (/FontFile3 /Subtype /Type1C), gated and
-			// wrapped by cff.go into the container sfnt parses. Anything else
-			// -- Type1 PFB (stage 4e), garbage -- leaves otf nil: widths-only.
+			// wrapped by cff.go into the container sfnt parses.
 			parse(otf)
 			prog.gwork = gwork
+		} else {
+			// Stage 4e: a classic Type 1 (/FontFile, PFB or raw). Anything
+			// none of the three stages parse stays widths-only.
+			prog.t1 = parseType1(program)
 		}
 		if r.progsBy == nil {
 			r.progsBy = map[[sha256.Size]byte]*fontProg{}
 		}
 		r.progsBy[key] = prog
 	}
-	tf := &textFont{fnt: prog.fnt, upem: prog.upem, gwork: prog.gwork,
+	tf := &textFont{fnt: prog.fnt, t1: prog.t1, upem: prog.upem, gwork: prog.gwork,
 		first: src.FirstChar, width: src.Widths}
 	r.fontsBy[name] = tf
 	return tf
@@ -122,15 +154,53 @@ func (r *renderer) resolveFont(name string) *textFont {
 
 // w0 is the code's glyph displacement in text space (ISO 32000-1 9.4.4):
 // /Widths in thousandths where the array covers the code, else /MissingWidth,
-// whose default -- and this stage's only value, no descriptor crosses the
-// seam -- is 0. Deliberately NOT the font program's own advance: the PDF
-// widths override it by spec, and TestTextWidthsOverrideFontAdvance pins
-// that.
+// whose default is 0. Deliberately NOT the font program's own advance where
+// any /Widths exist: the PDF widths override it by spec, and
+// TestTextWidthsOverrideFontAdvance pins that. A dict with NO /Widths at all
+// -- the standard-14 shape, where the viewer is expected to know the metrics
+// (9.6.2.2) -- takes the resolved program's own advance instead (stage 4f:
+// for a substituted face those ARE the metric-compatible widths).
 func (f *textFont) w0(code byte) float64 {
 	if i := int(code) - f.first; i >= 0 && i < len(f.width) {
 		return f.width[i] / 1000
 	}
+	if len(f.width) == 0 && f.t1 != nil {
+		// Stage 4e: the charstring's own hsbw width, in font units.
+		return f.t1.advance(code) / f.t1.upem
+	}
+	if len(f.width) == 0 && f.fnt != nil {
+		if gi, err := f.fnt.GlyphIndex(&f.buf, codeRune(code)); err == nil && gi != 0 {
+			// ppem = upem returns the advance in raw font units, the same
+			// convention fillGlyph uses for LoadGlyph.
+			if adv, err := f.fnt.GlyphAdvance(&f.buf, gi, fixed.Int26_6(f.upem), font.HintingNone); err == nil {
+				return float64(adv) / f.upem
+			}
+		}
+	}
 	return 0
+}
+
+// winAnsiC1 maps codes 0x80..0x9f -- where WinAnsi (CP1252) departs from
+// Latin-1's C1 controls -- to their runes; 0 for the five undefined slots.
+var winAnsiC1 = [32]rune{
+	0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+	0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017d, 0,
+	0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+	0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0, 0x017e, 0x0178,
+}
+
+// codeRune maps a single-byte code to a rune: Latin-1, which agrees with
+// WinAnsi/Standard over ASCII, except that 0x80..0x9f take their WinAnsi
+// meanings (smart quotes, dashes, euro) -- as Latin-1 C1 controls they map to
+// NO glyph and NO advance, collapsing the rest of the line onto one point. A
+// full /Encoding-aware mapping still waits for a caller that can supply one.
+func codeRune(code byte) rune {
+	if code >= 0x80 && code <= 0x9f {
+		if r := winAnsiC1[code-0x80]; r != 0 {
+			return r
+		}
+	}
+	return rune(code)
 }
 
 // inksText reports whether rendering mode tr deposits ink THIS stage can
@@ -166,14 +236,24 @@ func (r *renderer) showText(gs *gstate, raw []byte) error {
 	return nil
 }
 
-// glyphMatrix maps sfnt glyph coordinates (font units, y down -- LoadGlyph's
-// documented orientation) to device space: flip y and scale by 1/unitsPerEm
-// into text space, then the text-space parameters, the text matrix and the
-// CTM (Trm, ISO 32000-1 9.4.4).
-func glyphMatrix(gs *gstate, upem float64) content.Matrix {
+// glyphMatrix maps glyph coordinates (font units) to device space: scale by
+// 1/unitsPerEm into text space, then the text-space parameters, the text
+// matrix and the CTM (Trm, ISO 32000-1 9.4.4). ySign is -1 for sfnt glyphs
+// (font units y down, LoadGlyph's documented orientation) and +1 for Type 1
+// charstring space, which is y up already.
+func glyphMatrix(gs *gstate, upem, ySign float64) content.Matrix {
 	params := content.Matrix{gs.fontSize * gs.hscale, 0, 0, gs.fontSize, 0, gs.rise}
-	return content.Matrix{1 / upem, 0, 0, -1 / upem, 0, 0}.
+	return content.Matrix{1 / upem, 0, 0, ySign / upem, 0, 0}.
 		Mul(params).Mul(gs.tm).Mul(gs.ctm)
+}
+
+// chargeFill charges n units against the per-Page fill budget.
+func (r *renderer) chargeFill(n int64) error {
+	r.fillWork += n
+	if r.fillWork > maxFillWork {
+		return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+	}
+	return nil
 }
 
 // fillGlyph rasterises one glyph outline through the same path machinery as
@@ -185,12 +265,15 @@ func glyphMatrix(gs *gstate, upem float64) content.Matrix {
 // non-finite device coordinate from hostile text parameters -- skips the
 // glyph cleanly.
 func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
+	if f.t1 != nil {
+		// Stage 4e: Type 1 outlines go through their own interpreter (and its
+		// budgets) into the same path machinery; see type1.go.
+		return r.fillT1Glyph(gs, f, code)
+	}
 	if f.fnt == nil {
 		return nil
 	}
-	// rune(code) is Latin-1, which agrees with WinAnsi/Standard over ASCII;
-	// an /Encoding-aware mapping waits for a caller that can supply one.
-	gi, err := f.fnt.GlyphIndex(&f.buf, rune(code))
+	gi, err := f.fnt.GlyphIndex(&f.buf, codeRune(code))
 	if err != nil || gi == 0 {
 		return nil
 	}
@@ -202,9 +285,8 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	// gate total per SHOW keeps interpreter time under maxFillWork per Page,
 	// exactly like scanline time.
 	if int(gi) < len(f.gwork) {
-		r.fillWork += f.gwork[gi]
-		if r.fillWork > maxFillWork {
-			return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+		if err := r.chargeFill(f.gwork[gi]); err != nil {
+			return err
 		}
 	}
 	// LoadGlyph materialises the glyph's whole expansion up front, which is
@@ -222,7 +304,7 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	if err != nil {
 		return nil
 	}
-	m := glyphMatrix(gs, f.upem)
+	m := glyphMatrix(gs, f.upem, -1)
 	var pth path
 	defer pth.reset(r)
 	ok := true
@@ -268,10 +350,8 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	if !ok {
 		return nil
 	}
-	n := int64(pathPoints(pth.subs))
-	r.fillWork += n
-	if r.fillWork > maxFillWork {
-		return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+	if err := r.chargeFill(int64(pathPoints(pth.subs))); err != nil {
+		return err
 	}
 	return r.fillSubpaths(pth.subs, false, r.deviceClip(gs.clip), gs.fill.rgba)
 }
