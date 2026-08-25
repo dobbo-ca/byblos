@@ -37,6 +37,26 @@ type Font struct {
 	// to pick a bundled substitute face; see substitute.go.
 	BaseFont string
 	Flags    int
+	// Type0 (byb-8b9.8) marks a composite font: a /Subtype /Type0 dict whose
+	// /Encoding is Identity-H or Identity-V and whose descendant carries the
+	// Program (a CID-keyed CFF, /FontFile3 /Subtype /CIDFontType0C). showText
+	// then decodes the string as 2-byte big-endian codes, each code the CID
+	// itself (the Identity CMap, ISO 32000-1 9.7.6.2), and W/DW below replace
+	// FirstChar/Widths. The caller must NOT set Type0 for an embedded-CMap
+	// /Encoding stream or a predefined CJK CMap -- return ok=false instead:
+	// with the CMap undecoded there are no code boundaries to advance by.
+	// Both that deferral and rendering Identity-V with horizontal metrics are
+	// population-based: the epic's census puts Type0-without-/ToUnicode (the
+	// only class that can carry predefined CJK CMaps) at 0.65% of shown font
+	// dicts, and the corpus is US-government English with no consumer of
+	// vertical layout (byb-8b9, pdftotext-scope spec sections 3-4).
+	Type0 bool
+	// W and DW mirror the descendant CIDFont's /W -- flattened by the caller
+	// to CID -> width in thousandths -- and /DW (ISO 32000-1 9.7.4.3). A CID
+	// in neither takes DW's spec default 1000; a zero DW means an absent one
+	// (an explicit /DW 0 is indistinguishable and lands on the default too).
+	W  map[uint32]float64
+	DW float64
 }
 
 // FontFor resolves a Tf operand to an embedded font. ok=false skips that
@@ -55,10 +75,17 @@ type textFont struct {
 	fnt   *sfnt.Font
 	t1    *t1Font // stage 4e: classic Type 1; nil means fnt (or nothing)
 	upem  float64
-	gwork []int64 // per-GID gated charstring work (CFF only); fillGlyph charges it
+	gwork []int64 // per-GID gated charstring work (CFF only); fillGID charges it
 	buf   sfnt.Buffer
 	first int
 	width []float64
+	// Composite state (byb-8b9.8): type0/wmap/dw mirror Font.Type0/W/DW, and
+	// cid2gid is the CID-keyed CFF's charset-as-CID-map (nil for any other
+	// program: such a Type0 font advances but never inks; see fillCIDGlyph).
+	type0   bool
+	cid2gid map[uint16]uint16
+	wmap    map[uint32]float64
+	dw      float64
 }
 
 // fontProg is one parsed font program. resolveFont caches it by content hash
@@ -66,10 +93,11 @@ type textFont struct {
 // -- and above all the pre-Parse work gates, up to ~256 x maxCharstringWork
 // walk steps for a hostile CFF -- once per program, not once per name.
 type fontProg struct {
-	fnt   *sfnt.Font
-	t1    *t1Font
-	upem  float64
-	gwork []int64
+	fnt     *sfnt.Font
+	t1      *t1Font
+	upem    float64
+	gwork   []int64
+	cid2gid map[uint16]uint16
 }
 
 // resolveFont resolves and caches a Tf operand. A nil cache entry records a
@@ -131,11 +159,13 @@ func (r *renderer) resolveFont(name string) *textFont {
 			if g.boundedBy(maxPathPoints) {
 				parse(program)
 			}
-		} else if otf, gwork := cffToSFNT(program); otf != nil {
+		} else if otf, gwork, cid2gid := cffToSFNT(program); otf != nil {
 			// Stage 4d: a bare CFF (/FontFile3 /Subtype /Type1C), gated and
-			// wrapped by cff.go into the container sfnt parses.
+			// wrapped by cff.go into the container sfnt parses. cid2gid is
+			// non-nil only for a CID-keyed CFF (byb-8b9.8).
 			parse(otf)
 			prog.gwork = gwork
+			prog.cid2gid = cid2gid
 		} else {
 			// Stage 4e: a classic Type 1 (/FontFile, PFB or raw). Anything
 			// none of the three stages parse stays widths-only.
@@ -147,7 +177,8 @@ func (r *renderer) resolveFont(name string) *textFont {
 		r.progsBy[key] = prog
 	}
 	tf := &textFont{fnt: prog.fnt, t1: prog.t1, upem: prog.upem, gwork: prog.gwork,
-		first: src.FirstChar, width: src.Widths}
+		first: src.FirstChar, width: src.Widths,
+		type0: src.Type0, cid2gid: prog.cid2gid, wmap: src.W, dw: src.DW}
 	r.fontsBy[name] = tf
 	return tf
 }
@@ -178,6 +209,19 @@ func (f *textFont) w0(code byte) float64 {
 		}
 	}
 	return 0
+}
+
+// w0CID is the CID's glyph displacement in text space: /W in thousandths
+// where present, else /DW, whose absence -- a zero dw -- means the spec
+// default 1000 (ISO 32000-1 9.7.4.3).
+func (f *textFont) w0CID(cid uint16) float64 {
+	if w, ok := f.wmap[uint32(cid)]; ok {
+		return w / 1000
+	}
+	if f.dw != 0 {
+		return f.dw / 1000
+	}
+	return 1
 }
 
 // winAnsiC1 maps codes 0x80..0x9f -- where WinAnsi (CP1252) departs from
@@ -211,15 +255,33 @@ func codeRune(code byte) rune {
 // the table marks nothing.
 func inksText(tr int) bool { return tr == 0 || tr == 2 || tr == 4 || tr == 6 }
 
-// showText shows one string operand's single-byte codes: for each code, ink
-// the glyph under the text rendering matrix, then advance the text matrix by
-// the PDF width plus spacing (ISO 32000-1 9.4.4).
+// showText shows one string operand's codes: for each code, ink the glyph
+// under the text rendering matrix, then advance the text matrix by the PDF
+// width plus spacing (ISO 32000-1 9.4.4). A simple font's codes are the
+// bytes; a Type0 font's are 2-byte big-endian CIDs (byb-8b9.8).
 func (r *renderer) showText(gs *gstate, raw []byte) error {
 	f := gs.font
 	if f == nil {
 		return nil
 	}
 	ink := inksText(gs.tr)
+	if f.type0 {
+		// The Identity CMap: the code IS the CID (9.7.6.2). Word spacing
+		// never applies -- it is defined for the SINGLE-byte code 32 only
+		// (9.3.3) -- and a dangling odd byte has no code to belong to, so it
+		// is dropped.
+		for i := 0; i+1 < len(raw); i += 2 {
+			cid := uint16(raw[i])<<8 | uint16(raw[i+1])
+			if ink {
+				if err := r.fillCIDGlyph(gs, f, cid); err != nil {
+					return err
+				}
+			}
+			tx := gs.fontSize*f.w0CID(cid) + gs.charSp
+			gs.tm = content.Matrix{1, 0, 0, 1, tx * gs.hscale, 0}.Mul(gs.tm)
+		}
+		return nil
+	}
 	for _, code := range raw {
 		if ink {
 			if err := r.fillGlyph(gs, f, code); err != nil {
@@ -277,6 +339,29 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	if err != nil || gi == 0 {
 		return nil
 	}
+	return r.fillGID(gs, f, gi)
+}
+
+// fillCIDGlyph inks one CID's glyph: CID to GID through the CID-keyed CFF's
+// charset (cid2gid), then the shared GID path. A Type0 font whose program is
+// anything else has NO cid2gid and inks nothing -- deliberately, not just
+// unimplemented: that program's glyphs were work-gated for the 256
+// single-byte codes alone, so letting 2-byte codes index them (CID as GID)
+// would hand sfnt charstrings the gate never walked.
+func (r *renderer) fillCIDGlyph(gs *gstate, f *textFont, cid uint16) error {
+	if f.fnt == nil || f.cid2gid == nil {
+		return nil
+	}
+	gid := f.cid2gid[cid]
+	if gid == 0 {
+		return nil
+	}
+	return r.fillGID(gs, f, sfnt.GlyphIndex(gid))
+}
+
+// fillGID loads and fills one glyph by index -- the shared back half of
+// fillGlyph and fillCIDGlyph.
+func (r *renderer) fillGID(gs *gstate, f *textFont, gi sfnt.GlyphIndex) error {
 	// Stage 4d: charge the charstring work LoadGlyph is about to execute
 	// (measured by cff.go's gate) BEFORE executing it. A glyph can run ~64 KB
 	// of charstring yet emit zero segments (an hstem sled), so the per-point

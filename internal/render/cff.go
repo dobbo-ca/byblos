@@ -39,10 +39,19 @@ package render
 // and admits: sfnt's own error lands at that exact byte at load time, so
 // the work up to it -- already charged -- is all that font can ever cost.
 //
-// CID-keyed CFF (a Top DICT /ROS) is refused here and deferred to byb-8b9.8:
-// its codes arrive as multi-byte CIDs through a Type0 CMap that the
-// showText/Font seam cannot carry yet, so the plumbing differs materially;
-// refusing beats guessing a code-to-GID mapping that would ink wrong glyphs.
+// CID-KEYED CFF (byb-8b9.8, a Top DICT /ROS): the codes arrive as 2-byte
+// CIDs through a Type0 font's Identity CMap (Font.Type0/showText carry the
+// seam), CID->GID is the charset read as a CID map (cid2gid), and sfnt's own
+// interpreter already resolves FDArray/FDSelect-partitioned private dicts --
+// so the additions here are the FDArray/FDSelect parse the GATE needs to
+// walk each glyph with the local subrs sfnt will actually run it under
+// (cffFDSelect mirrors sfnt's lookup exactly; a divergence would let a bomb
+// hide behind a crafted range table), plus a whole-font walk cap: with every
+// glyph reachable, the 256-glyph bound above becomes 256 x maxCharstringWork
+// TOTAL across the CharStrings INDEX, the same ceiling. Embedded CMap
+// streams and predefined CJK CMaps stay behind the seam (the caller must not
+// mark them Type0), and Identity-V renders with horizontal metrics -- both
+// deferred on the epic's population data; see Font in text.go.
 
 import (
 	"math"
@@ -63,6 +72,11 @@ type cffProgram struct {
 	gsubrs, lsubrs [][]byte
 	code2gid       [256]uint16
 	upem           uint16
+	// CID-keyed only (byb-8b9.8): cid2gid is the charset read as a CID map,
+	// and fdSubrs/fdSel replace lsubrs, partitioned by FDSelect.
+	cid2gid map[uint16]uint16
+	fdSubrs [][][]byte
+	fdSel   []int16
 }
 
 // cffIndex reads the INDEX at p[pos:]: count, offSize, count+1 one-based
@@ -349,9 +363,9 @@ func cffCode2GID(p []byte, offset int, sids []uint16) *[256]uint16 {
 	return &codes
 }
 
-// parseCFF parses the container structure of a bare CFF. nil means the
-// program cannot safely take the 4d path -- malformed, CID-keyed (byb-8b9.8),
-// or an Expert charset/encoding -- and the caller degrades to widths-only.
+// parseCFF parses the container structure of a bare CFF, plain or CID-keyed.
+// nil means the program cannot safely take the CFF path -- malformed, or an
+// Expert charset/encoding -- and the caller degrades to widths-only.
 func parseCFF(p []byte) *cffProgram {
 	if len(p) < 4 || p[0] != 1 {
 		return nil
@@ -376,9 +390,7 @@ func parseCFF(p []byte) *cffProgram {
 	if !ok {
 		return nil
 	}
-	if _, cid := top[1230]; cid { // ROS
-		return nil
-	}
+	_, cidKeyed := top[1230] // ROS
 	c := &cffProgram{gsubrs: gsubrs, upem: 1000}
 	if m := top[1207]; m != nil { // FontMatrix: upem = 1/m[0]
 		// Only the uniform axis-aligned [s 0 0 s 0 0] form maps onto sfnt's
@@ -412,32 +424,40 @@ func parseCFF(p []byte) *cffProgram {
 	if !ok || len(c.charstrings) == 0 {
 		return nil
 	}
-	if v, present := top[18]; present { // Private: size then offset
-		if len(v) != 2 {
-			return nil
-		}
-		size, off := v[0], v[1]
-		if size != math.Trunc(size) || off != math.Trunc(off) ||
-			size < 0 || off < 0 || off+size > float64(len(p)) {
-			return nil
-		}
-		priv, ok := cffDict(p[int(off):int(off+size)])
+	if cidKeyed {
+		// CID-keyed (byb-8b9.8): FDArray font DICTs carry the Private DICTs
+		// (partitioned by FDSelect) in place of the single top-level one,
+		// which sfnt ignores here and so does this parse. Both operators are
+		// required -- sfnt's Parse errors without them, so refusing early
+		// just skips a gate walk whose font could never render.
+		fdaOff, ok := intOp(1236) // FDArray
 		if !ok {
 			return nil
 		}
-		if s := priv[19]; s != nil { // Subrs, relative to the Private DICT
-			// Bound BEFORE converting: the float sum cannot overflow (both
-			// terms are <= len(p) once checked), where int(s[0]) of a 2^63-ish
-			// operand would, and hand cffIndex a wrapped position.
-			if len(s) != 1 || s[0] != math.Trunc(s[0]) || s[0] < 0 ||
-				off+s[0] > float64(len(p)) {
-				return nil
-			}
-			c.lsubrs, _, ok = cffIndex(p, int(off)+int(s[0]))
+		fds, _, ok := cffIndex(p, fdaOff)
+		if !ok || len(fds) == 0 {
+			return nil
+		}
+		for _, fd := range fds {
+			d, ok := cffDict(fd)
 			if !ok {
 				return nil
 			}
+			subrs, ok := cffPrivateSubrs(p, d)
+			if !ok {
+				return nil
+			}
+			c.fdSubrs = append(c.fdSubrs, subrs)
 		}
+		fdsOff, ok := intOp(1237) // FDSelect
+		if !ok {
+			return nil
+		}
+		if c.fdSel = cffFDSelect(p, fdsOff, len(c.charstrings), len(c.fdSubrs)); c.fdSel == nil {
+			return nil
+		}
+	} else if c.lsubrs, ok = cffPrivateSubrs(p, top); !ok {
+		return nil
 	}
 	charsetOff := 0
 	if _, present := top[15]; present {
@@ -448,6 +468,17 @@ func parseCFF(p []byte) *cffProgram {
 	sids := cffCharsetSIDs(p, charsetOff, len(c.charstrings))
 	if sids == nil {
 		return nil
+	}
+	if cidKeyed {
+		// The charset read as a CID map (its "SIDs" ARE the CIDs); offset 0
+		// -- the predefined-charset slot, which does not apply to CIDFonts --
+		// reads as the identity map. Lowest GID wins a duplicated CID, like
+		// cffCode2GID's sid2gid.
+		c.cid2gid = make(map[uint16]uint16, len(sids))
+		for gid := len(sids) - 1; gid >= 1; gid-- {
+			c.cid2gid[sids[gid]] = uint16(gid)
+		}
+		return c // CIDFonts carry no encoding table; codes arrive as CIDs
 	}
 	encodingOff := 0
 	if _, present := top[16]; present {
@@ -461,6 +492,107 @@ func parseCFF(p []byte) *cffProgram {
 	}
 	c.code2gid = *codes
 	return c
+}
+
+// cffPrivateSubrs reads dict's Private operand pair (size then offset) and
+// returns that Private DICT's local subrs: nil with ok for no Private at all
+// or one without Subrs, refusal for malformed operands wherever they hide.
+func cffPrivateSubrs(p []byte, dict map[int][]float64) ([][]byte, bool) {
+	v, present := dict[18]
+	if !present {
+		return nil, true
+	}
+	if len(v) != 2 {
+		return nil, false
+	}
+	size, off := v[0], v[1]
+	if size != math.Trunc(size) || off != math.Trunc(off) ||
+		size < 0 || off < 0 || off+size > float64(len(p)) {
+		return nil, false
+	}
+	priv, ok := cffDict(p[int(off):int(off+size)])
+	if !ok {
+		return nil, false
+	}
+	s := priv[19]
+	if s == nil { // no Subrs
+		return nil, true
+	}
+	// Subrs is relative to the Private DICT. Bound BEFORE converting: the
+	// float sum cannot overflow (both terms are <= len(p) once checked),
+	// where int(s[0]) of a 2^63-ish operand would, and hand cffIndex a
+	// wrapped position.
+	if len(s) != 1 || s[0] != math.Trunc(s[0]) || s[0] < 0 ||
+		off+s[0] > float64(len(p)) {
+		return nil, false
+	}
+	subrs, _, ok := cffIndex(p, int(off)+int(s[0]))
+	if !ok {
+		return nil, false
+	}
+	return subrs, true
+}
+
+// cffFDSelect resolves every glyph's font DICT index exactly as sfnt's
+// fdSelect.lookup will at that glyph's first callsubr (postscript.go): format
+// 0 reads a byte per glyph, format 3 binary-searches [xlo,xhi) ranges in
+// table order WITHOUT assuming they are sorted. Mirroring the search rather
+// than validating ranges matters: the gate must agree with sfnt on WHICH
+// local subrs each glyph runs, or a crafted table could point the walk at
+// benign subrs while sfnt executes a bomb. -1 marks a glyph whose lookup
+// sfnt will refuse (a miss, or an FD past the FDArray): every callsubr in it
+// errors right there, so the walk runs it with no local subrs at all --
+// callgsubr still resolves, exactly as in sfnt. nil refuses the font: an
+// out-of-bounds, truncated, or unknown-format table.
+func cffFDSelect(p []byte, offset, numGlyphs, numFDs int) []int16 {
+	if offset <= 0 || offset >= len(p) {
+		return nil
+	}
+	d := p[offset:]
+	sel := make([]int16, numGlyphs)
+	fd := func(b byte) int16 {
+		if int(b) < numFDs {
+			return int16(b)
+		}
+		return -1
+	}
+	switch d[0] {
+	case 0:
+		if len(d) < 1+numGlyphs {
+			return nil
+		}
+		for gid := range sel {
+			sel[gid] = fd(d[1+gid])
+		}
+	case 3:
+		if len(d) < 3 {
+			return nil
+		}
+		nRanges := int(be.Uint16(d[1:]))
+		if len(d) < 3+3*nRanges+2 {
+			return nil
+		}
+		for gid := range sel {
+			sel[gid] = -1
+			lo, hi := 0, nRanges
+			for lo < hi {
+				i := (lo + hi) / 2
+				if xlo := int(be.Uint16(d[3+3*i:])); gid < xlo {
+					hi = i
+					continue
+				}
+				if xhi := int(be.Uint16(d[3+3*i+3:])); xhi <= gid {
+					lo = i + 1
+					continue
+				}
+				sel[gid] = fd(d[3+3*i+2])
+				break
+			}
+		}
+	default:
+		return nil
+	}
+	return sel
 }
 
 // cffSubrBias is the Type 2 subr-number bias (5177.Type2.pdf section 4.7).
@@ -483,7 +615,7 @@ func cffSubrBias(count int) int32 {
 // -- INCLUDING the malformed cases (reserved operator, bad subr index, stack
 // over/underflow, truncated stream), where sfnt stops with an error at the
 // same byte this walk stops at, so the work already counted is the total.
-func (c *cffProgram) cffWalkGlyph(cs []byte, work *int64) bool {
+func (c *cffProgram) cffWalkGlyph(cs []byte, lsubrs [][]byte, work *int64) bool {
 	// sfnt refuses any stream over its 64 KB maxGlyphDataLength before
 	// running a byte of it; mirror that as zero-cost.
 	const maxStream = 64 * 1024
@@ -588,7 +720,7 @@ func (c *cffProgram) cffWalkGlyph(cs []byte, work *int64) bool {
 		case 5, 6, 7, 8, 24, 25, 26, 27, 30, 31: // line/curve families
 			args = args[:0]
 		case 10, 29: // callsubr callgsubr
-			subrs := c.lsubrs
+			subrs := lsubrs
 			if b == 29 {
 				subrs = c.gsubrs
 			}
@@ -639,19 +771,44 @@ func (c *cffProgram) cffWalkGlyph(cs []byte, work *int64) bool {
 	return true // stream ran out: sfnt's run loop ends here too
 }
 
-// cffGateWork walks every glyph the synthetic cmap can reach and returns the
-// work charged per GID; nil means some glyph tripped maxCharstringWork. GID 0
-// is never reached: fillGlyph skips it, and the version-2 OS/2 table keeps
-// sfnt.Parse from loading any glyph at all. A nonempty charstring always
-// charges at least one unit, so work[gid] != 0 doubles as the walked marker
-// (an empty charstring re-walks for free).
+// cffGateWork walks every reachable glyph -- the synthetic cmap's 256 codes,
+// or for a CID-keyed font all of them -- and returns the work charged per
+// GID; nil means a glyph tripped maxCharstringWork or a CID font tripped the
+// whole-font cap. GID 0 is never reached: fillGID skips it, and the
+// version-2 OS/2 table keeps sfnt.Parse from loading any glyph at all. A
+// nonempty charstring always charges at least one unit, so work[gid] != 0
+// doubles as the walked marker (an empty charstring re-walks for free).
 func (c *cffProgram) cffGateWork() []int64 {
 	work := make([]int64, len(c.charstrings))
+	if c.cid2gid != nil {
+		// CID-keyed: EVERY glyph is reachable (any two-byte code is a CID),
+		// so the whole CharStrings INDEX is walked -- each glyph with the
+		// local subrs of ITS font DICT, resolved exactly as sfnt will -- and
+		// the per-glyph budget alone would let glyph count multiply the
+		// walk's own cost, so the font as a whole is capped at the 256-code
+		// gate's ceiling. A legitimate CJK font fits with room (tens of
+		// thousands of glyphs at typical ~10^2-byte charstrings); one past
+		// it degrades to widths-only like any other refusal.
+		var total int64
+		for gid := 1; gid < len(c.charstrings); gid++ {
+			var lsubrs [][]byte
+			if fd := c.fdSel[gid]; fd >= 0 {
+				lsubrs = c.fdSubrs[fd]
+			}
+			if !c.cffWalkGlyph(c.charstrings[gid], lsubrs, &work[gid]) {
+				return nil
+			}
+			if total += work[gid]; total > 256*maxCharstringWork {
+				return nil
+			}
+		}
+		return work
+	}
 	for _, gid := range c.code2gid {
 		if gid == 0 || int(gid) >= len(c.charstrings) || work[gid] != 0 {
 			continue
 		}
-		if !c.cffWalkGlyph(c.charstrings[int(gid)], &work[gid]) {
+		if !c.cffWalkGlyph(c.charstrings[int(gid)], c.lsubrs, &work[gid]) {
 			return nil
 		}
 	}
@@ -731,18 +888,20 @@ func cffWrapSFNT(cff []byte, numGlyphs int, upem uint16, code2gid *[256]uint16) 
 	return b
 }
 
-// cffToSFNT is the 4d entry point: a bare CFF in, an sfnt.Parse-able wrapper
-// plus the gate-measured per-GID charstring work out (fillGlyph charges it per
-// show), or nil when the program is not a bare CFF this stage can safely hand
-// to sfnt (see parseCFF and cffGateWork).
-func cffToSFNT(p []byte) ([]byte, []int64) {
+// cffToSFNT is the CFF entry point: a bare CFF in, an sfnt.Parse-able wrapper
+// plus the gate-measured per-GID charstring work out (fillGID charges it per
+// show), or nils when the program is not a CFF this path can safely hand to
+// sfnt (see parseCFF and cffGateWork). cid2gid is non-nil exactly when the
+// program is CID-keyed (byb-8b9.8): the charset-as-CID-map fillCIDGlyph
+// resolves Type0 codes through.
+func cffToSFNT(p []byte) ([]byte, []int64, map[uint16]uint16) {
 	c := parseCFF(p)
 	if c == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	gwork := c.cffGateWork()
 	if gwork == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return cffWrapSFNT(p, len(c.charstrings), c.upem, &c.code2gid), gwork
+	return cffWrapSFNT(p, len(c.charstrings), c.upem, &c.code2gid), gwork, c.cid2gid
 }
