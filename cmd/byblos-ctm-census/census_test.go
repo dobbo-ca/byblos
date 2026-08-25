@@ -3,6 +3,9 @@ package main
 import (
 	"math"
 	"testing"
+
+	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
 // approxEqual matches to 1e-6, the precision byb-06n's pinned fixture
@@ -158,4 +161,82 @@ func TestPlacementDeg(t *testing.T) {
 	deg5 := 5.0 * math.Pi / 180
 	m := [6]float64{math.Cos(deg5), math.Sin(deg5), -math.Sin(deg5), math.Cos(deg5), 0, 0}
 	approxEqual(t, "placementDeg", placementDeg(m), 5.0, 1e-9)
+}
+
+// TestClassifyRotatedTopExcludesUnderLayerOutsideItsTrueQuad pins byb-ntd's
+// SECOND named drift, ported to this package: census.go's classify used to
+// lack the '!axisAligned(topCTM)' quad-vs-quad under-layer check
+// (extract.go:903-907), so contains() alone (AABB-vs-AABB) let an
+// under-layer whose corner sits outside a rotated top's TRUE quadrilateral
+// pass as covered.
+func TestClassifyRotatedTopExcludesUnderLayerOutsideItsTrueQuad(t *testing.T) {
+	page := pdfdoc.Rect{LLX: 0, LLY: 0, URX: 100, URY: 100}
+	deg1 := 1.0 * math.Pi / 180
+	s := 101.0
+	topCTM := content.Matrix{s * math.Cos(deg1), s * math.Sin(deg1), -s * math.Sin(deg1), s * math.Cos(deg1), 0, 0}
+	top := content.Placement{Name: "Im2", ID: 2, CTM: topCTM, Box: topCTM.UnitSquareBox(), Opaque: true}
+	underBox := content.Box{LLX: -1.5, LLY: 101.5, URX: -0.5, URY: 102.5}
+	under := content.Placement{
+		Name: "Im1", ID: 1, Box: underBox, Opaque: true,
+		CTM: content.Matrix{underBox.URX - underBox.LLX, 0, 0, underBox.URY - underBox.LLY, underBox.LLX, underBox.LLY},
+	}
+	scan := &content.Scan{Images: []content.Placement{under, top}}
+	info := func(int) (pdfdoc.ImageInfo, bool) { return pdfdoc.ImageInfo{BPC: 8}, true }
+
+	idx, reason := classify(page, scan, info)
+	if reason != "multiple-images" {
+		t.Errorf("classify() = (%d, %q), want (_, \"multiple-images\"); the "+
+			"under-layer's corner sits outside the rotated top's true quad, "+
+			"which only the quad-vs-quad check catches", idx, reason)
+	}
+}
+
+// TestPaintsHiddenRotatedCoverExcludesUnrotatedInk pins byb-ntd: this
+// package's own inkHidden lacked inkCTM and the byb-2mt three-way guard
+// (axisAligned(img.CTM) || sameRotation(inkCTM, img.CTM) ||
+// img.CTM.UnitSquareQuad().ContainsBox(ink, tol)), so a rotated opaque
+// cover whose true quadrilateral does NOT reach an axis-aligned fill's ink
+// -- even though the fill's ink sits inside the cover's axis-aligned
+// bounding box -- reported hidden here (true) and not hidden in extract.go
+// (false), on the same identical input.
+func TestPaintsHiddenRotatedCoverExcludesUnrotatedInk(t *testing.T) {
+	rot := content.Matrix{70.710678118654755, 70.710678118654755, -70.710678118654755, 70.710678118654755, 0, 0}
+	imgs := []content.Placement{{ID: 1, CTM: rot, Box: rot.UnitSquareBox(), Opaque: true, Index: 2}}
+	paints := []content.Paint{{Op: "f", Box: content.Box{LLX: -70, LLY: 2, URX: -68, URY: 4}, CTM: content.Identity, Index: 1}}
+	info := func(int) (pdfdoc.ImageInfo, bool) { return pdfdoc.ImageInfo{BPC: 8}, true }
+
+	if got := paintsHidden(imgs, paints, info); got {
+		t.Errorf("paintsHidden = %v, want false; the ink's AABB sits inside the "+
+			"rotated placement's AABB but not inside its true quadrilateral", got)
+	}
+}
+
+// TestPaintsHiddenSameRotationWashStillHidden pins the OTHER half of
+// byb-2mt's three-way guard, the half the corner-triangle fixture above
+// cannot exercise: a wash painted under the SAME rotation as the opaque
+// raster covering it (a page-covering fill under a Straighten pass, corpus
+// shape "background-wash" -- see extract_quad_test.go's
+// TestExtractBackgroundWashStraightenedStillExtracts, the end-to-end test
+// that catches this exact drift in extract.go). Here the ink's own AABB
+// corner pokes past the raster's TRUE rotated quad -- ContainsBox alone
+// says NOT hidden -- but because ink and raster share the same rotation,
+// sameRotation says hidden anyway. Dropping either the sameRotation
+// disjunct or the p.CTM plumbing that feeds it inkCTM (i.e. passing
+// content.Identity instead) makes this fixture fail while leaving every
+// other census_test.go case green.
+func TestPaintsHiddenSameRotationWashStillHidden(t *testing.T) {
+	deg1 := 1.0 * math.Pi / 180
+	s := 101.0
+	imgCTM := content.Matrix{s * math.Cos(deg1), s * math.Sin(deg1), -s * math.Sin(deg1), s * math.Cos(deg1), 0, 0}
+	inkCTM := content.Matrix{math.Cos(deg1), math.Sin(deg1), -math.Sin(deg1), math.Cos(deg1), 0, 0}
+	imgs := []content.Placement{{ID: 1, CTM: imgCTM, Box: imgCTM.UnitSquareBox(), Opaque: true, Index: 2}}
+	ink := content.Box{LLX: -1.5, LLY: 101.5, URX: -0.5, URY: 102.5}
+	paints := []content.Paint{{Op: "f", Box: ink, CTM: inkCTM, Index: 1}}
+	info := func(int) (pdfdoc.ImageInfo, bool) { return pdfdoc.ImageInfo{BPC: 8}, true }
+
+	if got := paintsHidden(imgs, paints, info); !got {
+		t.Errorf("paintsHidden = %v, want true; the ink's AABB corner sits outside the "+
+			"raster's true rotated quad, but ink and raster share the raster's rotation, "+
+			"which is exactly what the sameRotation guard is for", got)
+	}
 }
