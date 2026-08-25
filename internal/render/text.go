@@ -45,6 +45,7 @@ type FontFor func(name string) (Font, bool)
 // positions, but no glyph inks.
 type textFont struct {
 	fnt   *sfnt.Font
+	t1    *t1Font // stage 4e: classic Type 1; nil means fnt (or nothing)
 	upem  float64
 	gwork []int64 // per-GID gated charstring work (CFF only); fillGlyph charges it
 	buf   sfnt.Buffer
@@ -58,6 +59,7 @@ type textFont struct {
 // walk steps for a hostile CFF -- once per program, not once per name.
 type fontProg struct {
 	fnt   *sfnt.Font
+	t1    *t1Font
 	upem  float64
 	gwork []int64
 }
@@ -104,17 +106,20 @@ func (r *renderer) resolveFont(name string) *textFont {
 			}
 		} else if otf, gwork := cffToSFNT(src.Program); otf != nil {
 			// Stage 4d: a bare CFF (/FontFile3 /Subtype /Type1C), gated and
-			// wrapped by cff.go into the container sfnt parses. Anything else
-			// -- Type1 PFB (stage 4e), garbage -- leaves otf nil: widths-only.
+			// wrapped by cff.go into the container sfnt parses.
 			parse(otf)
 			prog.gwork = gwork
+		} else {
+			// Stage 4e: a classic Type 1 (/FontFile, PFB or raw). Anything
+			// none of the three stages parse stays widths-only.
+			prog.t1 = parseType1(src.Program)
 		}
 		if r.progsBy == nil {
 			r.progsBy = map[[sha256.Size]byte]*fontProg{}
 		}
 		r.progsBy[key] = prog
 	}
-	tf := &textFont{fnt: prog.fnt, upem: prog.upem, gwork: prog.gwork,
+	tf := &textFont{fnt: prog.fnt, t1: prog.t1, upem: prog.upem, gwork: prog.gwork,
 		first: src.FirstChar, width: src.Widths}
 	r.fontsBy[name] = tf
 	return tf
@@ -185,6 +190,11 @@ func glyphMatrix(gs *gstate, upem float64) content.Matrix {
 // non-finite device coordinate from hostile text parameters -- skips the
 // glyph cleanly.
 func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
+	if f.t1 != nil {
+		// Stage 4e: Type 1 outlines go through their own interpreter (and its
+		// budgets) into the same path machinery; see type1.go.
+		return r.fillT1Glyph(gs, f, code)
+	}
 	if f.fnt == nil {
 		return nil
 	}
