@@ -427,3 +427,43 @@ func TestPageRefusesDeepGStateStack(t *testing.T) {
 		t.Errorf("Page refused %d nested q, which is within the cap: %v", maxGStateDepth, err)
 	}
 }
+
+// TestSetCompsOperandCountFallback pins byb-6ty: an unknown colour space
+// (any cs/CS name render.go can't resolve to Gray/RGB, i.e. every ICCBased
+// resource name in practice, byb-b1.5) must not silently drop scn/SCN
+// operands. setComps recovers the intended model from the operand COUNT --
+// 1 means gray, 3 means RGB, 4 means CMYK -- the same convention ICCBased
+// profiles overwhelmingly stand in for.
+func TestSetCompsOperandCountFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want color.RGBA
+	}{
+		{"1 operand is gray", "/Cs6 cs 0.5 scn 0 0 100 100 re f", color.RGBA{128, 128, 128, 255}},
+		{"3 operands is RGB", "/Cs6 cs 0 0 1 scn 0 0 100 100 re f", blue},
+		{"4 operands is CMYK", "/Cs6 cs 0 1 1 0 scn 0 0 100 100 re f", red},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			img := render100(t, tc.src)
+			if got := pixelAt(img, 50, 50); got != tc.want {
+				t.Errorf("center pixel = %+v; want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetCompsExcludesIndexed pins the judgement call in byb-6ty: Indexed's
+// single operand is a PALETTE INDEX, not a gray level, so the operand-count
+// fallback must not touch it. cs/CS only ever gets a bare name (8.6.5.2
+// routes Indexed through the resource dict, not a direct cs operand), so
+// naming a resource "Indexed" is the one case render.go can actually
+// recognise -- it stays at the pre-existing black default rather than
+// guessing wrong.
+func TestSetCompsExcludesIndexed(t *testing.T) {
+	img := render100(t, "/Indexed cs 1 scn 0 0 100 100 re f")
+	if got := pixelAt(img, 50, 50); got != black {
+		t.Errorf("center pixel = %+v; want black (Indexed excluded from the fallback)", got)
+	}
+}
