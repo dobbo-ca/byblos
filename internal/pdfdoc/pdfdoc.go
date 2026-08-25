@@ -210,6 +210,10 @@ type Doc interface {
 	XObject(scope int, name string) (content.XObject, bool)
 	ExtGStateOpaque(scope int, name string) bool
 	Font(scope int, name string) (int, bool)
+	// RenderFont resolves the named /Font resource to what the renderer's
+	// font seam needs: the dict facts plus the decoded embedded program, if
+	// any. See the method for what is refused.
+	RenderFont(scope int, name string) (RenderFont, bool)
 	// ImageInfo returns the dictionary facts for an image resolved by XObject,
 	// keyed by the ID that XObject returned.
 	ImageInfo(id int) (ImageInfo, bool)
@@ -665,6 +669,70 @@ func (d *doc) Font(sc int, name string) (int, bool) {
 		return 0, false
 	}
 	return d.identify(obj), true
+}
+
+// RenderFont is the renderer's view of one simple font dict: the fields
+// internal/render's Font seam carries. Program is the decoded /FontFile,
+// /FontFile2 or /FontFile3 stream, nil when the dict embeds none -- which is
+// the case stage 4f substitutes for.
+type RenderFont struct {
+	BaseFont  string
+	Flags     int // /FontDescriptor /Flags
+	FirstChar int
+	Widths    []float64
+	Program   []byte
+}
+
+// RenderFont resolves the named /Font resource for rendering. Composite
+// fonts (/Subtype /Type0) are refused: their codes are multi-byte CIDs the
+// renderer's single-byte show path cannot carry yet (byb-8b9.8).
+func (d *doc) RenderFont(sc int, name string) (RenderFont, bool) {
+	rf, err := d.renderFont(sc, name)
+	return rf, err == nil
+}
+
+func (d *doc) renderFont(sc int, name string) (rf RenderFont, err error) {
+	// The same shape as RawImageGlobals: this dereferences arbitrary objects
+	// a font dict names and runs pdfcpu's filter chain over one of them, so a
+	// corrupt dict must divert this font, not take the page down.
+	defer catchPanic(fmt.Sprintf("resolving font %q", name), &err)
+	obj, ok := d.lookupResource(sc, "Font", name)
+	if !ok {
+		return rf, fmt.Errorf("byblos/pdfdoc: no /Font resource %q", name)
+	}
+	dict, ok := d.deref(obj).(types.Dict)
+	if !ok {
+		return rf, fmt.Errorf("byblos/pdfdoc: /Font %q is not a dict", name)
+	}
+	if st := dict.NameEntry("Subtype"); st != nil && *st == "Type0" {
+		return rf, fmt.Errorf("byblos/pdfdoc: /Font %q is a composite Type0 font", name)
+	}
+	if bf := dict.NameEntry("BaseFont"); bf != nil {
+		rf.BaseFont = *bf
+	}
+	rf.FirstChar = d.intEntry(dict, "FirstChar")
+	rf.Widths = d.numberArray(dict, "Widths")
+	fd := d.dictEntry(dict, "FontDescriptor")
+	if fd == nil {
+		return rf, nil
+	}
+	rf.Flags = d.intEntry(fd, "Flags")
+	for _, key := range []string{"FontFile2", "FontFile3", "FontFile"} {
+		o, found := fd.Find(key)
+		if !found {
+			continue
+		}
+		sd, _, err := d.ctx.XRefTable.DereferenceStreamDict(o)
+		if err != nil || sd == nil {
+			continue
+		}
+		if err := sd.Decode(); err != nil {
+			continue
+		}
+		rf.Program = sd.Content
+		break
+	}
+	return rf, nil
 }
 
 // identify returns a stable id for an XObject: its PDF object number when it is

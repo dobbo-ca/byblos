@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 
+	"golang.org/x/image/font"
 	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 
@@ -26,9 +27,16 @@ type Font struct {
 	// FirstChar and Widths mirror the font dict's /FirstChar and /Widths, in
 	// thousandths of text space (ISO 32000-1 9.2.4). A code outside the array
 	// advances by /MissingWidth's default, 0 -- the spec's fallback, not the
-	// font program's own advance.
+	// font program's own advance. A dict with NO /Widths at all (the
+	// standard-14 shape) instead advances by the resolved program's own
+	// metrics; see w0.
 	FirstChar int
 	Widths    []float64
+	// BaseFont and Flags mirror the font dict's /BaseFont and its
+	// /FontDescriptor /Flags. Stage 4f reads them only when Program is empty,
+	// to pick a bundled substitute face; see substitute.go.
+	BaseFont string
+	Flags    int
 }
 
 // FontFor resolves a Tf operand to an embedded font. ok=false skips that
@@ -82,7 +90,15 @@ func (r *renderer) resolveFont(name string) *textFont {
 		r.fontsBy[name] = nil
 		return nil
 	}
-	key := sha256.Sum256(src.Program)
+	program := src.Program
+	if len(program) == 0 {
+		// Stage 4f: no embedded program -- substitute a bundled face by name,
+		// else by descriptor flags (substitute.go). The deferred faces leave
+		// program empty and degrade to widths-only below, like any program no
+		// stage parses.
+		program = substituteProgram(src.BaseFont, src.Flags)
+	}
+	key := sha256.Sum256(program)
 	prog, hit := r.progsBy[key]
 	if !hit {
 		prog = &fontProg{}
@@ -100,11 +116,11 @@ func (r *renderer) resolveFont(name string) *textFont {
 				prog.upem = float64(f.UnitsPerEm())
 			}
 		}
-		if g := parseGlyfIndex(src.Program); g != nil {
+		if g := parseGlyfIndex(program); g != nil {
 			if g.boundedBy(maxPathPoints) {
-				parse(src.Program)
+				parse(program)
 			}
-		} else if otf, gwork := cffToSFNT(src.Program); otf != nil {
+		} else if otf, gwork := cffToSFNT(program); otf != nil {
 			// Stage 4d: a bare CFF (/FontFile3 /Subtype /Type1C), gated and
 			// wrapped by cff.go into the container sfnt parses.
 			parse(otf)
@@ -112,7 +128,7 @@ func (r *renderer) resolveFont(name string) *textFont {
 		} else {
 			// Stage 4e: a classic Type 1 (/FontFile, PFB or raw). Anything
 			// none of the three stages parse stays widths-only.
-			prog.t1 = parseType1(src.Program)
+			prog.t1 = parseType1(program)
 		}
 		if r.progsBy == nil {
 			r.progsBy = map[[sha256.Size]byte]*fontProg{}
@@ -127,13 +143,24 @@ func (r *renderer) resolveFont(name string) *textFont {
 
 // w0 is the code's glyph displacement in text space (ISO 32000-1 9.4.4):
 // /Widths in thousandths where the array covers the code, else /MissingWidth,
-// whose default -- and this stage's only value, no descriptor crosses the
-// seam -- is 0. Deliberately NOT the font program's own advance: the PDF
-// widths override it by spec, and TestTextWidthsOverrideFontAdvance pins
-// that.
+// whose default is 0. Deliberately NOT the font program's own advance where
+// any /Widths exist: the PDF widths override it by spec, and
+// TestTextWidthsOverrideFontAdvance pins that. A dict with NO /Widths at all
+// -- the standard-14 shape, where the viewer is expected to know the metrics
+// (9.6.2.2) -- takes the resolved program's own advance instead (stage 4f:
+// for a substituted face those ARE the metric-compatible widths).
 func (f *textFont) w0(code byte) float64 {
 	if i := int(code) - f.first; i >= 0 && i < len(f.width) {
 		return f.width[i] / 1000
+	}
+	if len(f.width) == 0 && f.fnt != nil {
+		if gi, err := f.fnt.GlyphIndex(&f.buf, rune(code)); err == nil && gi != 0 {
+			// ppem = upem returns the advance in raw font units, the same
+			// convention fillGlyph uses for LoadGlyph.
+			if adv, err := f.fnt.GlyphAdvance(&f.buf, gi, fixed.Int26_6(f.upem), font.HintingNone); err == nil {
+				return float64(adv) / f.upem
+			}
+		}
 	}
 	return 0
 }
