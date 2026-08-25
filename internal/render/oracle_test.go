@@ -538,6 +538,67 @@ func TestCIDKeyedCFFTextThroughPdfdocAgreesWithPdftoppm(t *testing.T) {
 	}
 }
 
+// hostileWCIDPDF is cidCFFPDF with its /W replaced by the range form's worst
+// case (ISO 32000-1 9.7.4.3): /W [0 2147483647 500] declares every CID from
+// 0 to 2^31-1 gets width 500 from ~20 bytes of input.
+func hostileWCIDPDF() []byte {
+	cff := string(oracleCIDCFF())
+	const textContent = cidTextOracleContent
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
+			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(textContent), textContent),
+		"<< /Type /Font /Subtype /Type0 /BaseFont /BbOracle /Encoding /Identity-H" +
+			" /DescendantFonts [6 0 R] >>",
+		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbOracle" +
+			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
+			" /DW 1000 /W [0 2147483647 500] /FontDescriptor 7 0 R >>",
+		"<< /Type /FontDescriptor /FontName /BbOracle /Flags 4" +
+			" /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800" +
+			" /Descent -200 /CapHeight 500 /StemV 80 /FontFile3 8 0 R >>",
+		fmt.Sprintf("<< /Subtype /CIDFontType0C /Length %d >>\nstream\n%s\nendstream", len(cff), cff),
+	})
+}
+
+// TestRenderFontBoundsHostileWCIDRange pins byb-6z1's /W range-form bound
+// against a compound regression: removing G3's `budget > 0` loop condition
+// together with G4's float clamp (the pair a careless "budget already caps
+// it, the clamp is redundant" edit could plausibly drop at once) leaves
+// this fixture's declared range unbounded on every GOARCH -- measured
+// 19.9s here against this test's 2s ceiling. No single guard removal trips
+// this test (any one of G3 or G4 alone still bounds this particular
+// fixture to the same 65536-entry, near-0s result), so it is not a
+// substitute for TestRenderFontBoundsHostileWCIDRepeatedRange or
+// TestRenderFontCIDWidthHugeFloatArchIndependent below -- it exists because
+// without it, that exact double-mutation makes
+// TestRenderFontCIDWidthHugeFloatArchIndependent HANG (its /W [0 1e300 500]
+// fixture becomes an unbounded loop, panicking only at go test's own
+// timeout) instead of failing fast.
+func TestRenderFontBoundsHostileWCIDRange(t *testing.T) {
+	d, err := pdfdoc.Open(bytes.NewReader(hostileWCIDPDF()))
+	if err != nil {
+		t.Fatalf("pdfdoc.Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page(1): %v", err)
+	}
+	start := time.Now()
+	rf, ok := d.RenderFont(p.Scope, "F1")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("RenderFont took %v on a /W [0 2147483647 500] fixture; the range-form iteration is not bounded", elapsed)
+	}
+	if !ok {
+		t.Fatal("RenderFont refused the hostile-/W fixture")
+	}
+	const maxCIDWidthEntries = 65536
+	if len(rf.W) != maxCIDWidthEntries {
+		t.Fatalf("W has %d entries, want exactly %d (the CID space cap)", len(rf.W), maxCIDWidthEntries)
+	}
+}
+
 // hostileWCIDRepeatedRangePDF builds a /W that repeats the SAME range 15000
 // times: `0 65534 500` fills CIDs 0..65534 on its first occurrence, and
 // every later occurrence re-walks the identical 65535 CIDs writing the same
