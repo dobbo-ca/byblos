@@ -162,7 +162,13 @@ func measureOne(pdftoppm string, path string, dir string, i int) sampleResult {
 	// Zero-padded and hyphen-globbed: a bare "o1*" glob also matches o12's
 	// output when workers overlap, which read as "pdftoppm wrote 2 pages".
 	prefix := filepath.Join(dir, fmt.Sprintf("o%04d", i))
-	out, err := exec.Command(pdftoppm, "-f", "1", "-l", "1", "-scale-to", "400", "-png", path, prefix).CombinedOutput()
+	// -cropbox, not the default: pdftoppm renders the MEDIA box unless asked,
+	// and byblos renders the CROP box. Without the flag the two sides framed
+	// different rectangles and every document whose CropBox is inset (a 36pt
+	// margin is common) came out a few percent off in scale -- and six came
+	// out far enough off to be thrown away as "size mismatch" instead of
+	// measured. This is what those exclusions were; the flag removes all six.
+	out, err := exec.Command(pdftoppm, "-f", "1", "-l", "1", "-cropbox", "-scale-to", "400", "-png", path, prefix).CombinedOutput()
 	if err != nil {
 		return sampleResult{path, 0, fmt.Sprintf("pdftoppm: %v: %s", err, out)}
 	}
