@@ -17,13 +17,14 @@ Kleio's document pipeline shells out to a container image bundling `ocrmypdf`,
 `tesseract`, `ghostscript`, `jbig2enc`, `pngquant`, `poppler`, `unpaper`, and
 `img2pdf`. [Cadmus](https://github.com/dobbo-ca/cadmus) removes `tesseract` and
 the OCR half of `ocrmypdf`. Byblos removes the rest except `unpaper`, deferred
-(see FUTURE.md).
+(see FUTURE.md), and two `pdftotext` calls that stay on `poppler` — the named
+G1 exception below.
 
 ### Goals
 
 | # | Goal |
 |---|------|
-| G1 | Eliminate Kleio's PDF-side binary dependencies: `ghostscript`, `jbig2enc`, `pngquant`, `poppler`, `img2pdf` |
+| G1 | Eliminate Kleio's PDF-side binary dependencies: `ghostscript`, `jbig2enc`, `pngquant`, `img2pdf` — and `poppler` **except two surviving `pdftotext` calls**, kept as named exceptions (`byb-lez`, the 2026-08-04 scope document): the stash (`kleio` `compress.go:579`), which builds the OCR coverage gate's stale token set and would need code→Unicode font decoding to replace, and the OCR read-back (`ocr.go:196`), the same gate's fresh side (`validate.go:232`) plus the `ocr_text` index, whose deletion would make the gate pass every document. See §2's 2026-08-24 amendment. |
 | G2 | Keep compression quality competitive with the `ocrmypdf` pipeline it replaces |
 | G3 | Make processed documents **upgradeable**: when Byblos gains a capability, identify precisely which stored documents would benefit |
 | G4 | Materialise a new document from a **page sequence**: pages drawn from one or more sources, in a given order, at a given rotation (see the 2026-08-13 amendment below) |
@@ -166,9 +167,12 @@ Kleio needs it in exactly one place, and it is not compression:
 So two of `poppler`'s four roles in Kleio collapse to "list embedded image
 geometry to detect born-digital" (`pdfimages -list`, its only invocation —
 `tools.go:341`, inside `HasFullPageImage`) and "read page count and page
-geometry" (`pdfinfo`). The other two — `pdftotext` word extraction and
-`pdftoppm` thumbnail rendering — are open scope decisions; see `byb-lez` and
-`byb-0gm`.
+geometry" (`pdfinfo`). Of the other two, `pdftoppm` thumbnail rendering was
+decided by `byb-0gm` (amendment below), and `pdftotext` word extraction was
+decided by the 2026-08-04 scope document (`2026-08-04-pdftotext-scope.md`,
+`byb-lez`): **it stays on `poppler`, in exactly two surviving calls** — the
+stash (`compress.go:579`) and the OCR read-back (`ocr.go:196`) — for the
+reasons in the 2026-08-24 amendment below.
 
 ### Amendment 2026-08-03: Byblos renders (byb-0gm), at thumbnail fidelity
 
@@ -214,6 +218,54 @@ showed the failure mode directly: a page-tree bug made 1,266 real pages
 unreadable and pushed the measured divert rate *down*. Watch `UnhandledRate` for
 regressions (`stats.go:50-57`), and measure the premise itself over scan-shaped
 pages.
+
+### Amendment 2026-08-24: pdftotext is not eliminated (byb-lez.3)
+
+This section previously called `pdftotext` word extraction an open scope
+decision, and G1 previously claimed `poppler` would be eliminated outright.
+That claim was wrong, and *how* it went wrong is worth pinning: the original
+scoping counted **one** `pdftotext` call site and concluded the role could be
+removed. There are three, and two survive (scope doc §1; file:line references
+in this amendment are `kleio/internal/pipeline/`):
+
+- **The stash** (`compress.go:579`, `ExtractText(ctx, in, 0)`) reads the
+  *original's* text layer into the distinct-token set that is the OCR coverage
+  gate's stale side (`gate.go:549` `tokenSet`, consumed by `Coverage` at
+  `gate.go:514`). It survives because replacing it needs code→Unicode font
+  decoding — Type1/CFF/TrueType/CID encodings, ToUnicode CMaps — which is
+  exactly the work this section keeps out of scope, and Byblos exposes no
+  text extraction; its text API is write-side only.
+- **The OCR read-back** (`ocr.go:196`, `ExtractText(ctx, out, 0)`) reads the
+  *delivered artifact's* text layer — the same gate's **fresh** side
+  (`validate.go:232`) as well as the `ocr_text` search index. It survives
+  because the once-proposed deletion, synthesising the sidecar as a union that
+  contains the stash, makes `Coverage` identically 1.0 and the
+  `floorCoverage = 0.75` reject unreachable (scope doc §5, `byb-lez.2`) — on
+  exactly the population where `retention_policy='discard'` makes that gate
+  the last thing between a failed compression and a deleted original.
+
+Naming only one of the two would repeat the original mistake. The third call,
+`IsBornDigital`'s character count at `compress.go:82`, is the one that *is*
+replaceable (`PageInfo.TextChars`, 99.96% measured verdict agreement;
+`byb-lez.1`).
+
+**The surviving calls are not vestigial.** `byb-lez.4` measured (2026-08-24)
+how often the gate they feed does real work — documents reaching `Decide` with
+`bornDigital == false && hasStash == true`: 9.11% pooled over the 5,672-file
+local sample, but that sample is 85% govdocs1 by file count and is not scanner
+intake. On the one scan-shaped corpus available (40 ScanSnap iX500 files) the
+rate is **100%** — consumer scanners ship built-in searchable-PDF OCR — and on
+`ia` (library scans, zero fonts) it is **0%**. Producer-dependent, spanning
+0–100%: on scanner-shaped intake the coverage comparison is exercised against
+a real pre-existing text layer, not skipped via the empty-stash pass.
+
+This exception is distinct from §8's oracle carve-out and must not be
+conflated with it. The oracles are test-only differential fixtures that never
+ship and that Kleio never depends on — the oracle-free suite passes
+(1161 PASS / 35 SKIP / 0 FAIL), so the carve-out is not a G1 violation
+(re-litigated before; `byb-js5`). The two calls above are **runtime**
+dependencies of Kleio's pipeline, and they, not the oracles, are the G1
+exception.
 
 ---
 
