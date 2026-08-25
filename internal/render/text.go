@@ -55,7 +55,7 @@ type Font struct {
 	// to CID -> width in thousandths -- and /DW (ISO 32000-1 9.7.4.3). A CID
 	// in neither takes DW's spec default 1000; a zero DW means an absent one
 	// (an explicit /DW 0 is indistinguishable and lands on the default too).
-	W  map[uint32]float64
+	W  map[uint16]float64
 	DW float64
 }
 
@@ -84,7 +84,7 @@ type textFont struct {
 	// program: such a Type0 font advances but never inks; see fillCIDGlyph).
 	type0   bool
 	cid2gid map[uint16]uint16
-	wmap    map[uint32]float64
+	wmap    map[uint16]float64
 	dw      float64
 }
 
@@ -215,7 +215,7 @@ func (f *textFont) w0(code byte) float64 {
 // where present, else /DW, whose absence -- a zero dw -- means the spec
 // default 1000 (ISO 32000-1 9.7.4.3).
 func (f *textFont) w0CID(cid uint16) float64 {
-	if w, ok := f.wmap[uint32(cid)]; ok {
+	if w, ok := f.wmap[cid]; ok {
 		return w / 1000
 	}
 	if f.dw != 0 {
@@ -265,6 +265,15 @@ func (r *renderer) showText(gs *gstate, raw []byte) error {
 		return nil
 	}
 	ink := inksText(gs.tr)
+	// advance moves the text matrix by one code's displacement (9.4.4) --
+	// shared between the paths so the Tc/Tz arithmetic exists exactly once.
+	advance := func(w0 float64, wordSp bool) {
+		tx := gs.fontSize*w0 + gs.charSp
+		if wordSp {
+			tx += gs.wordSp
+		}
+		gs.tm = content.Matrix{1, 0, 0, 1, tx * gs.hscale, 0}.Mul(gs.tm)
+	}
 	if f.type0 {
 		// The Identity CMap: the code IS the CID (9.7.6.2). Word spacing
 		// never applies -- it is defined for the SINGLE-byte code 32 only
@@ -277,8 +286,7 @@ func (r *renderer) showText(gs *gstate, raw []byte) error {
 					return err
 				}
 			}
-			tx := gs.fontSize*f.w0CID(cid) + gs.charSp
-			gs.tm = content.Matrix{1, 0, 0, 1, tx * gs.hscale, 0}.Mul(gs.tm)
+			advance(f.w0CID(cid), false)
 		}
 		return nil
 	}
@@ -288,12 +296,8 @@ func (r *renderer) showText(gs *gstate, raw []byte) error {
 				return err
 			}
 		}
-		tx := gs.fontSize*f.w0(code) + gs.charSp
-		if code == ' ' {
-			// Word spacing applies to single-byte code 32 (9.3.3).
-			tx += gs.wordSp
-		}
-		gs.tm = content.Matrix{1, 0, 0, 1, tx * gs.hscale, 0}.Mul(gs.tm)
+		// Word spacing applies to single-byte code 32 (9.3.3).
+		advance(f.w0(code), code == ' ')
 	}
 	return nil
 }

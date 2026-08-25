@@ -470,7 +470,7 @@ func TestCIDKeyedCFFTextAgreesWithPdftoppm(t *testing.T) {
 			return Font{}, false
 		}
 		return Font{Program: oracleCIDCFF(), Type0: true, DW: 1000,
-			W: map[uint32]float64{1: 600, 2: 700, 3: 550}}, true
+			W: map[uint16]float64{1: 600, 2: 700, 3: 550}}, true
 	}
 	box := content.Box{URX: 200, URY: 200}
 	got, err := Page(context.Background(), []byte(cidTextOracleContent), box, 1, nil, fonts)

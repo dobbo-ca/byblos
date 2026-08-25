@@ -435,7 +435,11 @@ func parseCFF(p []byte) *cffProgram {
 			return nil
 		}
 		fds, _, ok := cffIndex(p, fdaOff)
-		if !ok || len(fds) == 0 {
+		// 256 is sfnt's maxNumFontDicts: Parse refuses a bigger FDArray, so
+		// refusing here matches it AND bounds this loop's own allocations --
+		// without the cap a tiny file declaring 65535 font DICTs makes the
+		// gate materialise numFD x numSubrs slice headers before any budget.
+		if !ok || len(fds) == 0 || len(fds) > 256 {
 			return nil
 		}
 		for _, fd := range fds {
@@ -506,8 +510,14 @@ func cffPrivateSubrs(p []byte, dict map[int][]float64) ([][]byte, bool) {
 		return nil, false
 	}
 	size, off := v[0], v[1]
+	if size == 0 {
+		// sfnt's parsePrivateDICT skips a zero-length DICT without touching
+		// the offset, and an unparsed DICT can declare no Subrs.
+		return nil, true
+	}
 	if size != math.Trunc(size) || off != math.Trunc(off) ||
-		size < 0 || off < 0 || off+size > float64(len(p)) {
+		size < 0 || off <= 0 || off+size > float64(len(p)) {
+		// off <= 0: sfnt refuses a non-empty Private at offset zero.
 		return nil, false
 	}
 	priv, ok := cffDict(p[int(off):int(off+size)])
@@ -527,7 +537,7 @@ func cffPrivateSubrs(p []byte, dict map[int][]float64) ([][]byte, bool) {
 		return nil, false
 	}
 	subrs, _, ok := cffIndex(p, int(off)+int(s[0]))
-	if !ok {
+	if !ok || len(subrs) > 40000 { // sfnt's maxNumSubroutines; Parse refuses more
 		return nil, false
 	}
 	return subrs, true

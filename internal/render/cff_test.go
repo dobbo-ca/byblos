@@ -492,7 +492,7 @@ func cidSquareFont() Font {
 			fdSelect: fdSelect3(2, [2]int{0, 0}, [2]int{1, 1}),
 		}),
 		Type0: true,
-		W:     map[uint32]float64{7: 600},
+		W:     map[uint16]float64{7: 600},
 	}
 }
 
@@ -561,6 +561,72 @@ func TestType0IdentityDecoding(t *testing.T) {
 		}
 		assertExactPixels(t, img, 100, 100, []rect{{30, 40, 40, 50}})
 	})
+	t.Run("dw-500-halves-the-unmapped-advance", func(t *testing.T) {
+		// A descendant with /DW 500 (half-width) must advance an unmapped
+		// CID by 500, not the 1000 default: square at 20, not 30.
+		f := cidSquareFont()
+		f.DW = 500
+		img, err := Page(context.Background(), show("00090007"), box, 1, nil, fontsFor(f))
+		if err != nil {
+			t.Fatalf("Page: %v", err)
+		}
+		assertExactPixels(t, img, 100, 100, []rect{{20, 40, 30, 50}})
+	})
+}
+
+// TestCFFFDSelectUnsortedFormat3MatchesSfnt pins cffFDSelect's reason to
+// exist: it mirrors sfnt's fdSelect.lookup, which bisects the ranges in table
+// order WITHOUT checking they are sorted. On this deliberately unsorted table
+// ({first, fd}: {0,0} {40,1} {10,2} {60,3}, sentinel 100) the bisection lands
+// on FD 2 for gids 20 and 39 where a first-match linear scan would report FD
+// 0 -- so a "simplified" validating or scanning rewrite diverges right here,
+// and the gate would walk different local subrs than sfnt executes.
+func TestCFFFDSelectUnsortedFormat3MatchesSfnt(t *testing.T) {
+	p := append([]byte{0xff}, fdSelect3(100, [2]int{0, 0}, [2]int{40, 1}, [2]int{10, 2}, [2]int{60, 3})...)
+	sel := cffFDSelect(p, 1, 100, 4)
+	if sel == nil {
+		t.Fatal("a well-formed (if unsorted) format-3 FDSelect was refused")
+	}
+	for _, tc := range []struct{ gid, fd int }{
+		{0, 0}, {5, 0}, {20, 2}, {39, 2}, {45, 2}, {70, 3}, {99, 3},
+	} {
+		if got := sel[tc.gid]; got != int16(tc.fd) {
+			t.Errorf("gid %d: fd = %d, want %d (sfnt's bisection order)", tc.gid, got, tc.fd)
+		}
+	}
+}
+
+// TestHostileCIDCFFCountsCappedLikeSfnt: sfnt.Parse refuses an FDArray over
+// maxNumFontDicts (256) entries and a Subrs INDEX over maxNumSubroutines
+// (40000), so the gate must refuse them BEFORE its own per-FD parse -- a tiny
+// file declaring 65535 FDs whose font DICTs share one 65535-entry Subrs INDEX
+// would otherwise cost numFD x numSubrs slice headers (gigabytes) with no
+// budget in sight. One at each cap exactly stays admitted.
+func TestHostileCIDCFFCountsCappedLikeSfnt(t *testing.T) {
+	cid := func(nFD, nSubrs int) []byte {
+		fdSubrs := make([][][]byte, nFD)
+		if nSubrs > 0 {
+			fdSubrs[0] = make([][]byte, nSubrs) // zero-length subrs: tiny file
+		}
+		return buildCFF(cffOpts{
+			charstrings: [][]byte{t2cs("endchar"), t2cs("endchar")},
+			sids:        []uint16{7},
+			fdSubrs:     fdSubrs,
+			fdSelect:    fdSelect3(2, [2]int{0, 0}),
+		})
+	}
+	if otf, _, _ := cffToSFNT(cid(257, 0)); otf != nil {
+		t.Fatal("a 257-entry FDArray (past sfnt's maxNumFontDicts) was not refused")
+	}
+	if otf, _, _ := cffToSFNT(cid(256, 0)); otf == nil {
+		t.Fatal("a 256-entry FDArray (sfnt's cap exactly) must be admitted")
+	}
+	if otf, _, _ := cffToSFNT(cid(1, 40001)); otf != nil {
+		t.Fatal("a 40001-entry Subrs INDEX (past sfnt's maxNumSubroutines) was not refused")
+	}
+	if otf, _, _ := cffToSFNT(cid(1, 40000)); otf == nil {
+		t.Fatal("a 40000-entry Subrs INDEX (sfnt's cap exactly) must be admitted")
+	}
 }
 
 // TestType0OverPlainCFFNeverInks: a Type0 dict over a program with no CID map
@@ -596,7 +662,7 @@ func TestHostileCIDCFFSubrBombBehindFDSelect(t *testing.T) {
 		t.Fatal("the subr work bomb behind FDSelect was not refused before sfnt.Parse")
 	}
 	// Through the seam: widths-only, the page still renders.
-	f := Font{Program: bomb, Type0: true, W: map[uint32]float64{7: 600}}
+	f := Font{Program: bomb, Type0: true, W: map[uint16]float64{7: 600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <0007> Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
 	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
@@ -653,7 +719,7 @@ func TestCIDZeroSegmentGlyphChargesFillWork(t *testing.T) {
 			fdSelect:    fdSelect3(2, [2]int{0, 0}),
 		}),
 		Type0: true,
-		W:     map[uint32]float64{7: 600},
+		W:     map[uint16]float64{7: 600},
 	}
 	if otf, _, _ := cffToSFNT(f.Program); otf == nil {
 		t.Fatal("the hstem sled must be ADMITTED (one show is within budget); the point is the per-show charge")
