@@ -188,7 +188,7 @@ func TestType1ProgramTakesTheType1Path(t *testing.T) {
 	if parseGlyfIndex(raw) != nil {
 		t.Fatal("Type 1 parsed as an indexable TrueType; the fixture does not exercise the 4e path")
 	}
-	if otf, _ := cffToSFNT(raw); otf != nil {
+	if otf, _, _ := cffToSFNT(raw); otf != nil {
 		t.Fatal("Type 1 parsed as a bare CFF; the fixture does not exercise the 4e path")
 	}
 	f := parseType1(raw)

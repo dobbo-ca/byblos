@@ -96,8 +96,16 @@ type cffOpts struct {
 	encoding    []byte   // raw Encoding table; nil = predefined standard
 	gsubrs      [][]byte
 	lsubrs      [][]byte
-	topExtra    []byte // extra Top DICT bytes, e.g. a CID ROS
-	private     []byte // raw Private DICT override (else derived from lsubrs)
+	strings     [][]byte // String INDEX entries (SIDs 391..)
+	topExtra    []byte   // extra Top DICT bytes, e.g. a CID ROS
+	private     []byte   // raw Private DICT override (else derived from lsubrs)
+	// CID-keyed (byb-8b9.8): a non-nil fdSubrs makes the font CID-keyed --
+	// buildCFF emits a ROS (SIDs 391/392, "Adobe"/"Identity" when strings
+	// supplies them), an FDArray of one font DICT per entry (each with a
+	// Private whose Subrs are that entry, when non-nil), the raw fdSelect
+	// table, and NO top-level Private; sids are then CIDs.
+	fdSubrs  [][][]byte
+	fdSelect []byte
 }
 
 // buildCFF assembles a bare CFF (the exact bytes a /FontFile3 /Subtype
@@ -105,7 +113,7 @@ type cffOpts struct {
 func buildCFF(o cffOpts) []byte {
 	header := []byte{1, 0, 4, 2}
 	name := cffIndexBytes([][]byte{[]byte("BbOracle")})
-	strs := cffIndexBytes(nil)
+	strs := cffIndexBytes(o.strings)
 	gsubrs := cffIndexBytes(o.gsubrs)
 	charStrings := cffIndexBytes(o.charstrings)
 	lsubrs := []byte(nil)
@@ -126,7 +134,12 @@ func buildCFF(o cffOpts) []byte {
 		}
 	}
 
-	dictLen := 6 + 11 + len(o.topExtra) // CharStrings + Private (+ extras)
+	dictLen := 6 + len(o.topExtra) // CharStrings (+ extras)
+	if o.fdSubrs == nil {
+		dictLen += 11 // Private
+	} else {
+		dictLen += 17 + 7 + 7 // ROS + FDArray + FDSelect
+	}
 	if o.sids != nil {
 		dictLen += 6
 	}
@@ -138,6 +151,29 @@ func buildCFF(o cffOpts) []byte {
 	encodingOff := charsetOff + len(charset)
 	charStringsOff := encodingOff + len(o.encoding)
 	privateOff := charStringsOff + len(charStrings)
+	fdSelectOff := privateOff + len(private) + len(lsubrs)
+	fdArrayOff := fdSelectOff + len(o.fdSelect)
+
+	// FDArray: every font DICT is the fixed 11 bytes of a Private operand
+	// pair, so the INDEX length -- which the private offsets inside it depend
+	// on -- is known up front.
+	var fdArray, fdTail []byte
+	if o.fdSubrs != nil {
+		pos := fdArrayOff + 2 + 1 + 2*(len(o.fdSubrs)+1) + 11*len(o.fdSubrs)
+		var fontDicts [][]byte
+		for _, subs := range o.fdSubrs {
+			var priv, sub []byte
+			if subs != nil {
+				priv = append(cffDictInt(nil, 6), 19) // Subrs at 6 = len(priv)
+				sub = cffIndexBytes(subs)
+			}
+			fontDicts = append(fontDicts,
+				append(cffDictInt(cffDictInt(nil, int32(len(priv))), int32(pos)), 18))
+			fdTail = append(append(fdTail, priv...), sub...)
+			pos += len(priv) + len(sub)
+		}
+		fdArray = cffIndexBytes(fontDicts)
+	}
 
 	var topDict []byte
 	if o.sids != nil {
@@ -147,8 +183,14 @@ func buildCFF(o cffOpts) []byte {
 		topDict = append(cffDictInt(topDict, int32(encodingOff)), 16)
 	}
 	topDict = append(cffDictInt(topDict, int32(charStringsOff)), 17)
-	topDict = cffDictInt(topDict, int32(len(private)))
-	topDict = append(cffDictInt(topDict, int32(privateOff)), 18)
+	if o.fdSubrs == nil {
+		topDict = cffDictInt(topDict, int32(len(private)))
+		topDict = append(cffDictInt(topDict, int32(privateOff)), 18)
+	} else {
+		topDict = append(cffDictInt(cffDictInt(cffDictInt(topDict, 391), 392), 0), 12, 30) // ROS
+		topDict = append(cffDictInt(topDict, int32(fdArrayOff)), 12, 36)
+		topDict = append(cffDictInt(topDict, int32(fdSelectOff)), 12, 37)
+	}
 	topDict = append(topDict, o.topExtra...)
 	topIndex := cffIndexBytes([][]byte{topDict})
 	if len(topIndex) != topIndexLen {
@@ -166,7 +208,20 @@ func buildCFF(o cffOpts) []byte {
 	b = append(b, charStrings...)
 	b = append(b, private...)
 	b = append(b, lsubrs...)
+	b = append(b, o.fdSelect...)
+	b = append(b, fdArray...)
+	b = append(b, fdTail...)
 	return b
+}
+
+// fdSelect3 builds a format-3 FDSelect from {firstGID, fd} ranges and the
+// numGlyphs sentinel.
+func fdSelect3(numGlyphs int, ranges ...[2]int) []byte {
+	b := tbe16([]byte{3}, uint16(len(ranges)))
+	for _, r := range ranges {
+		b = append(tbe16(b, uint16(r[0])), byte(r[1]))
+	}
+	return tbe16(b, uint16(numGlyphs))
 }
 
 // cffSquare is the 500x500 axis-aligned square at the origin as a charstring
@@ -194,7 +249,7 @@ func TestType1CProgramTakesTheCFFPath(t *testing.T) {
 	if parseGlyfIndex(p) != nil {
 		t.Fatal("bare CFF parsed as an indexable TrueType; the fixture does not exercise the 4d path")
 	}
-	if otf, _ := cffToSFNT(p); otf == nil {
+	if otf, _, _ := cffToSFNT(p); otf == nil {
 		t.Fatal("cffToSFNT refused the minimal well-formed bare CFF")
 	}
 }
@@ -365,7 +420,7 @@ func TestHostileCFFSubrBombRefusedBeforeParse(t *testing.T) {
 		sids:        []uint16{34},
 		lsubrs:      bombSubrs(),
 	})
-	if otf, _ := cffToSFNT(bomb); otf != nil {
+	if otf, _, _ := cffToSFNT(bomb); otf != nil {
 		t.Fatal("the subr work bomb was not refused before sfnt.Parse")
 	}
 	// Through the seam: widths-only, the page still renders.
@@ -392,7 +447,7 @@ func TestHostileCFFFixedEncodedCallStillGated(t *testing.T) {
 		sids:        []uint16{34},
 		lsubrs:      bombSubrs(),
 	})
-	if otf, _ := cffToSFNT(bomb); otf != nil {
+	if otf, _, _ := cffToSFNT(bomb); otf != nil {
 		t.Fatal("the fixed-encoded entry call hid the subr bomb from the work gate")
 	}
 }
@@ -410,7 +465,7 @@ func TestHostileCFFSelfRecursionCheap(t *testing.T) {
 		FirstChar: 'A',
 		Widths:    []float64{600},
 	}
-	if otf, _ := cffToSFNT(f.Program); otf == nil {
+	if otf, _, _ := cffToSFNT(f.Program); otf == nil {
 		t.Fatal("depth-limited self-recursion is cheap under sfnt's own wall; the gate must not refuse it")
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
@@ -422,36 +477,299 @@ func TestHostileCFFSelfRecursionCheap(t *testing.T) {
 	assertExactPixels(t, img, 100, 100, []rect{{30, 60, 40, 70}})
 }
 
-// TestCFFCIDKeyedRefused: a CID-keyed CFF (Top DICT ROS) is stage-4d-deferred
-// (byb-8b9.8): its codes arrive through a Type0 CMap the showText seam cannot
-// carry yet. It must degrade to widths-only, not misrender via a bogus
-// code-to-GID guess.
-func TestCFFCIDKeyedRefused(t *testing.T) {
-	// ROS: SID SID number, operator 12 30.
-	ros := append(cffDictInt(cffDictInt(cffDictInt(nil, 391), 392), 0), 12, 30)
-	p := buildCFF(cffOpts{
-		charstrings: [][]byte{t2cs("endchar"), cffSquare()},
-		sids:        []uint16{34},
-		topExtra:    ros,
+// cidSquareFont is the byb-8b9.8 fixture: a Type0/CIDFontType0 whose CID 7
+// (GID 1 through the charset-as-CID-map) is the 500x500 square -- drawn
+// entirely by FD 1's local subr, while FD 0 has no subrs at all, so a
+// renderer or gate that resolves the WRONG font DICT loses the outline.
+func cidSquareFont() Font {
+	return Font{
+		Program: buildCFF(cffOpts{
+			charstrings: [][]byte{t2cs("endchar"), t2cs(-107, "callsubr", "endchar")},
+			sids:        []uint16{7}, // charset: GID 1 -> CID 7
+			strings:     [][]byte{[]byte("Adobe"), []byte("Identity")},
+			fdSubrs: [][][]byte{nil, {t2cs(0, 0, "rmoveto",
+				500, "hlineto", 500, "vlineto", -500, "hlineto", "return")}},
+			fdSelect: fdSelect3(2, [2]int{0, 0}, [2]int{1, 1}),
+		}),
+		Type0: true,
+		W:     map[uint16]float64{7: 600},
+	}
+}
+
+// TestCFFCIDKeyedRenders is byb-8b9.8's flip of the 4d-era refusal test: a
+// CID-keyed CFF (Top DICT ROS, FDArray/FDSelect) is accepted down the CFF
+// path -- pinned the same way TestType1CProgramTakesTheCFFPath pins 4d --
+// and a Type0 show of 2-byte Identity codes inks the CID's glyph exactly
+// where the single-byte square lands in the 4d tests.
+func TestCFFCIDKeyedRenders(t *testing.T) {
+	f := cidSquareFont()
+	if parseGlyfIndex(f.Program) != nil {
+		t.Fatal("CID-keyed CFF parsed as an indexable TrueType; the fixture does not exercise the CFF path")
+	}
+	otf, _, cid2gid := cffToSFNT(f.Program)
+	if otf == nil {
+		t.Fatal("cffToSFNT refused the minimal well-formed CID-keyed CFF")
+	}
+	if cid2gid[7] != 1 {
+		t.Fatalf("charset-as-CID-map: cid2gid = %v, want 7->1", cid2gid)
+	}
+	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <0007> Tj ET"
+	box := content.Box{URX: 100, URY: 100}
+	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	assertExactPixels(t, img, 100, 100, []rect{{10, 40, 20, 50}})
+}
+
+// TestType0IdentityDecoding pins the 2-byte seam arithmetic: /W drives the
+// advance between two shows of CID 7 (600 thousandths at 20pt = 12px), a CID
+// with NO glyph (9, absent from the charset) still advances by /DW's spec
+// default 1000, word spacing does NOT apply to the 2-byte code 0x0020, and a
+// dangling odd byte is dropped, not read as half a code.
+func TestType0IdentityDecoding(t *testing.T) {
+	box := content.Box{URX: 100, URY: 100}
+	show := func(hex string) []byte {
+		return []byte("BT /F1 20 Tf 1 0 0 1 10 50 Tm <" + hex + "> Tj ET")
+	}
+	f := cidSquareFont()
+	for _, tc := range []struct {
+		name string
+		src  []byte
+		want []rect
+	}{
+		{"w-advance", show("00070007"), []rect{{10, 40, 20, 50}, {22, 40, 32, 50}}},
+		{"dw-default-for-unmapped-cid", show("00090007"), []rect{{30, 40, 40, 50}}},
+		{"trailing-odd-byte-dropped", show("000700"), []rect{{10, 40, 20, 50}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			img, err := Page(context.Background(), tc.src, box, 1, nil, fontsFor(f))
+			if err != nil {
+				t.Fatalf("Page: %v", err)
+			}
+			assertExactPixels(t, img, 100, 100, tc.want)
+		})
+	}
+	t.Run("word-spacing-never-applies", func(t *testing.T) {
+		// 9.3.3: word spacing applies to the SINGLE-byte code 32 only. Code
+		// 0x0020 (CID 32, no glyph) must advance by DW alone, putting the
+		// following square at 30, not 30+40.
+		src := []byte("BT /F1 20 Tf 40 Tw 1 0 0 1 10 50 Tm <00200007> Tj ET")
+		img, err := Page(context.Background(), src, box, 1, nil, fontsFor(cidSquareFont()))
+		if err != nil {
+			t.Fatalf("Page: %v", err)
+		}
+		assertExactPixels(t, img, 100, 100, []rect{{30, 40, 40, 50}})
 	})
-	if otf, _ := cffToSFNT(p); otf != nil {
-		t.Fatal("CID-keyed CFF must be refused until byb-8b9.8 carries its CMap")
+	t.Run("dw-500-halves-the-unmapped-advance", func(t *testing.T) {
+		// A descendant with /DW 500 (half-width) must advance an unmapped
+		// CID by 500, not the 1000 default: square at 20, not 30.
+		f := cidSquareFont()
+		f.DW = 500
+		img, err := Page(context.Background(), show("00090007"), box, 1, nil, fontsFor(f))
+		if err != nil {
+			t.Fatalf("Page: %v", err)
+		}
+		assertExactPixels(t, img, 100, 100, []rect{{20, 40, 30, 50}})
+	})
+}
+
+// TestCFFFDSelectUnsortedFormat3MatchesSfnt pins cffFDSelect's reason to
+// exist: it mirrors sfnt's fdSelect.lookup, which bisects the ranges in table
+// order WITHOUT checking they are sorted. On this deliberately unsorted table
+// ({first, fd}: {0,0} {40,1} {10,2} {60,3}, sentinel 100) the bisection lands
+// on FD 2 for gids 20 and 39 where a first-match linear scan would report FD
+// 0 -- so a "simplified" validating or scanning rewrite diverges right here,
+// and the gate would walk different local subrs than sfnt executes.
+func TestCFFFDSelectUnsortedFormat3MatchesSfnt(t *testing.T) {
+	p := append([]byte{0xff}, fdSelect3(100, [2]int{0, 0}, [2]int{40, 1}, [2]int{10, 2}, [2]int{60, 3})...)
+	sel := cffFDSelect(p, 1, 100, 4)
+	if sel == nil {
+		t.Fatal("a well-formed (if unsorted) format-3 FDSelect was refused")
+	}
+	for _, tc := range []struct{ gid, fd int }{
+		{0, 0}, {5, 0}, {20, 2}, {39, 2}, {45, 2}, {70, 3}, {99, 3},
+	} {
+		if got := sel[tc.gid]; got != int16(tc.fd) {
+			t.Errorf("gid %d: fd = %d, want %d (sfnt's bisection order)", tc.gid, got, tc.fd)
+		}
+	}
+}
+
+// TestHostileCIDCFFCountsCappedLikeSfnt: sfnt.Parse refuses an FDArray over
+// maxNumFontDicts (256) entries and a Subrs INDEX over maxNumSubroutines
+// (40000), so the gate must refuse them BEFORE its own per-FD parse -- a tiny
+// file declaring 65535 FDs whose font DICTs share one 65535-entry Subrs INDEX
+// would otherwise cost numFD x numSubrs slice headers (gigabytes) with no
+// budget in sight. One at each cap exactly stays admitted.
+func TestHostileCIDCFFCountsCappedLikeSfnt(t *testing.T) {
+	cid := func(nFD, nSubrs int) []byte {
+		fdSubrs := make([][][]byte, nFD)
+		if nSubrs > 0 {
+			fdSubrs[0] = make([][]byte, nSubrs) // zero-length subrs: tiny file
+		}
+		return buildCFF(cffOpts{
+			charstrings: [][]byte{t2cs("endchar"), t2cs("endchar")},
+			sids:        []uint16{7},
+			fdSubrs:     fdSubrs,
+			fdSelect:    fdSelect3(2, [2]int{0, 0}),
+		})
+	}
+	if otf, _, _ := cffToSFNT(cid(257, 0)); otf != nil {
+		t.Fatal("a 257-entry FDArray (past sfnt's maxNumFontDicts) was not refused")
+	}
+	if otf, _, _ := cffToSFNT(cid(256, 0)); otf == nil {
+		t.Fatal("a 256-entry FDArray (sfnt's cap exactly) must be admitted")
+	}
+	if otf, _, _ := cffToSFNT(cid(1, 40001)); otf != nil {
+		t.Fatal("a 40001-entry Subrs INDEX (past sfnt's maxNumSubroutines) was not refused")
+	}
+	if otf, _, _ := cffToSFNT(cid(1, 40000)); otf == nil {
+		t.Fatal("a 40000-entry Subrs INDEX (sfnt's cap exactly) must be admitted")
+	}
+}
+
+// TestType0OverPlainCFFNeverInks: a Type0 dict over a program with no CID map
+// (here 4d's plain Type1C) must advance by DW but ink NOTHING -- its glyphs
+// were work-gated for the 256 single-byte codes only, so letting 2-byte codes
+// index them would reach charstrings the gate never walked.
+func TestType0OverPlainCFFNeverInks(t *testing.T) {
+	f := cffSquareFont()
+	f.Type0, f.FirstChar, f.Widths = true, 0, nil
+	// 0x0041: were codes ridden through the single-byte path (or CID read as
+	// GID), 'A' would ink the square at 10..20.
+	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <0041> Tj ET 30 30 10 10 re f"
+	box := content.Box{URX: 100, URY: 100}
+	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	assertExactPixels(t, img, 100, 100, []rect{{30, 60, 40, 70}})
+}
+
+// TestHostileCIDCFFSubrBombBehindFDSelect: the 4d work bomb, reachable ONLY
+// through FD 1 of a two-FD FDArray while FD 0 is benign. A gate that walks
+// the glyph with the wrong font DICT's subrs -- or with the single-Private
+// path's -- admits the bomb and hands sfnt the CPU-years LoadGlyph.
+func TestHostileCIDCFFSubrBombBehindFDSelect(t *testing.T) {
+	bomb := buildCFF(cffOpts{
+		charstrings: [][]byte{t2cs("endchar"), t2cs(-107, "callsubr", "endchar")},
+		sids:        []uint16{7},
+		fdSubrs:     [][][]byte{{t2cs("return")}, bombSubrs()},
+		fdSelect:    fdSelect3(2, [2]int{0, 0}, [2]int{1, 1}),
+	})
+	if otf, _, _ := cffToSFNT(bomb); otf != nil {
+		t.Fatal("the subr work bomb behind FDSelect was not refused before sfnt.Parse")
+	}
+	// Through the seam: widths-only, the page still renders.
+	f := Font{Program: bomb, Type0: true, W: map[uint16]float64{7: 600}}
+	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <0007> Tj ET 30 30 10 10 re f"
+	box := content.Box{URX: 100, URY: 100}
+	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	assertExactPixels(t, img, 100, 100, []rect{{30, 60, 40, 70}})
+}
+
+// TestHostileCIDCFFTotalGateBudget: in a CID font EVERY glyph is reachable
+// (any 2-byte code is a CID), so per-glyph budgets alone would let glyph
+// count multiply the gate's own walking cost. The whole-font walk must stop
+// at 256 x maxCharstringWork -- the 4d gate's ceiling -- while a font under
+// that total is admitted, so the cap is the total and nothing else.
+func TestHostileCIDCFFTotalGateBudget(t *testing.T) {
+	defer func(old int64) { maxCharstringWork = old }(maxCharstringWork)
+	maxCharstringWork = 100
+
+	font := func(n int) []byte {
+		sled := append(bytes.Repeat([]byte{1}, 99), t2cs("endchar")...) // 100 units, at the per-glyph cap
+		cs, sids := [][]byte{t2cs("endchar")}, []uint16(nil)
+		for i := 1; i <= n; i++ {
+			cs, sids = append(cs, sled), append(sids, uint16(i))
+		}
+		return buildCFF(cffOpts{
+			charstrings: cs,
+			sids:        sids,
+			fdSubrs:     [][][]byte{nil},
+			fdSelect:    fdSelect3(n+1, [2]int{0, 0}),
+		})
+	}
+	if otf, _, _ := cffToSFNT(font(300)); otf != nil { // 300 x 100 > 25600
+		t.Fatal("30000 total walk units under a 25600 ceiling were not refused")
+	}
+	if otf, _, _ := cffToSFNT(font(200)); otf == nil { // 200 x 100 <= 25600
+		t.Fatal("a CID font within the total gate budget must be admitted")
+	}
+}
+
+// TestCIDZeroSegmentGlyphChargesFillWork is the CID twin of
+// TestCFFZeroSegmentGlyphChargesFillWork: an attacker's CID font gets the
+// same per-show charge, so re-showing a zero-segment hstem sled through
+// 2-byte codes trips maxFillWork instead of re-running the interpreter free.
+func TestCIDZeroSegmentGlyphChargesFillWork(t *testing.T) {
+	defer func(old int64) { maxFillWork = old }(maxFillWork)
+	maxFillWork = 100_000
+
+	sled := append(bytes.Repeat([]byte{1}, 60_000), t2cs("return")...)
+	f := Font{
+		Program: buildCFF(cffOpts{
+			charstrings: [][]byte{t2cs("endchar"), t2cs(-107, "callsubr", "endchar")},
+			sids:        []uint16{7},
+			fdSubrs:     [][][]byte{{sled}},
+			fdSelect:    fdSelect3(2, [2]int{0, 0}),
+		}),
+		Type0: true,
+		W:     map[uint16]float64{7: 600},
+	}
+	if otf, _, _ := cffToSFNT(f.Program); otf == nil {
+		t.Fatal("the hstem sled must be ADMITTED (one show is within budget); the point is the per-show charge")
+	}
+	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <00070007> Tj ET"
+	box := content.Box{URX: 100, URY: 100}
+	_, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	if err == nil || !strings.Contains(err.Error(), "fill work exceeds") {
+		t.Fatalf("two shows of a ~60000-work zero-segment glyph under a 100000 budget must trip fill work, got %v", err)
 	}
 }
 
 // TestCFFMalformedNoPanic feeds every truncation and a corruption sweep of a
-// well-formed CFF through the wrapper: refuse or accept, but never panic and
-// never read out of bounds.
+// well-formed CFF -- plain and CID-keyed -- through the wrapper: refuse or
+// accept, but never panic and never read out of bounds.
 func TestCFFMalformedNoPanic(t *testing.T) {
-	good := cffSquareFont().Program
-	for i := 0; i <= len(good); i++ {
-		cffToSFNT(good[:i:i])
+	for _, good := range [][]byte{cffSquareFont().Program, cidSquareFont().Program} {
+		for i := 0; i <= len(good); i++ {
+			cffToSFNT(good[:i:i])
+		}
+		for i := 0; i < len(good); i++ {
+			bad := append([]byte(nil), good...)
+			bad[i] ^= 0xff
+			cffToSFNT(bad)
+		}
 	}
-	for i := 0; i < len(good); i++ {
-		bad := append([]byte(nil), good...)
-		bad[i] ^= 0xff
-		cffToSFNT(bad)
+}
+
+// TestCIDFDPastFDArraySkipsCleanly: an FDSelect entry pointing past the
+// FDArray is exactly what sfnt refuses at that glyph's first callsubr, so
+// the font is ADMITTED, the glyph inks nothing, and the rest of the page
+// still renders -- no panic from indexing fdSubrs with a hostile FD.
+func TestCIDFDPastFDArraySkipsCleanly(t *testing.T) {
+	f := cidSquareFont()
+	f.Program = buildCFF(cffOpts{
+		charstrings: [][]byte{t2cs("endchar"), t2cs(-107, "callsubr", "endchar")},
+		sids:        []uint16{7},
+		fdSubrs:     [][][]byte{nil, {t2cs(0, 0, "rmoveto", 500, "hlineto", 500, "vlineto", -500, "hlineto", "return")}},
+		fdSelect:    fdSelect3(2, [2]int{0, 0}, [2]int{1, 9}),
+	})
+	if otf, _, _ := cffToSFNT(f.Program); otf == nil {
+		t.Fatal("an out-of-range FD refuses only its own glyph's subr calls; the font must be admitted")
 	}
+	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <0007> Tj ET 30 30 10 10 re f"
+	box := content.Box{URX: 100, URY: 100}
+	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	assertExactPixels(t, img, 100, 100, []rect{{30, 60, 40, 70}})
 }
 
 // TestCFFWorkGateBudgetTrips: with the per-glyph charstring budget lowered
@@ -462,7 +780,7 @@ func TestCFFWorkGateBudgetTrips(t *testing.T) {
 	maxCharstringWork = 3
 
 	f := cffSquareFont()
-	if otf, _ := cffToSFNT(f.Program); otf != nil {
+	if otf, _, _ := cffToSFNT(f.Program); otf != nil {
 		t.Fatal("lowered charstring budget did not refuse the font; the gate is dead")
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
@@ -644,7 +962,7 @@ func TestCFFSubrsOffsetOverflowRefused(t *testing.T) {
 		sids:        []uint16{34},
 		private:     private,
 	})
-	if otf, _ := cffToSFNT(p); otf != nil {
+	if otf, _, _ := cffToSFNT(p); otf != nil {
 		t.Fatal("a Subrs offset past the end of the program must refuse")
 	}
 }
@@ -671,7 +989,7 @@ func TestCFFZeroSegmentGlyphChargesFillWork(t *testing.T) {
 		FirstChar: 'A',
 		Widths:    []float64{600},
 	}
-	if otf, _ := cffToSFNT(f.Program); otf == nil {
+	if otf, _, _ := cffToSFNT(f.Program); otf == nil {
 		t.Fatal("the hstem sled must be ADMITTED (one show is within budget); the point is the per-show charge")
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (AA) Tj ET"
