@@ -9,11 +9,20 @@
 // WHY DUPLICATED RATHER THAN CALLED: classify and its helpers
 // (paintsHidden, mrcLayers, opaqueCover, clipNarrowed, covers, contains,
 // marks) are unexported in package byblos. This file is a deliberate,
-// line-for-line port of extract.go's logic as of commit 866494a, kept
+// line-for-line port of extract.go's logic, re-synced as of byb-ntd, kept
 // beside the pinned unit tests in census_test.go so a future drift between
 // the two is a test failure here, not a silent mismatch between two lanes
 // measuring different predicates (see the project's own "two lanes can
 // both be right" lesson).
+//
+// byb-ntd is why that claim is only true as of this commit and not before
+// it: the port had already drifted from extract.go -- inkHidden here lacked
+// inkCTM and the byb-2mt three-way rotation guard, and classify here lacked
+// the quad-vs-quad under-layer check -- for an unmeasured stretch, and
+// census_test.go carried zero tests of classify, paintsHidden or inkHidden
+// to catch it. TestPaintsHiddenRotatedCoverExcludesUnrotatedInk and
+// TestClassifyRotatedTopExcludesUnderLayerOutsideItsTrueQuad below are what
+// make "a future drift is a test failure here" true going forward.
 package main
 
 import (
@@ -124,12 +133,23 @@ func classify(page pdfdoc.Rect, s *content.Scan, imageInfo func(int) (pdfdoc.Ima
 		if !covers(s.Images[top].Box, page) {
 			return 0, "multiple-images"
 		}
+		topCTM := s.Images[top].CTM
 		if !opaqueCover(s.Images[top], imageInfo) {
 			return 0, "transparent-overlay"
 		}
 		for _, under := range s.Images[:top] {
 			if !contains(s.Images[top].Box, under.Box) {
 				return 0, "multiple-images"
+			}
+			// Quad-vs-quad under-layer check, ported from extract.go:903-907
+			// (byb-ntd): contains above compares AXIS-ALIGNED boxes, which
+			// over-forgives a rotated top layer the same way covers() would if
+			// left unguarded -- see extract.go:872-884. Skipped for an
+			// axis-aligned top, where Box already IS the true shape.
+			if !axisAligned(topCTM) {
+				if !topCTM.UnitSquareQuad().ContainsQuad(under.CTM.UnitSquareQuad(), coverTolerancePt) {
+					return 0, "multiple-images"
+				}
 			}
 		}
 	}
@@ -198,7 +218,29 @@ func mrcLayers(page pdfdoc.Rect, imgs []content.Placement, imageInfo func(int) (
 	return ""
 }
 
+// axisAligned is extract.go's axisAligned, ported (byb-ntd).
+func axisAligned(m content.Matrix) bool {
+	return m[1] == 0 && m[2] == 0
+}
+
+// sameRotation is extract.go's sameRotation, ported (byb-ntd).
+func sameRotation(a, b content.Matrix) bool {
+	an, bn := math.Hypot(a[0], a[1]), math.Hypot(b[0], b[1])
+	if an == 0 || bn == 0 {
+		return false
+	}
+	cross := a[0]*b[1] - a[1]*b[0]
+	dot := a[0]*b[0] + a[1]*b[1]
+	return dot > 0 && math.Abs(cross)/(an*bn) < 1e-6
+}
+
 func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
+	// covers is opaqueCover per placement, answered once, mirroring
+	// extract.go's paintsHidden (byb-kpi).
+	covers := make([]bool, len(imgs))
+	for i := range imgs {
+		covers[i] = opaqueCover(imgs[i], imageInfo)
+	}
 	for _, p := range paints {
 		ink, marks := p.Ink()
 		if !marks {
@@ -208,23 +250,31 @@ func paintsHidden(imgs []content.Placement, paints []content.Paint, imageInfo fu
 		if p.Strokes() {
 			tol = paintTolerancePt
 		}
-		if !inkHidden(ink, p.Index, tol, imgs, imageInfo) {
+		if !inkHidden(ink, p.CTM, p.Index, tol, imgs, covers) {
 			return false
 		}
 	}
 	return true
 }
 
-func inkHidden(ink content.Box, order int, tol float64, imgs []content.Placement, imageInfo func(int) (pdfdoc.ImageInfo, bool)) bool {
-	for _, img := range imgs {
-		if img.Index < order || !opaqueCover(img, imageInfo) {
+// inkHidden is extract.go's inkHidden, ported (byb-ntd): the census's own
+// copy dropped inkCTM and the AABB-over-forgives-rotation guard, so a
+// rotated cover with unrotated ink underneath -- an under-quad triangle the
+// AABB test does not see -- reported hidden here and not hidden in
+// extract.go. See extract.go:1188-1231 for the full argument.
+func inkHidden(ink content.Box, inkCTM content.Matrix, order int, tol float64, imgs []content.Placement, covers []bool) bool {
+	for i := range imgs {
+		img := &imgs[i]
+		if img.Index < order || !covers[i] {
 			continue
 		}
 		if ink.LLX >= img.Box.LLX-tol &&
 			ink.LLY >= img.Box.LLY-tol &&
 			ink.URX <= img.Box.URX+tol &&
 			ink.URY <= img.Box.URY+tol {
-			return true
+			if axisAligned(img.CTM) || sameRotation(inkCTM, img.CTM) || img.CTM.UnitSquareQuad().ContainsBox(ink, tol) {
+				return true
+			}
 		}
 	}
 	return false

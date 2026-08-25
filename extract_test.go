@@ -1462,3 +1462,54 @@ func TestPaintsHiddenAnswersCoverOncePerPlacement(t *testing.T) {
 			calls, nImgs, nPaints, nImgs, nImgs*nPaints)
 	}
 }
+
+// TestClassifyRotatedTopExcludesUnderLayerOutsideItsTrueQuad pins byb-ntd's
+// SECOND named drift: extract.go's classify (extract.go:903-907) rejects an
+// under-layer whose axis-aligned Box sits inside the top layer's
+// axis-aligned Box but outside the top's TRUE (rotated) quadrilateral --
+// the same corner-triangle shape byb-2mt's inkHidden guard exists for, one
+// layer up the stack. contains() alone (AABB-vs-AABB) says the under-layer
+// is covered; only the quad-vs-quad check that follows it catches that the
+// under-layer's corner actually pokes outside the rotated top's real shape.
+func TestClassifyRotatedTopExcludesUnderLayerOutsideItsTrueQuad(t *testing.T) {
+	page := pdfdocRect(0, 0, 100, 100)
+	deg1 := 1.0 * math.Pi / 180
+	s := 101.0
+	topCTM := content.Matrix{s * math.Cos(deg1), s * math.Sin(deg1), -s * math.Sin(deg1), s * math.Cos(deg1), 0, 0}
+	top := content.Placement{Name: "Im2", ID: 2, CTM: topCTM, Box: topCTM.UnitSquareBox(), Opaque: true}
+	// under's AABB (-1.5,101.5)-(-0.5,102.5) sits inside top's AABB
+	// (-1.76,0)-(100.98,102.75) within coverTolerancePt, but at 1 degree of
+	// rotation top's TRUE quad cuts that corner off: content package's
+	// Quad.ContainsBox reports false for this exact box against topCTM's
+	// UnitSquareQuad (see internal/content tests for the same shape).
+	under := placement(1, contentBox(-1.5, 101.5, -0.5, 102.5), true)
+	scan := &contentScan{Images: layers(under, top)}
+
+	idx, reason := classify(page, scan, plainFacts)
+	if reason != "multiple-images" {
+		t.Errorf("classify() = (%d, %q), want (_, \"multiple-images\"); the "+
+			"under-layer's corner sits outside the rotated top's true quad, "+
+			"which only the quad-vs-quad check catches", idx, reason)
+	}
+}
+
+// TestPaintsHiddenRotatedCoverExcludesUnrotatedInk pins byb-ntd's repro: a
+// 45-degree-rotated opaque placement whose true quadrilateral does NOT reach
+// an axis-aligned fill's ink, even though the fill's ink sits inside the
+// placement's axis-aligned bounding box. The AABB test alone says hidden;
+// the byb-2mt three-way guard in inkHidden says not hidden, which is the
+// answer that matters here, because cmd/byblos-ctm-census carries a
+// hand-ported copy of this function that had drifted to the AABB-only
+// answer (census_test.go's TestPaintsHiddenRotatedCoverExcludesUnrotatedInk
+// pins the same fixture for that copy).
+func TestPaintsHiddenRotatedCoverExcludesUnrotatedInk(t *testing.T) {
+	rot := content.Matrix{70.710678118654755, 70.710678118654755, -70.710678118654755, 70.710678118654755, 0, 0}
+	imgs := []content.Placement{{ID: 1, CTM: rot, Box: rot.UnitSquareBox(), Opaque: true, Index: 2}}
+	paints := []content.Paint{{Op: "f", Box: content.Box{LLX: -70, LLY: 2, URX: -68, URY: 4}, CTM: content.Identity, Index: 1}}
+	info := func(int) (pdfdoc.ImageInfo, bool) { return pdfdoc.ImageInfo{BPC: 8}, true }
+
+	if got := paintsHidden(imgs, paints, info); got {
+		t.Errorf("paintsHidden = %v, want false; the ink's AABB sits inside the "+
+			"rotated placement's AABB but not inside its true quadrilateral", got)
+	}
+}
