@@ -280,6 +280,26 @@ func rgbColor(nums []float64) color.RGBA {
 	}
 }
 
+// cmykColor is the naive (1-c)(1-k) conversion, the same shape every viewer
+// uses without an ICC profile. ponytail: no colour management, so this is
+// wrong under a real CMYK profile (e.g. a press's black generation); accurate
+// conversion needs a profile this stage doesn't have and shouldn't grow one.
+func cmykColor(nums []float64) color.RGBA {
+	var v [4]float64
+	if len(nums) >= 4 {
+		for i := range v {
+			v[i] = clamp01(nums[len(nums)-4+i])
+		}
+	}
+	c, m, y, k := v[0], v[1], v[2], v[3]
+	return color.RGBA{
+		uint8(math.Round((1 - c) * (1 - k) * 255)),
+		uint8(math.Round((1 - m) * (1 - k) * 255)),
+		uint8(math.Round((1 - y) * (1 - k) * 255)),
+		255,
+	}
+}
+
 // setComps applies sc/scn operands under the current space.
 func (c *colorState) setComps(nums []float64) {
 	switch c.space {
@@ -287,6 +307,46 @@ func (c *colorState) setComps(nums []float64) {
 		c.rgba = grayColor(nums)
 	case "DeviceRGB":
 		c.rgba = rgbColor(nums)
+	case "Pattern", "Indexed", "Separation", "DeviceN":
+		// Pattern's scn operand is a pattern name, not colour components.
+		// Indexed's single operand is a PALETTE INDEX, not a gray level --
+		// treating it as gray would paint index 1 as near-black by
+		// accident. Separation/DeviceN are subtractive: 1.0 means full ink
+		// (dark), the opposite of gray 1.0 (white), so the operand-count
+		// guess below is confidently wrong for them, not just imprecise.
+		// cs/CS's direct name only matches these literally when a resource
+		// happens to be named after its family (rare -- 8.6.5.2 routes all
+		// four through the resource dict, not a bare cs operand), so this
+		// is cheap insurance, not the general case. Left at the existing
+		// black default (byb-6ty).
+	default:
+		// Any other space -- almost always an ICCBased resource name, since
+		// cs/CS only ever gets a bare name and render.go has no resource
+		// dict to resolve it to a real family (content.Color documents the
+		// same gap, byb-b1.5). ICCBased profiles are overwhelmingly
+		// stand-ins for calibrated Gray/RGB/CMYK, so the operand COUNT
+		// alone recovers the intended model without any colour management
+		// (byb-6ty). A name operand (a pattern) leaves nums empty and
+		// matches no case here, same as before.
+		//
+		// No case 1: a single operand is exactly where this guess is
+		// dangerous rather than merely imprecise. cs/CS in real content
+		// streams is a resource name, so the literal-name exclusion above
+		// never fires for Indexed/Separation/DeviceN -- they land here.
+		// Indexed's one operand is a palette index, not a gray level, and
+		// Separation/DeviceN's common one-channel form is subtractive (1.0
+		// = full ink = dark), the opposite of gray's 1.0 = white. Measured
+		// on the sample corpus (byb-6ty fix stage): guessing gray at 1
+		// operand flips real /Separation tints white and regresses 14/811
+		// documents against poppler (500542.pdf's masthead ink among
+		// them), while 3 and 4 operands stayed a net improvement -- so only
+		// those two counts get the heuristic.
+		switch len(nums) {
+		case 3:
+			c.rgba = rgbColor(nums)
+		case 4:
+			c.rgba = cmykColor(nums)
+		}
 	}
 }
 
