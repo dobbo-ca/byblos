@@ -432,17 +432,21 @@ func TestPageRefusesDeepGStateStack(t *testing.T) {
 // (any cs/CS name render.go can't resolve to Gray/RGB, i.e. every ICCBased
 // resource name in practice, byb-b1.5) must not silently drop scn/SCN
 // operands. setComps recovers the intended model from the operand COUNT --
-// 1 means gray, 3 means RGB, 4 means CMYK -- the same convention ICCBased
-// profiles overwhelmingly stand in for.
+// 3 means RGB, 4 means CMYK -- the same convention ICCBased profiles
+// overwhelmingly stand in for. No 1-operand case: see
+// TestSetCompsExcludesSingleOperand below.
 func TestSetCompsOperandCountFallback(t *testing.T) {
 	tests := []struct {
 		name string
 		src  string
 		want color.RGBA
 	}{
-		{"1 operand is gray", "/Cs6 cs 0.5 scn 0 0 100 100 re f", color.RGBA{128, 128, 128, 255}},
 		{"3 operands is RGB", "/Cs6 cs 0 0 1 scn 0 0 100 100 re f", blue},
 		{"4 operands is CMYK", "/Cs6 cs 0 1 1 0 scn 0 0 100 100 re f", red},
+		// C=M=Y=0, K=1 pins the (1-k) term specifically: dropping k from
+		// cmykColor's formula (treating it as always 0) renders this white
+		// instead of black, the mutation a K=0 fixture can't catch.
+		{"4 operands respects K", "/Cs6 cs 0 0 0 1 scn 0 0 100 100 re f", black},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -451,6 +455,23 @@ func TestSetCompsOperandCountFallback(t *testing.T) {
 				t.Errorf("center pixel = %+v; want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSetCompsExcludesSingleOperand pins the fix-stage finding in byb-6ty:
+// a single scn operand under an unresolved space must NOT be guessed as
+// gray. cs/CS in real content streams is always a resource name (8.6.5.2),
+// so the literal-name exclusion never catches Indexed/Separation/DeviceN in
+// practice -- they land in this same operand-count fallback. Indexed's one
+// operand is a palette index, and Separation/DeviceN's common one-channel
+// form is subtractive (1.0 = full ink = dark, not gray white). Guessing
+// gray at 1 operand measurably regressed real /Separation ink against
+// poppler on the sample corpus (500542.pdf among others); this pins the
+// fix -- 1 operand leaves the pre-existing black default untouched.
+func TestSetCompsExcludesSingleOperand(t *testing.T) {
+	img := render100(t, "/Cs6 cs 1 scn 0 0 100 100 re f")
+	if got := pixelAt(img, 50, 50); got != black {
+		t.Errorf("center pixel = %+v; want black (1 operand excluded from the fallback)", got)
 	}
 }
 

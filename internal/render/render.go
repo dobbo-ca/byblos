@@ -328,9 +328,20 @@ func (c *colorState) setComps(nums []float64) {
 		// alone recovers the intended model without any colour management
 		// (byb-6ty). A name operand (a pattern) leaves nums empty and
 		// matches no case here, same as before.
+		//
+		// No case 1: a single operand is exactly where this guess is
+		// dangerous rather than merely imprecise. cs/CS in real content
+		// streams is a resource name, so the literal-name exclusion above
+		// never fires for Indexed/Separation/DeviceN -- they land here.
+		// Indexed's one operand is a palette index, not a gray level, and
+		// Separation/DeviceN's common one-channel form is subtractive (1.0
+		// = full ink = dark), the opposite of gray's 1.0 = white. Measured
+		// on the sample corpus (byb-6ty fix stage): guessing gray at 1
+		// operand flips real /Separation tints white and regresses 14/811
+		// documents against poppler (500542.pdf's masthead ink among
+		// them), while 3 and 4 operands stayed a net improvement -- so only
+		// those two counts get the heuristic.
 		switch len(nums) {
-		case 1:
-			c.rgba = grayColor(nums)
 		case 3:
 			c.rgba = rgbColor(nums)
 		case 4:
