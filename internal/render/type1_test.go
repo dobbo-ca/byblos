@@ -44,7 +44,7 @@ func t1cs(items ...any) []byte {
 		"hlineto": {6}, "vlineto": {7}, "rrcurveto": {8}, "closepath": {9},
 		"callsubr": {10}, "return": {11}, "hsbw": {13}, "endchar": {14},
 		"rmoveto": {21}, "hmoveto": {22}, "vhcurveto": {30}, "hvcurveto": {31},
-		"dotsection": {12, 0}, "seac": {12, 6}, "sbw": {12, 7}, "div": {12, 12},
+		"dotsection": {12, 0}, "seac": {12, 6}, "div": {12, 12},
 		"callothersubr": {12, 16}, "pop": {12, 17}, "setcurrentpoint": {12, 33},
 	}
 	var b []byte
@@ -434,10 +434,14 @@ func TestType1MalformedNoPanic(t *testing.T) {
 }
 
 // TestType1SeacDeferred: seac (accented composites) is DEFERRED -- the glyph
-// must skip cleanly, not misrender or panic, and the rest of the page still
-// renders. The deferral is recorded in type1.go's interpreter.
+// must SKIP, abandoning even outline drawn before the seac (a partial base
+// glyph would misrender), and the rest of the page still renders. The square
+// drawn before the seac distinguishes the skip from a silent no-op that would
+// keep interpreting and fill the partial outline.
 func TestType1SeacDeferred(t *testing.T) {
-	cs := t1cs(0, 600, "hsbw", 0, 65, 65, 193, "seac")
+	cs := t1cs(0, 600, "hsbw", 0, 0, "rmoveto", 500, 0, "rlineto",
+		0, 500, "rlineto", -500, 0, "rlineto", "closepath",
+		0, 65, 65, 193, "seac")
 	clear, enc, trailer := buildType1([]t1glyph{{"A", cs}}, nil, t1StdEnc)
 	raw := append(append(append([]byte{}, clear...), enc...), trailer...)
 	f := Font{Program: raw, FirstChar: 'A', Widths: []float64{600}}
@@ -521,4 +525,133 @@ func TestType1TextAgreesWithPdftoppm(t *testing.T) {
 	if frac := mismatchFraction(t, blank, oracle); frac <= tolerance {
 		t.Errorf("a BLANK raster is within tolerance of pdftoppm (%.1f%% mismatch); the Type 1 oracle metric is broken", frac*100)
 	}
+}
+
+// t1CaptureSink records every sink call for coordinate-convention tests.
+type t1CaptureSink struct{ calls []string }
+
+func (c *t1CaptureSink) sink() t1Sink {
+	f := func(op string) func(x, y float64) error {
+		return func(x, y float64) error {
+			c.calls = append(c.calls, fmt.Sprintf("%s %g %g", op, x, y))
+			return nil
+		}
+	}
+	return t1Sink{
+		move: f("move"), line: f("line"),
+		curve: func(x1, y1, x2, y2, x3, y3 float64) error {
+			c.calls = append(c.calls, fmt.Sprintf("curve %g %g %g %g %g %g", x1, y1, x2, y2, x3, y3))
+			return nil
+		},
+	}
+}
+
+// TestType1CurveOperatorConventions pins the operand conventions of vhcurveto
+// (dy1 dx2 dy2 dx3: leaves vertically, arrives horizontally) and hvcurveto
+// (dx1 dx2 dy2 dy3: the mirror) -- the two curve operators real Type 1 fonts
+// use most. Swapping the two branches, or any operand, changes a coordinate.
+func TestType1CurveOperatorConventions(t *testing.T) {
+	f := &t1Font{upem: 1000}
+	var c t1CaptureSink
+	var work int64
+	cs := t1cs(0, 600, "hsbw", 100, 100, "rmoveto",
+		10, 20, 30, 40, "vhcurveto",
+		1, 2, 3, 4, "hvcurveto",
+		"endchar")
+	if err := f.interpret(cs, c.sink(), &work); err != nil {
+		t.Fatalf("interpret: %v", err)
+	}
+	want := []string{
+		"move 100 100",
+		"curve 100 110 120 140 160 140", // vh: up then across
+		"curve 161 140 163 143 163 147", // hv: across then up
+	}
+	if len(c.calls) != len(want) {
+		t.Fatalf("sink calls: got %v, want %v", c.calls, want)
+	}
+	for i := range want {
+		if c.calls[i] != want[i] {
+			t.Errorf("call %d: got %q, want %q", i, c.calls[i], want[i])
+		}
+	}
+}
+
+// TestType1HintReplacementFeedsPop pins the non-flex callothersubr path
+// (othersubr 3, hint replacement -- present in nearly every Adobe-era Type 1):
+// the argument must feed the PostScript stack so the following pop retrieves
+// it (in production, the subr number that callsubr then executes). Dropping
+// the args would make pop push 0 instead.
+func TestType1HintReplacementFeedsPop(t *testing.T) {
+	f := &t1Font{upem: 1000}
+	var c t1CaptureSink
+	var work int64
+	cs := t1cs(0, 600, "hsbw", 0, 0, "rmoveto",
+		42, 1, 3, "callothersubr", "pop", 0, "rlineto", "endchar")
+	if err := f.interpret(cs, c.sink(), &work); err != nil {
+		t.Fatalf("interpret: %v", err)
+	}
+	want := []string{"move 0 0", "line 42 0"}
+	if len(c.calls) != 2 || c.calls[0] != want[0] || c.calls[1] != want[1] {
+		t.Fatalf("sink calls: got %v, want %v (othersubr 3's arg must survive to pop)", c.calls, want)
+	}
+}
+
+// TestType1HexEexec: the ASCII-hex eexec form (the PFA convention) must parse
+// to the same glyphs as the binary form.
+func TestType1HexEexec(t *testing.T) {
+	square := t1cs(0, 600, "hsbw", 0, 0, "rmoveto", 500, 0, "rlineto",
+		0, 500, "rlineto", -500, 0, "rlineto", "closepath", "endchar")
+	clear, enc, trailer := buildType1([]t1glyph{
+		{".notdef", t1cs(0, 0, "hsbw", "endchar")},
+		{"A", square},
+	}, nil, t1StdEnc)
+	var hexed []byte
+	for i, b := range enc {
+		hexed = append(hexed, "0123456789abcdef"[b>>4], "0123456789abcdef"[b&0xf])
+		if i%32 == 31 {
+			hexed = append(hexed, '\n')
+		}
+	}
+	raw := append(append(append([]byte{}, clear...), hexed...), trailer...)
+	f := parseType1(raw)
+	if f == nil {
+		t.Fatal("parseType1 refused the hex-eexec form")
+	}
+	if !bytes.Equal(f.glyphs["A"], square) {
+		t.Fatalf("hex-eexec /A decodes to %d bytes, want the %d-byte charstring", len(f.glyphs["A"]), len(square))
+	}
+}
+
+// TestHostileType1SubrCountBounded: a /Subrs count no remaining input could
+// satisfy (each entry costs at least 8 bytes) must be refused before its
+// slice-header preallocation -- a declared count of millions with zero entries
+// behind it would otherwise retain ~24 bytes of live heap per declared subr
+// for the life of the page.
+func TestHostileType1SubrCountBounded(t *testing.T) {
+	// 500 declared subrs, zero entries, padded so the count is below len(d)
+	// but far above what the remaining bytes could hold.
+	hostile := append([]byte("/Subrs 500 "), bytes.Repeat([]byte{' '}, 3000)...)
+	if s := t1ParseSubrs(hostile, 4); s != nil {
+		t.Fatalf("an unbacked /Subrs 500 preallocated %d slice headers; it must be refused", len(s))
+	}
+	// A count the input does back still parses.
+	s := t1ParseSubrs([]byte("/Subrs 1 dup 0 5 RD aaaaa NP end more padding"), 4)
+	if len(s) != 1 || s[0] == nil {
+		t.Fatalf("the well-formed 1-entry /Subrs failed to parse: %v", s)
+	}
+}
+
+// TestType1NoWidthsUsesHsbwAdvance: a /FontFile Type 1 dict with NO /Widths
+// must advance by each charstring's own hsbw width (600 here -> 12px at 20pt),
+// not 0 -- two 'A's land side by side, not stacked.
+func TestType1NoWidthsUsesHsbwAdvance(t *testing.T) {
+	f := t1SquareFont()
+	f.FirstChar, f.Widths = 0, nil
+	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (AA) Tj ET"
+	box := content.Box{URX: 100, URY: 100}
+	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+	assertExactPixels(t, img, 100, 100, []rect{{10, 40, 20, 50}, {22, 40, 32, 50}})
 }

@@ -91,14 +91,25 @@ func (r *renderer) resolveFont(name string) *textFont {
 		return nil
 	}
 	program := src.Program
+	var key [sha256.Size]byte
 	if len(program) == 0 {
 		// Stage 4f: no embedded program -- substitute a bundled face by name,
-		// else by descriptor flags (substitute.go). The deferred faces leave
+		// else by descriptor flags (substitute.go). The face PATH is the cache
+		// key (the prefix keeps an embedded program from aliasing it), so the
+		// ~400 KB embed copy and hash happen once per face, not once per Tf
+		// name; the file is read only on a miss. The deferred faces leave
 		// program empty and degrade to widths-only below, like any program no
 		// stage parses.
-		program = substituteProgram(src.BaseFont, src.Flags)
+		face := substituteFace(src.BaseFont, src.Flags)
+		key = sha256.Sum256([]byte("substitute:" + face))
+		if _, hit := r.progsBy[key]; !hit && face != "" {
+			if b, err := substituteFonts.ReadFile(face); err == nil {
+				program = b
+			}
+		}
+	} else {
+		key = sha256.Sum256(program)
 	}
-	key := sha256.Sum256(program)
 	prog, hit := r.progsBy[key]
 	if !hit {
 		prog = &fontProg{}
@@ -153,8 +164,12 @@ func (f *textFont) w0(code byte) float64 {
 	if i := int(code) - f.first; i >= 0 && i < len(f.width) {
 		return f.width[i] / 1000
 	}
+	if len(f.width) == 0 && f.t1 != nil {
+		// Stage 4e: the charstring's own hsbw width, in font units.
+		return f.t1.advance(code) / f.t1.upem
+	}
 	if len(f.width) == 0 && f.fnt != nil {
-		if gi, err := f.fnt.GlyphIndex(&f.buf, rune(code)); err == nil && gi != 0 {
+		if gi, err := f.fnt.GlyphIndex(&f.buf, codeRune(code)); err == nil && gi != 0 {
 			// ppem = upem returns the advance in raw font units, the same
 			// convention fillGlyph uses for LoadGlyph.
 			if adv, err := f.fnt.GlyphAdvance(&f.buf, gi, fixed.Int26_6(f.upem), font.HintingNone); err == nil {
@@ -163,6 +178,29 @@ func (f *textFont) w0(code byte) float64 {
 		}
 	}
 	return 0
+}
+
+// winAnsiC1 maps codes 0x80..0x9f -- where WinAnsi (CP1252) departs from
+// Latin-1's C1 controls -- to their runes; 0 for the five undefined slots.
+var winAnsiC1 = [32]rune{
+	0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+	0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017d, 0,
+	0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+	0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0, 0x017e, 0x0178,
+}
+
+// codeRune maps a single-byte code to a rune: Latin-1, which agrees with
+// WinAnsi/Standard over ASCII, except that 0x80..0x9f take their WinAnsi
+// meanings (smart quotes, dashes, euro) -- as Latin-1 C1 controls they map to
+// NO glyph and NO advance, collapsing the rest of the line onto one point. A
+// full /Encoding-aware mapping still waits for a caller that can supply one.
+func codeRune(code byte) rune {
+	if code >= 0x80 && code <= 0x9f {
+		if r := winAnsiC1[code-0x80]; r != 0 {
+			return r
+		}
+	}
+	return rune(code)
 }
 
 // inksText reports whether rendering mode tr deposits ink THIS stage can
@@ -198,14 +236,24 @@ func (r *renderer) showText(gs *gstate, raw []byte) error {
 	return nil
 }
 
-// glyphMatrix maps sfnt glyph coordinates (font units, y down -- LoadGlyph's
-// documented orientation) to device space: flip y and scale by 1/unitsPerEm
-// into text space, then the text-space parameters, the text matrix and the
-// CTM (Trm, ISO 32000-1 9.4.4).
-func glyphMatrix(gs *gstate, upem float64) content.Matrix {
+// glyphMatrix maps glyph coordinates (font units) to device space: scale by
+// 1/unitsPerEm into text space, then the text-space parameters, the text
+// matrix and the CTM (Trm, ISO 32000-1 9.4.4). ySign is -1 for sfnt glyphs
+// (font units y down, LoadGlyph's documented orientation) and +1 for Type 1
+// charstring space, which is y up already.
+func glyphMatrix(gs *gstate, upem, ySign float64) content.Matrix {
 	params := content.Matrix{gs.fontSize * gs.hscale, 0, 0, gs.fontSize, 0, gs.rise}
-	return content.Matrix{1 / upem, 0, 0, -1 / upem, 0, 0}.
+	return content.Matrix{1 / upem, 0, 0, ySign / upem, 0, 0}.
 		Mul(params).Mul(gs.tm).Mul(gs.ctm)
+}
+
+// chargeFill charges n units against the per-Page fill budget.
+func (r *renderer) chargeFill(n int64) error {
+	r.fillWork += n
+	if r.fillWork > maxFillWork {
+		return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+	}
+	return nil
 }
 
 // fillGlyph rasterises one glyph outline through the same path machinery as
@@ -225,9 +273,7 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	if f.fnt == nil {
 		return nil
 	}
-	// rune(code) is Latin-1, which agrees with WinAnsi/Standard over ASCII;
-	// an /Encoding-aware mapping waits for a caller that can supply one.
-	gi, err := f.fnt.GlyphIndex(&f.buf, rune(code))
+	gi, err := f.fnt.GlyphIndex(&f.buf, codeRune(code))
 	if err != nil || gi == 0 {
 		return nil
 	}
@@ -239,9 +285,8 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	// gate total per SHOW keeps interpreter time under maxFillWork per Page,
 	// exactly like scanline time.
 	if int(gi) < len(f.gwork) {
-		r.fillWork += f.gwork[gi]
-		if r.fillWork > maxFillWork {
-			return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+		if err := r.chargeFill(f.gwork[gi]); err != nil {
+			return err
 		}
 	}
 	// LoadGlyph materialises the glyph's whole expansion up front, which is
@@ -259,7 +304,7 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	if err != nil {
 		return nil
 	}
-	m := glyphMatrix(gs, f.upem)
+	m := glyphMatrix(gs, f.upem, -1)
 	var pth path
 	defer pth.reset(r)
 	ok := true
@@ -305,10 +350,8 @@ func (r *renderer) fillGlyph(gs *gstate, f *textFont, code byte) error {
 	if !ok {
 		return nil
 	}
-	n := int64(pathPoints(pth.subs))
-	r.fillWork += n
-	if r.fillWork > maxFillWork {
-		return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+	if err := r.chargeFill(int64(pathPoints(pth.subs))); err != nil {
+		return err
 	}
 	return r.fillSubpaths(pth.subs, false, r.deviceClip(gs.clip), gs.fill.rgba)
 }

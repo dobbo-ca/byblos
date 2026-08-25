@@ -6,7 +6,7 @@ package render
 // LADDER NOTE, recorded per the bead: nothing already in go.mod parses Type 1.
 // x/image/font/sfnt speaks TrueType and CFF-in-sfnt containers only, and
 // pdfcpu never touches glyph outlines. So this file is a minimal parser plus a
-// Type 1 charstring interpreter for the OUTLINE subset: hsbw/sbw, the
+// Type 1 charstring interpreter for the OUTLINE subset: hsbw, the
 // move/line/curve families, closepath, callsubr/return, endchar, div, and the
 // flex OtherSubrs protocol (whose seven collected points ARE the two cubics,
 // so flex collapses to its curve points). Hints (hstem, vstem, vstem3,
@@ -28,12 +28,9 @@ package render
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"math"
 	"strconv"
 	"strings"
-
-	"github.com/dobbo-ca/byblos/internal/content"
 )
 
 // t1Font is a parsed classic Type 1: decrypted charstrings by glyph name, the
@@ -220,7 +217,12 @@ func t1ParseSubrs(d []byte, lenIV int) [][]byte {
 	}
 	s := &t1Scan{d: d, pos: i + len("/Subrs")}
 	count, ok := s.int()
-	if !ok || count <= 0 || count > len(d) {
+	// The count preallocates 24 bytes of slice header per declared subr, so it
+	// must be backed by input: every entry costs at least 8 bytes ("dup 0 0
+	// RD "), and a count the remaining bytes cannot possibly satisfy is
+	// hostile -- refuse it before allocating (the header amplification would
+	// otherwise be ~3900x wire-to-heap through a compressed /FontFile).
+	if !ok || count <= 0 || count > (len(d)-s.pos)/8 {
 		return nil
 	}
 	subrs := make([][]byte, count)
@@ -592,7 +594,8 @@ func (f *t1Font) interpret(cs []byte, sink t1Sink, work *int64) error {
 			ins = call[len(call)-1]
 			call = call[:len(call)-1]
 		case 13: // hsbw: the sidebearing IS the initial current point; the
-			// width is ignored, PDF /Widths drive every advance.
+			// width is ignored here -- PDF /Widths drive the advance, and a
+			// dict with NO /Widths reads it through advance instead.
 			if len(st) < 2 {
 				return errT1Skip
 			}
@@ -614,12 +617,9 @@ func (f *t1Font) interpret(cs []byte, sink t1Sink, work *int64) error {
 				st = st[:0]
 			case 6: // seac: DEFERRED (see the package comment)
 				return errT1Skip
-			case 7: // sbw
-				if len(st) < 4 {
-					return errT1Skip
-				}
-				x, y = st[0], st[1]
-				st = st[:0]
+			// sbw (12 7) is DELIBERATELY absent: horizontal Latin fonts use
+			// hsbw, and a glyph using sbw skips via the default below, exactly
+			// like seac.
 			case 12: // div
 				if len(st) < 2 || st[len(st)-1] == 0 {
 					return errT1Skip
@@ -685,6 +685,47 @@ func (f *t1Font) interpret(cs []byte, sink t1Sink, work *int64) error {
 	return nil
 }
 
+// advance returns code's hsbw width in font units, for the no-/Widths dict
+// shape (w0). It decodes only the leading operands of the charstring -- hsbw
+// must be the first operator -- so it is bounded by the 48-entry stack.
+func (f *t1Font) advance(code byte) float64 {
+	cs := f.glyphs[f.enc[code]]
+	var st []float64
+	for len(cs) > 0 && len(st) < 48 {
+		b := cs[0]
+		if b < 32 {
+			if b == 13 && len(st) >= 2 { // hsbw: sb wx
+				return st[1]
+			}
+			return 0
+		}
+		n := 1
+		switch {
+		case b >= 247 && b <= 254:
+			n = 2
+		case b == 255:
+			n = 5
+		}
+		if len(cs) < n {
+			return 0
+		}
+		var v float64
+		switch {
+		case b <= 246:
+			v = float64(int(b) - 139)
+		case b <= 250:
+			v = float64(int(b-247)*256 + int(cs[1]) + 108)
+		case b <= 254:
+			v = float64(-int(b-251)*256 - int(cs[1]) - 108)
+		default:
+			v = float64(int32(be.Uint32(cs[1:])))
+		}
+		st = append(st, v)
+		cs = cs[n:]
+	}
+	return 0
+}
+
 // fillT1Glyph rasterises one Type 1 glyph through the same path machinery as
 // fillGlyph: interpreter work and flattened points charge the budgets, and
 // the fill is the 4a scanline filler under the nonzero rule. Any failure
@@ -695,11 +736,8 @@ func (r *renderer) fillT1Glyph(gs *gstate, f *textFont, code byte) error {
 	if cs == nil {
 		return nil
 	}
-	// Type 1 charstring space is y-up already, so unlike glyphMatrix there is
-	// no flip: scale by 1/upem into text space, then Trm.
-	params := content.Matrix{gs.fontSize * gs.hscale, 0, 0, gs.fontSize, 0, gs.rise}
-	m := content.Matrix{1 / t1.upem, 0, 0, 1 / t1.upem, 0, 0}.
-		Mul(params).Mul(gs.tm).Mul(gs.ctm)
+	// Type 1 charstring space is y-up already: no flip.
+	m := glyphMatrix(gs, t1.upem, 1)
 	var pth path
 	defer pth.reset(r)
 	dev := func(fx, fy float64) (point, error) {
@@ -746,9 +784,8 @@ func (r *renderer) fillT1Glyph(gs *gstate, f *textFont, code byte) error {
 	err := f.t1.interpret(cs, sink, &work)
 	// Charge the interpreter's executed bytes per SHOW, like the 4d gate
 	// total: a stream re-showing one expensive glyph stays bounded per Page.
-	r.fillWork += work
-	if r.fillWork > maxFillWork {
-		return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+	if cerr := r.chargeFill(work); cerr != nil {
+		return cerr
 	}
 	if errors.Is(err, errT1Skip) {
 		return nil
@@ -756,10 +793,8 @@ func (r *renderer) fillT1Glyph(gs *gstate, f *textFont, code byte) error {
 	if err != nil {
 		return err
 	}
-	n := int64(pathPoints(pth.subs))
-	r.fillWork += n
-	if r.fillWork > maxFillWork {
-		return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+	if err := r.chargeFill(int64(pathPoints(pth.subs))); err != nil {
+		return err
 	}
 	return r.fillSubpaths(pth.subs, false, r.deviceClip(gs.clip), gs.fill.rgba)
 }

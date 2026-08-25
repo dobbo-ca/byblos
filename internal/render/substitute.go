@@ -35,6 +35,7 @@ var substituteFonts embed.FS
 const (
 	flagFixedPitch = 1 << 0
 	flagSerif      = 1 << 1
+	flagSymbolic   = 1 << 2
 	flagItalic     = 1 << 6
 )
 
@@ -52,7 +53,7 @@ func substituteFace(baseFont string, flags int) string {
 	name = strings.ToLower(name)
 	var family string
 	switch {
-	case strings.Contains(name, "courier") || strings.Contains(name, "mono"):
+	case strings.Contains(name, "courier"):
 		family = "Mono"
 	case strings.Contains(name, "times"):
 		family = "Serif"
@@ -62,6 +63,11 @@ func substituteFace(baseFont string, flags int) string {
 		return "" // DEFERRED: no metric-compatible open face exists
 	default:
 		switch {
+		case flags&flagSymbolic != 0:
+			// An unknown-name symbolic face (Wingdings, a TeX math font):
+			// Latin glyphs for symbol codes would misrender, so degrade to
+			// widths-only like the named symbol faces above.
+			return ""
 		case flags&flagFixedPitch != 0:
 			family = "Mono"
 		case flags&flagSerif != 0:

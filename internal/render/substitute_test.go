@@ -52,6 +52,15 @@ func TestSubstituteFaceMapping(t *testing.T) {
 		{"Whatever", flagItalic, "fonts/LiberationSans-Italic.ttf"},
 		{"Whatever", 0, "fonts/LiberationSans-Regular.ttf"},
 		{"", 0, "fonts/LiberationSans-Regular.ttf"},
+		// An unknown-name SYMBOLIC face (ISO 32000-1 table 123 bit 3) gets no
+		// Latin substitute -- its codes mean symbols, and Latin glyphs would
+		// misrender them. A recognised standard-14 name still wins over a
+		// stray symbolic bit.
+		{"Wingdings", flagSymbolic, ""},
+		{"Helvetica", flagSymbolic, "fonts/LiberationSans-Regular.ttf"},
+		// A proportional Monotype face must NOT be claimed for the fixed-pitch
+		// family by name: genuine monospace fonts set the fixed-pitch flag.
+		{"MonotypeCorsiva", 0, "fonts/LiberationSans-Regular.ttf"},
 	}
 	for _, c := range cases {
 		if got := substituteFace(c.name, c.flags); got != c.want {
@@ -75,6 +84,46 @@ func TestSubstituteTakesTheTrueTypePath(t *testing.T) {
 	}
 	if !g.boundedBy(maxPathPoints) {
 		t.Fatal("the bundled face fails the 4c pre-parse gate")
+	}
+}
+
+// TestSubstituteAllFacesLoad: every one of the 12 family/style combinations
+// must resolve to bytes actually present in the embed FS -- the glob compiles
+// even with a file missing, so path-string tests alone would let a face
+// silently degrade to widths-only.
+func TestSubstituteAllFacesLoad(t *testing.T) {
+	for _, name := range []string{
+		"Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique",
+		"Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic",
+		"Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
+	} {
+		if substituteProgram(name, 0) == nil {
+			t.Errorf("no embedded program for %s (face %s)", name, substituteFace(name, 0))
+		}
+	}
+}
+
+// TestSubstituteWinAnsiPunctuation: codes 0x80-0x9f are WinAnsi's smart
+// quotes, dashes and euro, NOT Latin-1's C1 controls -- a C1 mapping finds no
+// glyph and no advance, so the first curly quote would stack the rest of the
+// line on one point. A right single quote (0x92) must both ink and advance.
+func TestSubstituteWinAnsiPunctuation(t *testing.T) {
+	box := content.Box{URX: 100, URY: 100}
+	render := func(text string) *image.RGBA {
+		f := Font{BaseFont: "Helvetica"}
+		src := fmt.Sprintf("BT /F1 40 Tf 1 0 0 1 5 40 Tm (%s) Tj ET", text)
+		img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+		if err != nil {
+			t.Fatalf("Page(%q): %v", text, err)
+		}
+		return img
+	}
+	one, two := inkCount(render("\x92")), inkCount(render("\x92\x92"))
+	if one == 0 {
+		t.Fatal("WinAnsi 0x92 (right single quote) inked nothing")
+	}
+	if two < one*3/2 {
+		t.Fatalf("two quotes ink %d vs one %d: the second overlaps the first, so 0x92 has no advance", two, one)
 	}
 }
 
