@@ -321,7 +321,7 @@ func assertExactPixels(t *testing.T, img interface {
 func TestTextGlyphOriginsExact(t *testing.T) {
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm [(AA) -500 (A)] TJ 0 -30 Td (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(testFont()))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(testFont()))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestTextGlyphOriginsExact(t *testing.T) {
 func TestTextSpacingParamsExact(t *testing.T) {
 	src := "BT /F1 20 Tf 4 Tw 2 Tc 1 0 0 1 10 80 Tm (A A) Tj 50 Tz 5 Ts 0 -40 Td (AA) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(testFont()))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(testFont()))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestTextRenderModes(t *testing.T) {
 			[]rect{{22, 40, 32, 50}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			img, err := Page(context.Background(), []byte(tc.src), box, 1, nil, fontsFor(testFont()))
+			img, err := Page(context.Background(), []byte(tc.src), box, 0, 1, nil, fontsFor(testFont()))
 			if err != nil {
 				t.Fatalf("Page: %v", err)
 			}
@@ -400,7 +400,7 @@ func TestTextUnresolvedFontSkipsCleanly(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			img, err := Page(context.Background(), []byte(src), box, 1, nil, tc.fonts)
+			img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, tc.fonts)
 			if err != nil {
 				t.Fatalf("Page: %v", err)
 			}
@@ -417,7 +417,7 @@ func TestTextWidthsOverrideFontAdvance(t *testing.T) {
 	f.Widths = []float64{900}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (AA) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestHostileGlyphTripsPointBudget(t *testing.T) {
 	}
 	src := "BT /F1 2000 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 5000, URY: 5000}
-	_, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err == nil || !strings.Contains(err.Error(), "points") {
 		t.Fatalf("hostile glyph: got err %v, want the path-point budget error", err)
 	}
@@ -475,7 +475,7 @@ func TestHostileCompoundGlyphRefusedBeforeParse(t *testing.T) {
 	box := content.Box{URX: 100, URY: 100}
 	var m0, m1 runtime.MemStats
 	runtime.ReadMemStats(&m0)
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	runtime.ReadMemStats(&m1)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
@@ -498,7 +498,7 @@ func TestHostileOffCanvasGlyphsTripFillWork(t *testing.T) {
 
 	src := "BT /F1 20 Tf 1 0 0 1 5000 5000 Tm (" + strings.Repeat("A", 300) + ") Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	_, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(testFont()))
+	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(testFont()))
 	if err == nil || !strings.Contains(err.Error(), "fill work") {
 		t.Fatalf("off-canvas glyph stream: got err %v, want the fill-work budget error", err)
 	}
@@ -522,7 +522,7 @@ func TestTextLargeCoordsAtHighUpem(t *testing.T) {
 	}
 	src := "BT /F1 8 Tf 1 0 0 1 10 10 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestTextNonFiniteParamsSkipGlyphsCleanly(t *testing.T) {
 			[]rect{{10, 40, 20, 50}, {30, 60, 40, 70}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			img, err := Page(context.Background(), []byte(tc.src), box, 1, nil, fontsFor(testFont()))
+			img, err := Page(context.Background(), []byte(tc.src), box, 0, 1, nil, fontsFor(testFont()))
 			if err != nil {
 				t.Fatalf("Page: %v", err)
 			}
@@ -568,7 +568,7 @@ func TestTextStateSavedByQ(t *testing.T) {
 	// 20 (square 10pt), shown at Tm origin (50,50).
 	src := "BT /F1 20 Tf q /F1 40 Tf 1 0 0 1 10 50 Tm (A) Tj Q 1 0 0 1 50 50 Tm (A) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(testFont()))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(testFont()))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}

@@ -112,7 +112,7 @@ func TestSubstituteWinAnsiPunctuation(t *testing.T) {
 	render := func(text string) *image.RGBA {
 		f := Font{BaseFont: "Helvetica"}
 		src := fmt.Sprintf("BT /F1 40 Tf 1 0 0 1 5 40 Tm (%s) Tj ET", text)
-		img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+		img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 		if err != nil {
 			t.Fatalf("Page(%q): %v", text, err)
 		}
@@ -136,7 +136,7 @@ func TestNonEmbeddedFontRendersInk(t *testing.T) {
 	render := func(text string) *image.RGBA {
 		f := Font{BaseFont: "Helvetica"}
 		src := fmt.Sprintf("BT /F1 40 Tf 1 0 0 1 5 40 Tm (%s) Tj ET", text)
-		img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+		img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 		if err != nil {
 			t.Fatalf("Page(%q): %v", text, err)
 		}
@@ -158,13 +158,13 @@ func TestSubstituteWidthsStillWin(t *testing.T) {
 	box := content.Box{URX: 100, URY: 100}
 	f := Font{BaseFont: "Helvetica", FirstChar: 'A', Widths: []float64{0}}
 	src := "BT /F1 40 Tf 1 0 0 1 5 40 Tm (AA) Tj ET"
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
 	f2 := Font{BaseFont: "Helvetica", FirstChar: 'A', Widths: []float64{0}}
 	src2 := "BT /F1 40 Tf 1 0 0 1 5 40 Tm (A) Tj ET"
-	img2, err := Page(context.Background(), []byte(src2), box, 1, nil, fontsFor(f2))
+	img2, err := Page(context.Background(), []byte(src2), box, 0, 1, nil, fontsFor(f2))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestSymbolDeferredSkipsCleanly(t *testing.T) {
 	f := Font{BaseFont: "Symbol", FirstChar: 'A', Widths: []float64{600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (A) Tj ET 30 30 10 10 re f"
 	box := content.Box{URX: 100, URY: 100}
-	img, err := Page(context.Background(), []byte(src), box, 1, nil, fontsFor(f))
+	img, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestEmbeddedTextThroughPdfdocSeamAgreesWithPdftoppm(t *testing.T) {
 		t.Fatalf("Page(1): %v", err)
 	}
 	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
-	got, err := Page(context.Background(), p.Content, box, 1, nil, pdfdocFonts(d, p))
+	got, err := Page(context.Background(), p.Content, box, 0, 1, nil, pdfdocFonts(d, p))
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}

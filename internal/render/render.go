@@ -128,12 +128,21 @@ type ImageFor func(name string) (Image, bool)
 // and rasterises them onto a white, opaque canvas. box is the page box in PDF
 // points (user space, y up); scale is device pixels per point, so the canvas
 // is box's size times scale with device row 0 at the TOP of the page.
+// rotate is the page's /Rotate: the degrees the raster turns CLOCKWISE for
+// display (ISO 32000-1 table 30), which swaps the canvas for 90 and 270.
 // images resolves Do operands and fonts resolves Tf operands; either may be
 // nil to render without images or without text.
-func Page(ctx context.Context, src []byte, box content.Box, scale float64, images ImageFor, fonts FontFor) (*image.RGBA, error) {
+func Page(ctx context.Context, src []byte, box content.Box, rotate int, scale float64, images ImageFor, fonts FontFor) (*image.RGBA, error) {
 	w, h, err := rasterSize(box, scale)
 	if err != nil {
 		return nil, err
+	}
+	rot := ((rotate % 360) + 360) % 360
+	if rot%90 != 0 {
+		return nil, fmt.Errorf("render: /Rotate %d is not a multiple of 90", rotate)
+	}
+	if rot == 90 || rot == 270 {
+		w, h = h, w
 	}
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for i := range img.Pix {
@@ -141,8 +150,9 @@ func Page(ctx context.Context, src []byte, box content.Box, scale float64, image
 	}
 	r := &renderer{img: img, images: images, fonts: fonts}
 	// User space to device space: scale, then flip y so user URY lands on
-	// device row 0. Row-vector convention, like content.Matrix.
-	base := content.Matrix{scale, 0, 0, -scale, -box.LLX * scale, box.URY * scale}
+	// device row 0, then turn the whole device space for /Rotate.
+	// Row-vector convention, like content.Matrix.
+	base := content.Matrix{scale, 0, 0, -scale, -box.LLX * scale, box.URY * scale}.Mul(displayTurn(rot, w, h))
 	// ISO 32000-1 8.4.1's initial graphics state for the parts tracked here:
 	// DeviceGray black for both colours, line width 1.
 	ink := colorState{space: "DeviceGray", rgba: color.RGBA{0, 0, 0, 255}}
@@ -151,6 +161,24 @@ func Page(ctx context.Context, src []byte, box content.Box, scale float64, image
 		tm: content.Identity, tlm: content.Identity, hscale: 1,
 	})
 	return img, err
+}
+
+// displayTurn maps the unrotated device space of a page onto the displayed
+// one for /Rotate. w and h are the FINAL canvas dimensions, already swapped
+// for the quarter turns, so the ceil slack rasterSize leaves stays inside
+// the canvas. An exact quarter turn permutes the device grid onto itself:
+// no resampling happens here, only a change of which pixel a mark lands in.
+func displayTurn(rot, w, h int) content.Matrix {
+	fw, fh := float64(w), float64(h)
+	switch rot {
+	case 90:
+		return content.Matrix{0, 1, -1, 0, fw, 0}
+	case 180:
+		return content.Matrix{-1, 0, 0, -1, fw, fh}
+	case 270:
+		return content.Matrix{0, -1, 1, 0, 0, fh}
+	}
+	return content.Identity
 }
 
 func rasterSize(box content.Box, scale float64) (int, int, error) {

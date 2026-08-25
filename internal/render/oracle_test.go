@@ -127,7 +127,7 @@ func TestRenderAgreesWithPdftoppm(t *testing.T) {
 	oracle := pdftoppmPNG(t, vectorPDF(oracleContent, 200, 200))
 
 	box := content.Box{LLX: 0, LLY: 0, URX: 200, URY: 200}
-	got, err := Page(context.Background(), []byte(oracleContent), box, 1, nil, nil)
+	got, err := Page(context.Background(), []byte(oracleContent), box, 0, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestRenderAgreesWithPdftoppm(t *testing.T) {
 
 	// The null check: a blank canvas must not pass the metric, or the metric
 	// measures nothing.
-	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
+	blank, err := Page(context.Background(), nil, box, 0, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page(blank): %v", err)
 	}
@@ -227,7 +227,7 @@ func TestImagesAgreeWithPdftoppm(t *testing.T) {
 		t.Fatalf("Page(1): %v", err)
 	}
 	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
-	got, err := Page(context.Background(), p.Content, box, 1, pdfdocImages(d, p), nil)
+	got, err := Page(context.Background(), p.Content, box, 0, 1, pdfdocImages(d, p), nil)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestImagesAgreeWithPdftoppm(t *testing.T) {
 			frac*100, tolerance*100)
 	}
 
-	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
+	blank, err := Page(context.Background(), nil, box, 0, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page(blank): %v", err)
 	}
@@ -307,7 +307,7 @@ func TestTextAgreesWithPdftoppm(t *testing.T) {
 		return Font{Program: oracleTTF(), FirstChar: 65, Widths: []float64{600, 700, 550}}, true
 	}
 	box := content.Box{URX: 200, URY: 200}
-	got, err := Page(context.Background(), []byte(textOracleContent), box, 1, nil, fonts)
+	got, err := Page(context.Background(), []byte(textOracleContent), box, 0, 1, nil, fonts)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestTextAgreesWithPdftoppm(t *testing.T) {
 			frac*100, tolerance*100)
 	}
 
-	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
+	blank, err := Page(context.Background(), nil, box, 0, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page(blank): %v", err)
 	}
@@ -384,7 +384,7 @@ func TestType1CTextAgreesWithPdftoppm(t *testing.T) {
 		return Font{Program: oracleCFF(), FirstChar: 65, Widths: []float64{600, 700, 550}}, true
 	}
 	box := content.Box{URX: 200, URY: 200}
-	got, err := Page(context.Background(), []byte(textOracleContent), box, 1, nil, fonts)
+	got, err := Page(context.Background(), []byte(textOracleContent), box, 0, 1, nil, fonts)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestType1CTextAgreesWithPdftoppm(t *testing.T) {
 			frac*100, tolerance*100)
 	}
 
-	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
+	blank, err := Page(context.Background(), nil, box, 0, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page(blank): %v", err)
 	}
@@ -473,7 +473,7 @@ func TestCIDKeyedCFFTextAgreesWithPdftoppm(t *testing.T) {
 			W: map[uint16]float64{1: 600, 2: 700, 3: 550}}, true
 	}
 	box := content.Box{URX: 200, URY: 200}
-	got, err := Page(context.Background(), []byte(cidTextOracleContent), box, 1, nil, fonts)
+	got, err := Page(context.Background(), []byte(cidTextOracleContent), box, 0, 1, nil, fonts)
 	if err != nil {
 		t.Fatalf("Page: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestCIDKeyedCFFTextAgreesWithPdftoppm(t *testing.T) {
 			frac*100, tolerance*100)
 	}
 
-	blank, err := Page(context.Background(), nil, box, 1, nil, nil)
+	blank, err := Page(context.Background(), nil, box, 0, 1, nil, nil)
 	if err != nil {
 		t.Fatalf("Page(blank): %v", err)
 	}
@@ -535,7 +535,7 @@ func TestOneImageMatchesExtractPageRaster(t *testing.T) {
 		t.Fatalf("Page(1): %v", err)
 	}
 	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
-	got, err := Page(context.Background(), p.Content, box, 1, pdfdocImages(d, p), nil)
+	got, err := Page(context.Background(), p.Content, box, 0, 1, pdfdocImages(d, p), nil)
 	if err != nil {
 		t.Fatalf("render.Page: %v", err)
 	}
@@ -551,6 +551,81 @@ func TestOneImageMatchesExtractPageRaster(t *testing.T) {
 				t.Fatalf("pixel (%d,%d): extract (%d,%d,%d) vs render (%d,%d,%d)",
 					x, y, er>>8, eg>>8, ebl>>8, rr>>8, rg>>8, rb>>8)
 			}
+		}
+	}
+}
+
+// rotatedPDF is vectorPDF with a /Rotate on the page.
+func rotatedPDF(contentStream string, w, h float64, rotate int) []byte {
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %g %g] /Rotate %d /Contents 4 0 R >>",
+			w, h, rotate),
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(contentStream), contentStream),
+	})
+}
+
+// TestRotateAgreesWithPdftoppm is byb-sfo's acceptance: /Rotate turns the
+// raster CLOCKWISE for display and swaps the canvas for the quarter turns.
+// The page is 240x160, so a canvas that did not swap cannot even reach the
+// metric, and the content is asymmetric, so a turn in the WRONG direction
+// lands every shape somewhere poppler did not put it.
+//
+// The null is the mutation check built in: for each rotation, the raster
+// this renderer produces for a DIFFERENT quarter turn must FAIL the same
+// tolerance. Without it a renderer that ignored /Rotate on a square page
+// would pass.
+func TestRotateAgreesWithPdftoppm(t *testing.T) {
+	const w, h = 240.0, 160.0
+	box := content.Box{LLX: 0, LLY: 0, URX: w, URY: h}
+	const tolerance = 0.05
+	for _, rot := range []int{0, 90, 180, 270} {
+		t.Run(fmt.Sprintf("rotate%d", rot), func(t *testing.T) {
+			oracle := pdftoppmPNG(t, rotatedPDF(oracleContent, w, h, rot))
+			got, err := Page(context.Background(), []byte(oracleContent), box, rot, 1, nil, nil)
+			if err != nil {
+				t.Fatalf("Page(rotate %d): %v", rot, err)
+			}
+			frac := mismatchFraction(t, got, oracle)
+			t.Logf("rotate %d: mismatch vs pdftoppm %.2f%% of pixels", rot, frac*100)
+			if frac > tolerance {
+				t.Errorf("rotate %d disagrees with pdftoppm on %.1f%% of pixels; tolerance %.0f%%",
+					rot, frac*100, tolerance*100)
+			}
+			// Every other quarter turn must fail against this oracle.
+			for _, wrong := range []int{0, 90, 180, 270} {
+				if wrong == rot {
+					continue
+				}
+				bad, err := Page(context.Background(), []byte(oracleContent), box, wrong, 1, nil, nil)
+				if err != nil {
+					t.Fatalf("Page(rotate %d): %v", wrong, err)
+				}
+				if bad.Bounds() != got.Bounds() {
+					continue // a 90-degree canvas cannot be confused with a 0 one
+				}
+				if f := mismatchFraction(t, bad, oracle); f <= tolerance {
+					t.Errorf("rotate %d passes the rotate-%d oracle at %.1f%% mismatch; the metric is blind to direction",
+						wrong, rot, f*100)
+				}
+			}
+		})
+	}
+}
+
+// TestRotateNotAMultipleOf90 pins the refusal. pdfcpu writes /Rotate 45 with
+// a nil error (see pdfdoc/buildpages.go), so this is a file that exists, not
+// a hypothetical: rendering it as if it were upright would be a silent lie.
+func TestRotateNotAMultipleOf90(t *testing.T) {
+	box := content.Box{LLX: 0, LLY: 0, URX: 100, URY: 100}
+	if _, err := Page(context.Background(), nil, box, 45, 1, nil, nil); err == nil {
+		t.Error("Page(rotate 45) succeeded; want an error")
+	}
+	// Negative and over-360 values normalise rather than refuse.
+	for _, rot := range []int{-90, 360, 450, -270} {
+		if _, err := Page(context.Background(), nil, box, rot, 1, nil, nil); err != nil {
+			t.Errorf("Page(rotate %d): %v; want it normalised", rot, err)
 		}
 	}
 }
