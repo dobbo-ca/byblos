@@ -1,0 +1,277 @@
+# Scores a labelled pull request against the committed baseline.
+#
+# THE TRIGGER IS `pull_request`, NEVER `pull_request_target`. That sibling
+# trigger runs the HEAD branch's code with a write token and the repository's
+# secrets against the BASE repository, which is the precise hole the gates
+# below exist to close. Do not "fix" a missing-secret problem by switching to
+# it.
+#
+# Design spec docs/superpowers/specs/2026-08-11-bench-map-design.md section 7.
+name: bench
+
+on:
+  pull_request:
+    types: [labeled]
+
+# Nothing by default; the one job widens this to exactly what it uses.
+permissions: {}
+
+jobs:
+  score:
+    # THREE GATES, all of which must hold. This job executes candidate code
+    # written by an agent and holds a token that can push and close a pull
+    # request, so the public must not be able to fire it.
+    #
+    #  1. the label is `bench`. Applying a label needs triage permission or
+    #     above, so a stranger cannot start this at all.
+    #  2. the head branch lives in THIS repository. Fork code never sees a
+    #     secret. This is the gate that has to be tested by an actual fork --
+    #     a gate that has never refused anything has not been tested.
+    #  3. the actor is on the allowlist.
+    #
+    # BENCH_ACTORS is a repository variable holding a JSON array, so the
+    # allowlist can change without editing this file. It is set to:
+    #
+    #     ["cdobbyn","dobbobot-public[bot]"]
+    #
+    # The second entry is the routine's identity. When the App applies the
+    # label, github.actor on that event is the App's bot login and NOT the
+    # maintainer's, so leaving it out gates the routine out of its own
+    # benchmark -- silently, because a job whose if: is false does not run and
+    # reports nothing at all. Verified against the API: that login exists and
+    # is of type Bot.
+    #
+    # The fallback here is the maintainer alone, which fails closed: an unset
+    # or emptied variable narrows who can run this, it does not widen it.
+    if: >-
+      github.event.label.name == 'bench'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && contains(fromJSON(vars.BENCH_ACTORS || '["cdobbyn"]'), github.actor)
+
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # push the attempt record to bench-attempts
+      pull-requests: write # post the table, close a failing candidate
+
+    env:
+      CGO_ENABLED: 0
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      # Interpolating ${{ }} straight into a run: block pastes the value into
+      # the script before bash sees it, so a ref or a label carrying shell
+      # metacharacters would execute. Everything a step needs arrives through
+      # the environment instead, quoted at the point of use.
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+    steps:
+      # fetch-depth 0 because the touched-capability step diffs against the
+      # merge base, which a shallow clone does not have.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: restore the bench set
+        id: benchset
+        uses: actions/cache@v4
+        with:
+          path: bench-v1
+          # Keyed on the pinned id list, so changing which documents are in the
+          # set invalidates the cache. The archive is reproducible from that
+          # list, so the list is the honest key.
+          key: bench-v1-${{ hashFiles('tools/sample/ids/bench-v1.tsv') }}
+
+      - name: download the bench set
+        if: steps.benchset.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dl bench-v1
+          gh release download bench-v1 --repo "$GITHUB_REPOSITORY" --dir dl
+          # The published checksum is the gate. A silently truncated download
+          # would otherwise be benchmarked as if it were the corpus.
+          (cd dl && sha256sum -c bench-v1.tar.zst.sha256)
+          tar --zstd -xf dl/bench-v1.tar.zst -C bench-v1
+          n=$(find bench-v1 -maxdepth 1 -name '*.pdf' | wc -l)
+          test "$n" -eq 12 || { echo "::error::bench set holds $n documents, expected 12"; exit 1; }
+
+      - name: the baseline must exist
+        run: |
+          set -euo pipefail
+          if [ ! -f internal/bench/baseline.json ]; then
+            echo "::error::internal/bench/baseline.json is missing, so there is nothing to score against. It is built by byb-om7.8 steps 5 and 6, on Linux, from three runs of one commit."
+            exit 1
+          fi
+
+      # Section 5.3: the stored numbers are only usable when what they depend on
+      # is unchanged. Commit is deliberately NOT compared -- head differs from
+      # the baseline commit by definition -- and Runner is recorded for the
+      # reader rather than checked, because no absolute duration is stored.
+      - name: validate the baseline fingerprint
+        id: fingerprint
+        run: |
+          set -euo pipefail
+          harness=$(cat cmd/byblos-bench/*.go internal/bench/map.go | sha256sum | cut -d' ' -f1)
+          benchset=$(cut -d' ' -f1 dl/bench-v1.tar.zst.sha256 2>/dev/null || echo "")
+          stale=false
+          reasons=""
+          check() {
+            want=$(python3 -c "import json;print(json.load(open('internal/bench/baseline.json'))['fingerprint'].get('$1',''))")
+            if [ -n "$want" ] && [ -n "$2" ] && [ "$want" != "$2" ]; then
+              stale=true
+              reasons="$reasons $1(recorded $want, now $2)"
+            fi
+          }
+          check harness_sha256 "$harness"
+          check bench_set_sha256 "$benchset"
+          check go_version "$(go env GOVERSION)"
+          check goos_goarch "$(go env GOOS)_$(go env GOARCH)"
+          echo "stale=$stale" >> "$GITHUB_OUTPUT"
+          if [ "$stale" = true ]; then
+            # A STALE BASELINE IS A HARD STOP when the harness or bench set
+            # changed. A fresh base run measured here cannot repair a comparison
+            # between different harness versions or different document sets --
+            # that is comparing different work. Refuse, and say exactly how to
+            # fix it. Closed by byb-99d.
+            echo "::error::baseline is stale:$reasons. Refresh it -- three runs of one commit on ubuntu-24.04, then byblos-bench baseline -runs a,b,c."
+            exit 1
+          fi
+
+      # A red suite ends the run here. Scoring a candidate that does not pass
+      # its own tests measures nothing worth knowing.
+      - name: test
+        run: make test
+
+      # Which capabilities the diff can plausibly move. UNKNOWN PATHS MAP TO
+      # EVERYTHING, on purpose: a table that silently omits the capability a
+      # change actually affects would report "no movement" for a real
+      # regression, which is the failure mode this whole workflow exists to
+      # prevent. Being slow is the cheap error here.
+      - name: which capabilities the diff touches
+        id: touched
+        run: |
+          set -euo pipefail
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          all="inspect,extract-raster,build-pdf,jbig2-generic,quantize-png,downsample,jpeg-recompress,linearize,text-layer"
+          caps=""
+          add() { case ",$caps," in *",$1,"*) ;; *) caps="${caps:+$caps,}$1" ;; esac; }
+          while read -r f; do
+            [ -n "$f" ] || continue
+            case "$f" in
+              *_test.go) continue ;;
+              inspect.go) add inspect ;;
+              extract.go) add extract-raster ;;
+              build.go|internal/pdfbuild/*) add build-pdf ;;
+              jbig2.go|internal/jbig2/*|sauvola.go) add jbig2-generic ;;
+              quantize.go|quantize_indexed.go) add quantize-png ;;
+              downsample.go) add downsample ;;
+              optimize.go) add jpeg-recompress; add linearize ;;
+              internal/linearize/*) add linearize ;;
+              stamp.go|substitute.go|internal/glyphless/*) add text-layer ;;
+              docs/*|*.md|.github/*|tools/*) ;;
+              # pdfdoc and content sit under everything, and so does anything
+              # this table has not heard of.
+              *) caps="$all" ; break ;;
+            esac
+          done < <(git diff --name-only "$base" HEAD)
+          echo "caps=${caps:-$all}" >> "$GITHUB_OUTPUT"
+          echo "touched: ${caps:-$all}"
+
+      - name: measure head
+        env:
+          CAPS: ${{ steps.touched.outputs.caps }}
+        run: |
+          set -euo pipefail
+          go run ./cmd/byblos-bench run -set ./bench-v1 -out head.json -time "$CAPS"
+
+      # Measure the base for the touched capabilities on the same runner as
+      # head. This makes latency scoreable: the baseline cannot carry absolute
+      # durations (design spec 5.3), but a fresh base run measured here can be
+      # compared to head on the same machine. Implemented by byb-99d.
+      - name: measure fresh base for touched capabilities
+        env:
+          CAPS: ${{ steps.touched.outputs.caps }}
+        run: |
+          set -euo pipefail
+          commit=$(jq -r '.fingerprint.commit' internal/bench/baseline.json)
+          git checkout "$commit"
+          go run ./cmd/byblos-bench run -set ./bench-v1 -out base.json -time "$CAPS"
+          git checkout -
+
+      - name: score
+        id: score
+        run: |
+          set -euo pipefail
+          set +e
+          go run ./cmd/byblos-bench score -baseline internal/bench/baseline.json \
+            -head head.json -base-run base.json -out table.md
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # The verdict line reads: **PASS** - weighted score +0.123 (pass
+          # needs +0.05). Both figures are signed decimals and the score comes
+          # first, so take the first one rather than matching the backticks
+          # around it.
+          value=$(head -1 table.md | grep -oE '[+-][0-9]+\.[0-9]+' | head -1)
+          echo "value=${value:-0}" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -eq 0 ]; then echo "outcome=accepted" >> "$GITHUB_OUTPUT";
+          else echo "outcome=rejected" >> "$GITHUB_OUTPUT"; fi
+
+      # A candidate that changed a test has changed the thing that judges it.
+      # Say so at the top of the comment, where a reader cannot miss it.
+      - name: banner a changed test
+        run: |
+          set -euo pipefail
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          if git diff --name-only "$base" HEAD | /bin/grep -q '_test\.go$'; then
+            { echo "> **This candidate changed a test.** The suite that judged it is not the suite on \`$BASE_REF\`. Read the diff before reading the table."
+              echo
+              cat table.md
+            } > commented.md
+          else
+            cp table.md commented.md
+          fi
+
+      - name: post the table
+        run: gh pr comment "$PR" --body-file commented.md
+
+      # The verdict is written by the workflow, never by the agent that proposed
+      # the change. An agent cannot record its own failure as a success.
+      - name: amend the attempt record
+        continue-on-error: true
+        env:
+          OUTCOME: ${{ steps.score.outputs.outcome }}
+          VALUE: ${{ steps.score.outputs.value }}
+        run: |
+          set -euo pipefail
+          tools/bench/attempt.sh amend --pr "$PR" --outcome "$OUTCOME" --score "$VALUE"
+
+      # Deferred: no SLACK_WEBHOOK_URL exists yet (byb-cwb). A missing secret
+      # must not redden a run, so this is skipped rather than failed.
+      - name: notify Slack on a pass
+        if: steps.score.outputs.rc == '0'
+        env:
+          SLACK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The emptiness test lives here, not in `if:`, because a step's own
+          # env block is not in scope for its own condition.
+          if [ -z "${SLACK:-}" ]; then
+            echo "no SLACK_WEBHOOK_URL set; skipping the notification (byb-cwb)"
+            exit 0
+          fi
+          body=$(jq -nc --arg r "$REPO" --arg p "$PR" '{text:"bench PASS \($r) #\($p)"}')
+          curl -sS -X POST -H 'Content-type: application/json' --data "$body" "$SLACK"
+
+      - name: close a failing candidate
+        if: steps.score.outputs.rc != '0'
+        run: gh pr close "$PR" --comment "Benchmark rejected this candidate. The table above is the reason."
+
+      # The job's own verdict follows the score, so the pull request's checks
+      # show red for a rejected candidate rather than green with a sad table.
+      - name: fail the job when the candidate failed
+        if: steps.score.outputs.rc != '0'
+        run: exit 1

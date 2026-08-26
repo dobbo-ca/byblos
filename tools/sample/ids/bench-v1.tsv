@@ -1,0 +1,26 @@
+# bench-v1: the twelve documents cmd/byblos-bench measures.
+#
+# ia-06043926.cn.pdf is EXCLUDED and must not be added back. archive.org
+# carries no rights statement and no date for that item, so there is nothing
+# on which to base republication from a public repository. Design spec
+# 2026-08-11-bench-map-design.md section 4.3. It stays in the local sample.
+#
+# The exclusion costs the set its only CJK document; section 4.3 records that
+# as a known gap for bench-v2, not as an oversight.
+#
+# Every value below is copied from ~/.byblos-sample/manifest.tsv, not
+# recomputed. The govdocs1 files are zip members, so their source is the
+# procedure in tools/sample/README.md rather than a URL.
+name	source_url	sha256
+001029.pdf	see tools/sample/README.md (govdocs1 zip member)	ec2bee6100dd9d7d50a4f6f5400618403ccfadf5f82cb1a3ca8b6b2cebcd8b49
+003158.pdf	see tools/sample/README.md (govdocs1 zip member)	978d08d1e2a4f07343bddf8e1d495e2cc3bdb51d0be85beea97160b39f8adee6
+003988.pdf	see tools/sample/README.md (govdocs1 zip member)	8918cfeb532ac0364f5c49990daf8c53028d8aeac0e721dc434c2bd8566f573c
+004513.pdf	see tools/sample/README.md (govdocs1 zip member)	bdbe4890be6dad88195ffd3c8e03e7b6f1832a6b4bc1b2bd45e5505af2bce7cc
+004997.pdf	see tools/sample/README.md (govdocs1 zip member)	acf66730b312e1755b31e093056b0bb841f5b55b4e58993d5570278553a32da6
+005393.pdf	see tools/sample/README.md (govdocs1 zip member)	72eb9a1cbbea874a87371e04abdd60cc5fbbe39b33dd4e7a716c9f1a639ffa13
+005697.pdf	see tools/sample/README.md (govdocs1 zip member)	75dc5b212d3b4a89d20d32ee8958ea05eaab993764b7d2e6b58e1794c4014997
+ia-DTIC_ADA134285.pdf	https://archive.org/download/DTIC_ADA134285/DTIC_ADA134285.pdf	f30310498d6dc09e419e7815336a656f788ca0afaefa5de31dcba8e5b5a2aed8
+ia-DTIC_ADA383635.pdf	https://archive.org/download/DTIC_ADA383635/DTIC_ADA383635.pdf	ce350011414e3b9a6de8f85c53857adf6a3e679d6d343e9941ba6aa7055da6b5
+ia-journalfrtechni13erdmgoog.pdf	https://archive.org/download/journalfrtechni13erdmgoog/journalfrtechni13erdmgoog.pdf	6326c929c3acd20a988dde4b6188673b801bd754eeb2bb5a130ba2ed7c59edb8
+ia-municipaldocume00masgoog.pdf	https://archive.org/download/municipaldocume00masgoog/municipaldocume00masgoog.pdf	1bd00233153595342cbcd7822273479f7da0c831cdcc57d74abcc72d9e2918a5
+ia-revistadasocied03portgoog.pdf	https://archive.org/download/revistadasocied03portgoog/revistadasocied03portgoog.pdf	190249db33676f5280d474bd479d3ea8400ea33155dbaed4055930b3bbcf8036
