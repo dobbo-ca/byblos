@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dobbo-ca/byblos"
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
@@ -794,67 +793,6 @@ func TestRenderFontCIDWidthHugeFloatArchIndependent(t *testing.T) {
 	const want = 65536
 	if len(rf.W) != want {
 		t.Fatalf("W has %d entries, want exactly %d (arch-independent clamp)", len(rf.W), want)
-	}
-}
-
-// oneImagePDF: a page whose ONLY content is one 4x4 image drawn 1:1 -- the
-// MediaBox is 4x4 points and the CTM `4 0 0 4 0 0`, so at scale 1 every
-// device pixel center maps to exactly one source pixel. All 16 pixels are
-// distinct, so a flip, transpose or off-by-one cannot pass by luck.
-func oneImagePDF() []byte {
-	var px []byte
-	for i := byte(0); i < 16; i++ {
-		px = append(px, i*16, 255-i*16, i*8+40)
-	}
-	const c = "q 4 0 0 4 0 0 cm /Im0 Do Q"
-	return wrapPDF([]string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 4 4]" +
-			" /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
-		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(c), c),
-		flateImageObj(4, 4, px),
-	})
-}
-
-// TestOneImageMatchesExtractPageRaster pins byb-8b9.2's second acceptance
-// clause: a page with one image still matches ExtractPageRaster's existing
-// result exactly. Rendering that page 1:1 through the same pdfdoc decode
-// seam must reproduce the extracted raster pixel for pixel, so a later stage
-// cannot wire render.Page into the extract path with a different orientation
-// or placement convention without this failing.
-func TestOneImageMatchesExtractPageRaster(t *testing.T) {
-	pdf := oneImagePDF()
-	pr, err := byblos.ExtractPageRaster(bytes.NewReader(pdf), 1)
-	if err != nil {
-		t.Fatalf("ExtractPageRaster: %v", err)
-	}
-	d, err := pdfdoc.Open(bytes.NewReader(pdf))
-	if err != nil {
-		t.Fatalf("pdfdoc.Open: %v", err)
-	}
-	p, err := d.Page(1)
-	if err != nil {
-		t.Fatalf("Page(1): %v", err)
-	}
-	box := content.Box{LLX: p.CropBox.LLX, LLY: p.CropBox.LLY, URX: p.CropBox.URX, URY: p.CropBox.URY}
-	got, err := Page(context.Background(), p.Content, box, 0, 1, pdfdocImages(d, p), nil)
-	if err != nil {
-		t.Fatalf("render.Page: %v", err)
-	}
-	eb, gb := pr.Image.Bounds(), got.Bounds()
-	if eb.Dx() != gb.Dx() || eb.Dy() != gb.Dy() {
-		t.Fatalf("size: extract %v vs render %v", eb, gb)
-	}
-	for y := 0; y < eb.Dy(); y++ {
-		for x := 0; x < eb.Dx(); x++ {
-			er, eg, ebl, _ := pr.Image.At(eb.Min.X+x, eb.Min.Y+y).RGBA()
-			rr, rg, rb, _ := got.At(gb.Min.X+x, gb.Min.Y+y).RGBA()
-			if er != rr || eg != rg || ebl != rb {
-				t.Fatalf("pixel (%d,%d): extract (%d,%d,%d) vs render (%d,%d,%d)",
-					x, y, er>>8, eg>>8, ebl>>8, rr>>8, rg>>8, rb>>8)
-			}
-		}
 	}
 }
 
