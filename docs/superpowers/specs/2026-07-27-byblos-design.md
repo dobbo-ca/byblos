@@ -219,6 +219,41 @@ unreadable and pushed the measured divert rate *down*. Watch `UnhandledRate` for
 regressions (`stats.go:50-57`), and measure the premise itself over scan-shaped
 pages.
 
+### Amendment 2026-08-26: the renderer exists, is measured, and is exported (byb-8b9, byb-547)
+
+The amendment above records a *decision to build*. This one records the
+outcome, because for a day the renderer existed and no caller could reach it.
+
+**It is built.** `byb-8b9` closed 2026-08-25, six stages merged (PRs #97–#103):
+content-stream interpretation, image XObjects, text and TrueType outlines,
+bare-CFF, classic Type 1, and bundled substitute faces. **It is measured**
+against `pdftoppm` at 400px over 283 comparable documents of a 299-document
+no-embedded-font population: **median 6.88% pixel disagreement** (`byb-8b9.7`).
+
+**It is now exported.** `byb-547`: `RenderPage` and `RenderPageContext` in §4.
+Before that the code sat in `internal/render` with no exported entry point of
+any kind while this section's opening still read "extract, do not render" and
+the package doc still asserted "Byblos does not render PDFs" — so `go doc`
+told a caller the opposite of the truth. Byblos is the toolbox; it owes a
+callable tool and nothing more. Whether Kleio picks it up is a Kleio decision
+and is not tracked here.
+
+**The opening argument of this section is not retracted, it is scoped.** "Pure-Go
+PDF rasterization is enormous … larger than Cadmus" remains true of the
+archival renderer, which is the row the 2026-08-03 table did not choose. What
+was built is the thumbnail row: page 1, 400px, recognisable rather than
+faithful.
+
+**Do not let this reach the capability register.** `render` in `capabilityRules`
+(`upgrade.go`) and in `FUTURE.md` names the **archival** renderer, and its
+upgrade rule fires on pages whose provenance records `diverted:
+not-single-raster` or `dropped_annots > 0`. `RenderPage` rescues neither of
+those — `ExtractPageRaster` refuses exactly the pages it always did. Adding
+`render` to `buildCapabilities` would therefore make `UpgradeCandidates` skip
+the documents that still want the archival renderer, hiding a real upgrade;
+`capability_register_test.go`'s "never both" arm exists to catch that class.
+`render` stays deferred, tracked, and unclaimed.
+
 ### Amendment 2026-08-24: pdftotext is not eliminated (byb-lez.3)
 
 This section previously called `pdftotext` word extraction an open scope
@@ -498,6 +533,19 @@ func (p PageRaster) CoversPage() bool
 
 func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error)
 func ExtractPageRasterContext(ctx context.Context, r io.ReadSeeker, page int) (*PageRaster, error)
+
+// --- rendering, at thumbnail fidelity (§2's 2026-08-03 and 2026-08-26 amendments) ---
+
+// RenderPage rasterises a page to an RGBA image whose long edge is longEdgePx
+// pixels. Recognisable, not faithful: no colour management, no transparency
+// group, no shading, no JBIG2 or JPX image XObject. An element this stage
+// cannot draw is skipped and the rest of the page still renders.
+//
+// It is NOT the `render` capability, and it does not rescue an
+// ErrNotSingleRaster page -- that is the archival renderer, still deferred in
+// FUTURE.md. ExtractPageRaster's answer is unchanged by this function existing.
+func RenderPage(r io.ReadSeeker, page, longEdgePx int) (*image.RGBA, error)
+func RenderPageContext(ctx context.Context, r io.ReadSeeker, page, longEdgePx int) (*image.RGBA, error)
 
 // --- extraction telemetry ---
 // Instruments the premise §2 rests on: that a page which is not a single
