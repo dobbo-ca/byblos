@@ -292,3 +292,104 @@ func TestEmbeddedTextThroughPdfdocSeamAgreesWithPdftoppm(t *testing.T) {
 			frac*100, tolerance*100)
 	}
 }
+
+// type0DWPDF wraps the same CID-keyed CFF cidSquareFont uses in a real
+// Type0/CIDFontType0 PDF (FontFile3 /CIDFontType0C), with dw appended
+// verbatim to the descendant CIDFont dict -- "" for an absent /DW, or
+// " /DW <n>" for an explicit one.
+func type0DWPDF(dw string) []byte {
+	cff := string(buildCFF(cffOpts{
+		charstrings: [][]byte{t2cs("endchar"), t2cs(-107, "callsubr", "endchar")},
+		sids:        []uint16{7},
+		fdSubrs: [][][]byte{nil, {t2cs(0, 0, "rmoveto",
+			500, "hlineto", 500, "vlineto", -500, "hlineto", "return")}},
+		fdSelect: fdSelect3(2, [2]int{0, 0}, [2]int{1, 1}),
+	}))
+	content := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <00090007> Tj ET"
+	return wrapPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]" +
+			" /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+		"<< /Type /Font /Subtype /Type0 /BaseFont /BbCID /Encoding /Identity-H" +
+			" /DescendantFonts [6 0 R] >>",
+		"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /BbCID" +
+			" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>" +
+			" /W [7 [600]]" + dw + " /FontDescriptor 7 0 R >>",
+		"<< /Type /FontDescriptor /FontName /BbCID /Flags 4 /ItalicAngle 0" +
+			" /Ascent 700 /Descent -200 /CapHeight 700 /StemV 80" +
+			" /FontBBox [0 0 1000 1000] /FontFile3 8 0 R >>",
+		fmt.Sprintf("<< /Length %d /Subtype /CIDFontType0C >>\nstream\n%s\nendstream", len(cff), cff),
+	})
+}
+
+// TestRenderFontResolvesDWAbsentTo1000 pins pdfdoc.RenderFont's half of
+// byb-ctz: the descendant CIDFont's /DW default (ISO 32000-1 9.7.4.3) is
+// resolved to 1000 when /DW is absent, and left at the file's explicit 0
+// rather than being folded into the default. A /DW key that is PRESENT but
+// does not parse as a number (e.g. a name) must also fall back to 1000 --
+// key presence is not the same test as a successful parse, and conflating
+// them silently turns "malformed" into "explicit zero".
+func TestRenderFontResolvesDWAbsentTo1000(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dw   string
+		want float64
+	}{
+		{"absent", "", 1000},
+		{"explicit zero", " /DW 0", 0},
+		{"malformed (name, not a number)", " /DW /Foo", 1000},
+	} {
+		d, err := pdfdoc.Open(bytes.NewReader(type0DWPDF(tc.dw)))
+		if err != nil {
+			t.Fatalf("%s: pdfdoc.Open: %v", tc.name, err)
+		}
+		p, err := d.Page(1)
+		if err != nil {
+			t.Fatalf("%s: Page(1): %v", tc.name, err)
+		}
+		rf, ok := d.RenderFont(p.Scope, "F1")
+		if !ok {
+			t.Fatalf("%s: RenderFont refused the fixture", tc.name)
+		}
+		if rf.DW != tc.want {
+			t.Errorf("%s: DW = %v, want %v", tc.name, rf.DW, tc.want)
+		}
+	}
+}
+
+// TestExplicitDWZeroAdvancesZeroThroughTheSeam is byb-ctz's other half: the
+// full pdfdoc.Open -> RenderFont -> render.Page seam must advance an
+// unmapped CID by the RESOLVED /DW, not by the spec default whenever dw==0.
+// CID 9 has no charset entry (no ink); CID 7 draws a 10x10 square. An
+// explicit /DW 0 puts the square at the Tm origin; an absent /DW advances it
+// by the 1000-default (20px at this 20pt size) first.
+func TestExplicitDWZeroAdvancesZeroThroughTheSeam(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dw   string
+		want []rect
+	}{
+		{"absent /DW advances by the 1000 default", "", []rect{{30, 40, 40, 50}}},
+		{"explicit /DW 0 advances by zero", " /DW 0", []rect{{10, 40, 20, 50}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pdf := type0DWPDF(tc.dw)
+			d, err := pdfdoc.Open(bytes.NewReader(pdf))
+			if err != nil {
+				t.Fatalf("pdfdoc.Open: %v", err)
+			}
+			p, err := d.Page(1)
+			if err != nil {
+				t.Fatalf("Page(1): %v", err)
+			}
+			box := content.Box{URX: 100, URY: 100}
+			img, err := Page(context.Background(), p.Content, box, 0, 1, nil, pdfdocFonts(d, p))
+			if err != nil {
+				t.Fatalf("Page: %v", err)
+			}
+			assertExactPixels(t, img, 100, 100, tc.want)
+		})
+	}
+}

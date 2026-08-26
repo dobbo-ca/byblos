@@ -493,6 +493,7 @@ func cidSquareFont() Font {
 		}),
 		Type0: true,
 		W:     map[uint16]float64{7: 600},
+		DW:    1000,
 	}
 }
 
