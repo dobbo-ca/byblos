@@ -210,7 +210,8 @@ func pdfdocFonts(d pdfdoc.Doc, p *pdfdoc.Page) FontFor {
 			return Font{}, false
 		}
 		return Font{Program: rf.Program, BaseFont: rf.BaseFont, Flags: rf.Flags,
-			FirstChar: rf.FirstChar, Widths: rf.Widths}, true
+			FirstChar: rf.FirstChar, Widths: rf.Widths,
+			Type0: rf.Type0, W: rf.W, DW: rf.DW}, true
 	}
 }
 

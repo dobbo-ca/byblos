@@ -674,18 +674,40 @@ func (d *doc) Font(sc int, name string) (int, bool) {
 // RenderFont is the renderer's view of one simple font dict: the fields
 // internal/render's Font seam carries. Program is the decoded /FontFile,
 // /FontFile2 or /FontFile3 stream, nil when the dict embeds none -- which is
-// the case stage 4f substitutes for.
+// the case stage 4f substitutes for. Type0/W/DW mirror render.Font's fields
+// of the same name (byb-6z1): a composite /Subtype /Type0 font's Program and
+// widths live on its descendant CIDFont, not the Type0 dict itself.
 type RenderFont struct {
 	BaseFont  string
 	Flags     int // /FontDescriptor /Flags
 	FirstChar int
 	Widths    []float64
 	Program   []byte
+	Type0     bool
+	W         map[uint16]float64
+	DW        float64
 }
 
-// RenderFont resolves the named /Font resource for rendering. Composite
-// fonts (/Subtype /Type0) are refused: their codes are multi-byte CIDs the
-// renderer's single-byte show path cannot carry yet (byb-8b9.8).
+// maxCIDWidthEntries bounds how many CID->width entries a /W array can
+// flatten to. render.Font.W keys are uint16 CIDs, so 65536 (the whole CID
+// space) is already generous. Without a bound the range form (ISO 32000-1
+// 9.7.4.3) `cFirst cLast w` lets ~20 bytes of input -- /W [0 2147483647 500]
+// -- claim 2^31 map entries (byb-6z1, bug class 5: unbounded preallocation
+// from a declared count).
+const maxCIDWidthEntries = 65536
+
+// RenderFont resolves the named /Font resource for rendering. A composite
+// /Subtype /Type0 font (byb-6z1) is resolved through its descendant CIDFont
+// when /Encoding is Identity-H, per render.Font's own contract (text.go)
+// that only the Identity CMaps give code boundaries without decoding an
+// embedded or predefined CMap. Any other /Encoding -- a CMap stream, a
+// predefined CJK CMap name, or Identity-V -- returns ok=false rather than a
+// wrong or fallback resolution. Identity-V is refused, not resolved with
+// horizontal metrics: showText has no vertical mode, so it would ink glyphs
+// where poppler inks none, and a census of all 5,672 pinned-sample documents
+// finds 0 Identity-V among 4,482 Type0 dicts (byb-6z1) -- worth revisiting
+// only alongside actual vertical-layout support, on a corpus that has some.
+// See Font.Type0 in text.go.
 func (d *doc) RenderFont(sc int, name string) (RenderFont, bool) {
 	rf, err := d.renderFont(sc, name)
 	return rf, err == nil
@@ -704,15 +726,36 @@ func (d *doc) renderFont(sc int, name string) (rf RenderFont, err error) {
 	if !ok {
 		return rf, fmt.Errorf("byblos/pdfdoc: /Font %q is not a dict", name)
 	}
+	// widthDict is where /FirstChar, /Widths and /FontDescriptor are read
+	// from: the font dict itself, unless it is a Type0 composite, in which
+	// case those live on its one descendant CIDFont (ISO 32000-1 9.7.4).
+	widthDict := dict
 	if st := dict.NameEntry("Subtype"); st != nil && *st == "Type0" {
-		return rf, fmt.Errorf("byblos/pdfdoc: /Font %q is a composite Type0 font", name)
+		enc, isName := d.deref(dict["Encoding"]).(types.Name)
+		if !isName || enc.Value() != "Identity-H" {
+			return rf, fmt.Errorf("byblos/pdfdoc: /Font %q Type0 /Encoding is not Identity-H", name)
+		}
+		descFonts := d.arrayEntry(dict, "DescendantFonts")
+		if len(descFonts) != 1 {
+			return rf, fmt.Errorf("byblos/pdfdoc: /Font %q /DescendantFonts is not one element", name)
+		}
+		desc, isDict := d.deref(descFonts[0]).(types.Dict)
+		if !isDict {
+			return rf, fmt.Errorf("byblos/pdfdoc: /Font %q descendant is not a dict", name)
+		}
+		rf.Type0 = true
+		rf.DW, _ = d.number(desc["DW"])
+		rf.W = d.cidWidths(desc)
+		widthDict = desc
 	}
 	if bf := dict.NameEntry("BaseFont"); bf != nil {
 		rf.BaseFont = *bf
 	}
-	rf.FirstChar = d.intEntry(dict, "FirstChar")
-	rf.Widths = d.numberArray(dict, "Widths")
-	fd := d.dictEntry(dict, "FontDescriptor")
+	if !rf.Type0 {
+		rf.FirstChar = d.intEntry(dict, "FirstChar")
+		rf.Widths = d.numberArray(dict, "Widths")
+	}
+	fd := d.dictEntry(widthDict, "FontDescriptor")
 	if fd == nil {
 		return rf, nil
 	}
@@ -1006,4 +1049,89 @@ func (d *doc) arrayEntry(dict types.Dict, key string) types.Array {
 		return v
 	}
 	return nil
+}
+
+// cidWidths flattens a descendant CIDFont's /W (ISO 32000-1 9.7.4.3) to
+// CID -> width. /W interleaves two forms in one array:
+//
+//	c [w1 w2 ... wn]   n consecutive CIDs starting at c
+//	cFirst cLast w     every CID in [cFirst, cLast] gets w
+//
+// A malformed head (a non-number where a CID is expected) stops the scan
+// rather than misreading the rest of the array as something it is not.
+//
+// budget, not len(out), is what bounds the work: both forms can target the
+// same CIDs repeatedly (a repeated range, or a shared indirect sub-array
+// referenced many times), and len(out) stops growing on a repeat while the
+// loop keeps re-walking every CID it names. Gating on len(out) alone lets
+// ~20 bytes of /W (a repeated `0 65534 500` triple, or one shared `9 0 R`
+// sub-array referenced N times) burn O(N*65536) time for O(1) input growth
+// (byb-6z1 review, bug class 6). budget is decremented once per CID visited,
+// by either form, so total work across the whole array is capped at
+// maxCIDWidthEntries regardless of how many times a range repeats.
+func (d *doc) cidWidths(dict types.Dict) map[uint16]float64 {
+	arr := d.arrayEntry(dict, "W")
+	if len(arr) == 0 {
+		return nil
+	}
+	out := map[uint16]float64{}
+	// budget bounds work, not entries covered, so it must accommodate both:
+	// maxCIDWidthEntries for the CIDs a single range/sub-array can visit,
+	// plus len(arr) so that entries after a full-space range (budget
+	// otherwise drained to 0) still get their turn to override it (byb-6z1
+	// review, correctness finding 1).
+	budget := maxCIDWidthEntries + len(arr)
+	for i := 0; i < len(arr) && budget > 0; {
+		c, ok := d.number(arr[i])
+		if !ok || c < 0 || c > 65535 {
+			break
+		}
+		i++
+		if i >= len(arr) {
+			break
+		}
+		if sub, isArray := d.deref(arr[i]).(types.Array); isArray {
+			cid := int(c)
+			for _, wo := range sub {
+				if cid > 65535 || budget <= 0 {
+					break
+				}
+				if w, ok := d.number(wo); ok {
+					out[uint16(cid)] = w
+				}
+				cid++
+				budget--
+			}
+			i++
+			continue
+		}
+		last, ok := d.number(arr[i])
+		if !ok {
+			break
+		}
+		i++
+		if i >= len(arr) {
+			break
+		}
+		w, ok := d.number(arr[i])
+		if !ok {
+			break
+		}
+		i++
+		// Clamp in float space, before converting to int: last can be a
+		// float wildly out of int range (e.g. 1e300), and Go's float64->int
+		// conversion of an out-of-range value is implementation-defined --
+		// arm64 saturates, amd64 wraps to a negative -- so converting first
+		// and clamping after gave a different rendered layout per
+		// architecture (byb-6z1 review finding 4).
+		if last > 65535 {
+			last = 65535
+		}
+		hi := int(last)
+		for cid := int(c); cid <= hi && budget > 0; cid++ {
+			out[uint16(cid)] = w
+			budget--
+		}
+	}
+	return out
 }
