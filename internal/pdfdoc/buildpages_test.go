@@ -403,7 +403,7 @@ func TestBuildFromPagesReordersAndDeletes(t *testing.T) {
 	}
 }
 
-// TestBuildFromPagesImportsFromASecondSource is the operation no pdfcpu v0.13.0
+// TestBuildFromPagesImportsFromASecondSource is the operation no pdfcpu v0.15.0
 // entry point offers at all: page N of document B at position k of document A.
 func TestBuildFromPagesImportsFromASecondSource(t *testing.T) {
 	// Booklet page 1 is deliberately not used here: it is the one page of that

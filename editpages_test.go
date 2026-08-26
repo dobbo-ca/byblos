@@ -276,8 +276,15 @@ func TestBuildFromPagesContextRefusesADocumentPdfcpuWouldRefuse(t *testing.T) {
 		t.Fatal("BuildFromPagesContext accepted a page carrying /PresSteps, " +
 			"which pdfcpu's own validator unconditionally refuses")
 	}
-	if !strings.Contains(err.Error(), "PresSteps") {
-		t.Errorf("error = %q, want it to name PresSteps (pdfcpu's validator error)", err)
+	// pdfcpu names the refused entry differently across versions -- v0.13 says
+	// "PresSteps", v0.15 says "presentation steps dict" -- so accept either
+	// rather than pinning one release's wording. What must hold is that the
+	// refusal names THIS entry and not something else; a validator that started
+	// refusing for an unrelated reason would still pass an err != nil check
+	// alone, which is why this assertion exists at all (byb-3iw).
+	if msg := strings.ToLower(err.Error()); !strings.Contains(msg, "pressteps") &&
+		!strings.Contains(msg, "presentation steps") {
+		t.Errorf("error = %q, want it to name the /PresSteps entry pdfcpu refuses", err)
 	}
 	if buf.Len() != 0 {
 		t.Errorf("a refused build wrote %d bytes; it must write none", buf.Len())

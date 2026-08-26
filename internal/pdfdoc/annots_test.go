@@ -359,11 +359,29 @@ func TestMalformedTJIsAnErrorNotAPanic(t *testing.T) {
 	}
 
 	// The guard half: a path that DOES still reach skipTJ must return an error
-	// rather than crash. If this stops reproducing the panic, the assertion
-	// below is the thing that says so.
+	// rather than crash.
+	//
+	// pdfcpu v0.15 no longer panics here -- it returns "corrupt TJ expression"
+	// as an ordinary error, which is strictly better than the panic v0.13 took
+	// the test binary down with. So EITHER form satisfies this test's stated
+	// purpose, and only a nil error does not.
+	//
+	// Widening this assertion is safe ONLY because catchPanic is now covered
+	// directly, by TestCatchPanicConvertsAPanicToErrMalformed. Without that,
+	// accepting the non-panic form here reduced the coverage of a 14-call-site
+	// panic guard to nothing: measured under byb-3iw, with this assertion
+	// widened and catchPanic's body replaced by a no-op, `go test ./...` exited
+	// 0. Do not narrow that test away and leave this one widened.
 	err = Optimize(bytes.NewReader(data), io.Discard)
-	if !errors.Is(err, ErrMalformed) {
-		t.Fatalf("Optimize error = %v; want ErrMalformed. If nil, the fixture no "+
-			"longer reproduces the panic and this test is proving nothing.", err)
+	switch {
+	case err == nil:
+		t.Fatalf("Optimize error = nil; the fixture no longer reproduces the " +
+			"malformed TJ and this test is proving nothing.")
+	case errors.Is(err, ErrMalformed):
+		// v0.13's shape: pdfcpu panicked and catchPanic converted it.
+	case strings.Contains(err.Error(), "corrupt TJ"):
+		// v0.15's shape: pdfcpu detects it and returns an error itself.
+	default:
+		t.Fatalf("Optimize error = %v; want ErrMalformed or a corrupt TJ error", err)
 	}
 }

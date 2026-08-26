@@ -4,7 +4,7 @@
 // underlying PDF library is a change to this package alone (design spec
 // section 3). arch_test.go in the repository root enforces that.
 //
-// pdfcpu API notes, verified against v0.13.0:
+// pdfcpu API notes, verified against v0.15.0:
 //
 //   - api.ReadAndValidate dereferences conf.Cmd with no nil check and pdfcpu's
 //     fault.Catch only recovers its own panic type, so passing a nil
@@ -38,13 +38,17 @@
 package pdfdoc
 
 import (
+	"bytes"
+	"compress/flate"
 	"errors"
 	"fmt"
+	"hash/adler32"
 	"io"
 	"sync"
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/filter"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -61,7 +65,7 @@ var configOnce sync.Once
 // First, the init is lazy and unsynchronised. model.NewDefaultConfiguration
 // reaches EnsureDefaultConfigAt -> ensureConfigFileAt -> parseConfigFile, which
 // WRITES a pdfcpu package-level variable on the first call in the process while
-// a concurrent caller READS it. Measured with -race against pdfcpu v0.13.0: 9
+// a concurrent caller READS it. Measured with -race against pdfcpu v0.15.0: 9
 // data races from 8 goroutines calling Open at once, and none once this
 // serialises the first call.
 //
@@ -188,6 +192,28 @@ type Page struct {
 	// convention rather than anything the file states. See Page(), and byb-8ly
 	// for the nine govdocs1 files that made it necessary.
 	MediaBoxDefaulted bool
+
+	// ContentRecovered reports that at least one of this page's content streams
+	// failed its integrity check and Content holds the bytes that decoded
+	// anyway. See pageContents, and byb-3iw for the ten corpus pages that made
+	// it necessary.
+	//
+	// It does NOT say bytes were lost. A corrupted Adler-32 trailer alone still
+	// yields the whole stream, because zlib checks the trailer only after the
+	// last deflate block; a mid-stream corruption really does truncate. What the
+	// flag states in both cases is that Content does not match what the file
+	// attests to, and, like MediaBoxDefaulted, stating that is better than the
+	// two alternatives: pdfcpu v0.13 kept these bytes SILENTLY, and v0.15
+	// refuses the page and loses content poppler reads.
+	//
+	// KNOWN LIMIT, measured: the flag reports a failure pdfcpu REPORTED. A single
+	// stream truncated mid-deflate-block is one pdfcpu truncates itself, silently,
+	// returning the short prefix with no error at all -- so byblos keeps exactly
+	// the bytes v0.13 kept but cannot flag them without inflating every content
+	// stream a second time, which would double the decode cost of every page to
+	// annotate a rare one. The ARRAY case, which is the corpus's actual damage
+	// (byb-3iw's 150277 p25), is detected and flagged.
+	ContentRecovered bool
 }
 
 // defaultPageWidthPt, defaultPageHeightPt are US Letter, the box every reader
@@ -441,65 +467,293 @@ func (d *doc) Page(n int) (p *Page, err error) {
 	// page, fails the WHOLE document over one page that contains nothing.
 	// byb-uxb measured that against poppler over 200 govdocs1 files: six of the
 	// seven disagreements were this, 3% of the sample lost outright.
-	if _, ok := pd.Find("Contents"); ok {
-		c, err := xt.PageContent(pd, n)
-		switch {
-		case errors.Is(err, model.ErrNoContent):
-			if err := d.verifyEmptyContent(pd["Contents"]); err != nil {
-				return nil, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
-			}
-		case err != nil:
-			return nil, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
-		default:
-			p.Content = c
-		}
+	c, recovered, err := d.pageContents(pd)
+	if err != nil {
+		return nil, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
 	}
+	p.Content, p.ContentRecovered = c, recovered
 	return p, nil
 }
 
-// verifyEmptyContent reports the distinction pdfcpu does not: whether a page
-// that came back as model.ErrNoContent is BLANK or BROKEN.
+// pageContents decodes a page's content streams, and is the ONE place that
+// decides what a page's bytes are. Page, AppendContent and contentDepth all
+// route through it.
 //
-// PageContent returns that sentinel when the page's content streams
-// concatenate to zero bytes, which is exactly what a legal blank page looks
-// like. But under the relaxed validation mode Open uses, decodeContentStream
-// swallows a "flate: corrupt input before offset" failure -- it logs "skipped"
-// and returns nil, leaving that stream's content empty -- so a shredded
-// content stream arrives here as the identical sentinel and the identical zero
-// bytes. Keying the blank-page decision on the sentinel alone would trade a
-// false failure for a silent one, and a page reported as valid and empty when
-// its content did not decode is the worse of the two.
+// It replaces a direct xt.PageContent call, which byblos can no longer use, for
+// a reason byb-3iw measured over every page of 4,840 documents. Under the
+// relaxed validation mode Open uses, pdfcpu's decodeContentStream SWALLOWS a
+// flate failure: the stream contributes zero bytes and the page is reported as
+// fine. When /Contents is a single stream that is model.ErrNoContent, which
+// byblos used to re-decode separately to tell a blank page from a shredded one.
+// But when /Contents is an ARRAY and a sibling element decodes, the sum is
+// non-zero, PageContent returns success, and the damaged element is dropped in
+// silence. That is the corpus's 150277 p25 (5,452 bytes -> its last 469, -91.4%)
+// and it is invisible from outside pdfcpu, so the decode has to happen here.
 //
-// So the streams are decoded again here, on copies, purely to read the error
-// pdfcpu discarded. Their bytes are of no interest: PageContent has already
-// established there are none.
-func (d *doc) verifyEmptyContent(contents types.Object) error {
-	xt := d.ctx.XRefTable
-	o, err := xt.Dereference(contents)
-	if err != nil {
-		return err
+// recovered reports that at least one stream failed its integrity check and
+// byblos kept the bytes that decoded anyway. It does NOT mean bytes were lost:
+// a corrupted Adler-32 trailer alone still yields the complete stream, because
+// zlib raises ErrChecksum only after the final deflate block is consumed. What
+// it means is that the content does not match what the file attests, which is
+// what a caller needs to know either way. Page states it; see ContentRecovered.
+//
+// The elements are concatenated with NO separator between them, which is what
+// pdfcpu does (model/xreftable.go, the types.Array case is a bare
+// append(bb, o.Content...)) and what every other reader does -- straighten.go
+// records the same fact for the write side. Inserting a newline here would be
+// invisible to the suite and would change the content bytes of every clean
+// multi-element page in the corpus.
+func (d *doc) pageContents(pd types.Dict) (content []byte, recovered bool, err error) {
+	if _, ok := pd.Find("Contents"); !ok {
+		return nil, false, nil
 	}
+	xt := d.ctx.XRefTable
+	o, err := xt.Dereference(pd["Contents"])
+	if err != nil {
+		return nil, false, err
+	}
+
+	// /Contents may be an indirect reference to an object that does not exist, or
+	// to a null. ISO 32000-1 7.3.10 makes a reference to a nonexistent object
+	// null, and 7.3.9 makes null equivalent to omitting the entry, so this is a
+	// legally blank page and not an error. pdfcpu v0.13's PageContent had exactly
+	// this arm; measured, dropping it refused two shapes v0.13 read as blank.
+	if o == nil {
+		return nil, false, nil
+	}
+
 	// /Contents is one stream or an array of them (ISO 32000-1 table 30).
 	objs := types.Array{o}
 	if arr, ok := o.(types.Array); ok {
 		objs = arr
+	} else if _, ok := o.(types.StreamDict); !ok {
+		return nil, false, errors.New("page content must be stream dict or array")
 	}
+
+	var buf bytes.Buffer
+	var dropped int
 	for _, obj := range objs {
+		if obj == nil {
+			continue
+		}
 		sd, err := xt.Dereference(obj)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
-		// A null entry, or a shape PageContent already rejected with an error
-		// other than ErrNoContent. Neither is this function's to judge.
+		// A null entry, or an element that is not a stream at all. pdfcpu skips
+		// both rather than failing the page, and so does this.
 		s, ok := sd.(types.StreamDict)
 		if !ok {
 			continue
 		}
 		if err := s.Decode(); err != nil {
-			return err
+			// A DAMAGED ELEMENT MUST NOT FAIL THE WHOLE PAGE. That is what v0.13
+			// did, in relaxed mode, and a version bump is not licence to lose a
+			// page byblos used to read: measured, refusing here dropped a healthy
+			// sibling's 39 bytes and broke AppendContent on documents v0.13
+			// stamped fine.
+			//
+			// Two shapes, two answers. A stream whose deflate data is INTACT and
+			// whose Adler-32 trailer is not decodes correctly once the trailer is
+			// repaired. A stream whose deflate data is itself corrupt has no
+			// trailer worth repairing, so it is DROPPED, which is again what
+			// v0.13's relaxed mode did.
+			// A DECODE LIMIT is not damage and must not start a recovery. pdfcpu
+			// refuses output past filter.DefaultMaxDecodeBytes (512 MiB) and no
+			// repair can make a stream smaller, so walking it again would inflate
+			// the same bomb a second time to reach the same conclusion. Checking
+			// here rather than only inside decodeRecovering is what keeps a
+			// malicious document to ONE capped decode, which is what main costs:
+			// measured on a 600 MiB zlib bomb with a corrupt trailer, TotalAlloc
+			// was 6,145 MiB before either guard, 4,096 with only the inner one, and
+			// ~2,048 with this.
+			if errors.Is(err, filter.ErrDecodeLimitExceeded) {
+				dropped++
+				recovered = true
+				continue
+			}
+			if repaired, ok := decodeRecovering(s); ok {
+				buf.Write(repaired)
+			} else {
+				dropped++
+			}
+			recovered = true
+			continue
 		}
+		buf.Write(s.Content)
 	}
-	return nil
+	switch {
+	case buf.Len() > 0:
+		return buf.Bytes(), recovered, nil
+	case dropped > 0:
+		// Every element was unreadable, so this page is SHREDDED, not blank, and
+		// byblos refuses it exactly as it did before. Telling the two apart is
+		// the whole reason this function exists: pdfcpu reports both with the
+		// identical model.ErrNoContent and the identical zero bytes.
+		return nil, recovered, fmt.Errorf("content stream decode: %d of %d streams unreadable",
+			dropped, len(objs))
+	default:
+		// A legal blank page: a duplex scan's back side, a section separator, a
+		// form page left deliberately empty.
+		//
+		// `recovered` is returned rather than a literal false: a page whose only
+		// stream failed its integrity check AND inflated to zero bytes did have a
+		// recovery, and reporting it as an ordinary blank page contradicts what
+		// ContentRecovered documents. It is normally false here.
+		return nil, recovered, nil
+	}
+}
+
+// decodeRecovering decodes s ONE FILTER AT A TIME, repairing a flate layer's
+// Adler-32 trailer when that is the only thing wrong with it.
+//
+// One filter at a time is the whole point, and it is what six successive
+// regressions converged on. pdfcpu v0.13 recovered these streams by nilling the
+// checksum error inside filter/flateDecode.go's passThru -- which runs on EVERY
+// FILTER APPLICATION, so a pipeline with two damaged flate layers had both
+// recovered. v0.15 propagates the error instead and types/streamdict.go then
+// DISCARDS the bytes it was handed.
+//
+// Earlier attempts here repaired ONE layer and asked pdfcpu to decode the rest of
+// the pipeline in one call. Each attempt was refuted by a shape it could not
+// express: first a filter CHAIN, where the flate layer is not the outermost and
+// Raw is not a zlib stream at all; then a chain whose SECOND flate layer was the
+// damaged one; then a chain with BOTH flate layers damaged, where every
+// single-layer repair is defeated by the other layer's damage and the element was
+// dropped -- v0.13 read 46 bytes and byblos refused the page, or beside a healthy
+// sibling returned 46 of 92 bytes silently.
+//
+// Walking the pipeline removes the guess. Each filter is applied on its own, so a
+// damaged flate layer is repaired at the point it is reached, N of them are
+// repaired independently, and pdfcpu still applies every filter and every
+// /DecodeParms predictor itself. Nothing here reimplements a PDF filter, which was
+// the mistake behind handing callers half-decoded bytes.
+//
+// ok is false when some layer cannot be decoded even after a repair, and its
+// element is then DROPPED rather than failing the page -- see pageContents.
+func decodeRecovering(s types.StreamDict) ([]byte, bool) {
+	data := s.Raw
+	for _, f := range s.FilterPipeline {
+		// One filter, over the bytes the previous one produced. DecodeParms travels
+		// with the filter, so a predictor is applied by pdfcpu on the layer that
+		// declares it.
+		step := s
+		step.Raw = data
+		step.FilterPipeline = []types.PDFFilter{f}
+		step.Content = nil
+		err := step.Decode()
+		if err == nil {
+			data = step.Content
+			continue
+		}
+		// Only a flate layer can be repaired; any other filter failing is a drop.
+		if f.Name != filter.Flate {
+			return nil, false
+		}
+		// A DECODE LIMIT is not a damaged checksum, and attempting a repair on one
+		// is both pointless and expensive. pdfcpu refuses output past
+		// filter.DefaultMaxDecodeBytes (512 MiB); repairing the trailer cannot make
+		// the stream smaller, so the retry below would inflate the same bomb a
+		// second time and hit the same cap. Measured on a 600 MiB zlib bomb with a
+		// corrupt trailer: attempting the repair took TotalAlloc to 6,145 MiB
+		// against roughly a third of that for a single capped decode.
+		if errors.Is(err, filter.ErrDecodeLimitExceeded) {
+			return nil, false
+		}
+		repaired, ok := repairTrailer(data)
+		if !ok {
+			return nil, false
+		}
+		step.Raw = repaired
+		step.Content = nil
+		if err := step.Decode(); err != nil {
+			return nil, false
+		}
+		data = step.Content
+	}
+	return data, true
+}
+
+// repairTrailer returns zstream with its Adler-32 trailer replaced by the one its
+// deflate data implies, and everything past the trailer removed.
+//
+// ok is false when the deflate data does not inflate -- that stream is damaged
+// under the trailer and there is nothing here to repair -- or when it is not a
+// zlib stream this can rebuild.
+func repairTrailer(zstream []byte) ([]byte, bool) {
+	// A zlib stream is a 2-byte header, the deflate data, and a 4-byte Adler-32 of
+	// the UNCOMPRESSED bytes (RFC 1950). FDICT, header bit 5, prepends a dictionary
+	// id this does not handle; PDF producers do not set it.
+	const zlibHeader, adlerLen = 2, 4
+	if len(zstream) < zlibHeader+adlerLen || zstream[1]&0x20 != 0 {
+		return nil, false
+	}
+
+	// THE TRAILER IS NOT NECESSARILY THE LAST FOUR BYTES, and assuming it was is how
+	// an earlier version of this got refuted. A /Length that over-declares --
+	// routinely, by swallowing the EOL before `endstream` -- leaves those extra bytes
+	// in Raw, and pdfcpu's relaxed mode repairs a SHORT /Length but not a long one.
+	// Patching at len-4 then wrote the correct checksum to the wrong offsets: a lone
+	// stream became a refused page where v0.13 read 39 bytes, and an array silently
+	// lost half its content.
+	//
+	// So the end of the deflate data is FOUND, not assumed. bytes.Reader implements
+	// io.ByteReader, which is the condition under which compress/flate promises not
+	// to read further than it needs, so whatever the reader has left after the last
+	// deflate block begins with the real trailer.
+	rest := bytes.NewReader(zstream[zlibHeader:])
+	// Inflating directly skips the checksum entirely rather than ignoring a failure
+	// reported after the fact. Data that is ITSELF corrupt fails here -- that is what
+	// rejects corpus.CorruptContentStreamPayload, whose reserved deflate block type
+	// yields flate.CorruptInputError. A stream that inflates to ZERO bytes without
+	// error is NOT rejected: it is a legally empty content stream carrying a bad
+	// checksum, and refusing it would report a blank page as shredded.
+	//
+	// This early return is REDUNDANT and kept for legibility: the caller's Decode
+	// refuses the same streams, because repairing a trailer does not repair the data
+	// under it. Mutating it away changes no test outcome, which is stated here rather
+	// than left for the next reader to find.
+	//
+	// THE INFLATED BYTES ARE NEVER HELD. Only their Adler-32 is wanted, so they are
+	// streamed through the hash. io.ReadAll here would allocate the whole inflated
+	// size, and this path is reached on a DECODE FAILURE -- including pdfcpu's own
+	// filter.ErrDecodeLimitExceeded -- so it would bypass the 512 MiB cap
+	// (filter.DefaultMaxDecodeBytes) that pdfcpu enforces and byblos relies on.
+	// Measured before this was streamed: a 2 GiB zlib bomb with a corrupt trailer
+	// took TotalAlloc from main's flat 2,052 MiB to 10,550 MiB, growing with the
+	// bomb rather than being capped.
+	sum32 := adler32.New()
+	if _, err := io.Copy(sum32, flate.NewReader(rest)); err != nil {
+		return nil, false
+	}
+	end := len(zstream) - rest.Len() // first byte past the deflate data
+	if rest.Len() < adlerLen {
+		// THIS GUARD IS REACHED, and it is the difference between dropping an element
+		// and crashing. Do not delete it.
+		//
+		// An earlier comment here called it unreachable, reasoning that pdfcpu decodes
+		// a truncated trailer without error. That is true only of the passThru path.
+		// WITH a /Predictor, pdfcpu uses decodePostProcessRows instead, which returns
+		// io.ErrUnexpectedEOF unswallowed when the final row is PARTIAL -- so a
+		// predictor stream whose last row is short and whose trailer is cut to 1-3
+		// bytes arrives here. Measured: with this guard disabled that document panics
+		// with "slice bounds out of range [:83] with capacity 81"; with it, the element
+		// is dropped and a healthy sibling still reads, where v0.13 refused the page.
+		// TestPartialPredictorRowCutTrailerDropsTheElement covers it.
+		return nil, false
+	}
+
+	// Anything past the trailer is not part of the zlib stream and is dropped with
+	// it, so the repaired stream is exactly header + data + checksum.
+	raw := make([]byte, end+adlerLen)
+	copy(raw, zstream[:end+adlerLen])
+	sum := sum32.Sum32()
+	// RFC 1950 stores the Adler-32 most significant byte first.
+	raw[end] = byte(sum >> 24)
+	raw[end+1] = byte(sum >> 16)
+	raw[end+2] = byte(sum >> 8)
+	raw[end+3] = byte(sum)
+	return raw, true
 }
 
 // addScope appends a resource scope and returns its handle.

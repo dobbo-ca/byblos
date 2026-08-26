@@ -1267,7 +1267,7 @@ func marks(b content.Box) bool { return b.URX > b.LLX && b.URY > b.LLY }
 //
 // byb-z8j: for the codec case that answer now names the codec.
 // "unsupported-codec-jbig2"/"-jpx" pass straight through, and
-// "unsupported-codec-tif" — the file type pdfcpu v0.13.0 actually returns for
+// "unsupported-codec-tif" — the file type pdfcpu v0.15.0 actually returns for
 // a rendered TIFF (writeImage.go renderDeviceCMYKToTIFF and
 // renderIndexedCMYKToTIFF both return "tif", never "tiff") — normalizes to
 // "unsupported-codec-tiff" so the stored class matches the readable rule name

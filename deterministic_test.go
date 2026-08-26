@@ -1,7 +1,7 @@
 package byblos
 
 // byb-c53: every write that funnels through internal/pdfdoc must be
-// byte-deterministic BY DEFAULT. pdfcpu v0.13.0's writer injects two per-run
+// byte-deterministic BY DEFAULT. pdfcpu v0.15.0's writer injects two per-run
 // stamps (wall-clock CreationDate/ModDate, a time-derived /ID) and emits
 // referenced objects in Go map-iteration order, so without byblos holding the
 // pen the same input processed twice yields two different files with two
