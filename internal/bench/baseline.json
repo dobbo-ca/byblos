@@ -1,0 +1,187 @@
+{
+  "fingerprint": {
+    "bench_set_sha256": "996e9df965c0bfb1b8a63e2945ad7591a72e8bb041300187010cd030867649d6",
+    "harness_sha256": "cbc296e269cd7527c75ca25302ae04a0299753d3d5bfc073d72bf4bd89b97d1a",
+    "commit": "15aa4cd3748985e2c434ba084a6cb1524b87037f",
+    "go_version": "go1.26.4",
+    "goos_goarch": "linux/arm64"
+  },
+  "totals": {
+    "disk_bytes": {
+      "build-pdf": 0,
+      "downsample": 0,
+      "extract-raster": 0,
+      "inspect": 187431,
+      "jbig2-generic": 0,
+      "jpeg-recompress": 64,
+      "linearize": 0,
+      "quantize-png": 8,
+      "text-layer": 0
+    },
+    "memory": {
+      "build-pdf": 1343000,
+      "downsample": 391740384,
+      "extract-raster": 376273536,
+      "inspect": 545526440,
+      "jbig2-generic": 1067776,
+      "jpeg-recompress": 7515694304,
+      "linearize": 3154171936,
+      "quantize-png": 182775424,
+      "text-layer": 4109497288
+    },
+    "read_iops": {
+      "build-pdf": 8,
+      "downsample": 8,
+      "extract-raster": 28,
+      "inspect": 88,
+      "jbig2-generic": 9,
+      "jpeg-recompress": 131,
+      "linearize": 99,
+      "quantize-png": 10,
+      "text-layer": 26
+    },
+    "size": {
+      "build-pdf": 929710,
+      "downsample": 0,
+      "extract-raster": 0,
+      "inspect": 0,
+      "jbig2-generic": 156635,
+      "jpeg-recompress": 91611522,
+      "linearize": 89565439,
+      "quantize-png": 927093,
+      "text-layer": 94848457
+    },
+    "write_iops": {
+      "build-pdf": 0,
+      "downsample": 0,
+      "extract-raster": 0,
+      "inspect": 8,
+      "jbig2-generic": 0,
+      "jpeg-recompress": 8,
+      "linearize": 0,
+      "quantize-png": 1,
+      "text-layer": 0
+    }
+  },
+  "shares": {
+    "disk_bytes": {
+      "build-pdf": 0,
+      "downsample": 0,
+      "extract-raster": 0,
+      "inspect": 0.9996160061439017,
+      "jbig2-generic": 0,
+      "jpeg-recompress": 0.00034132787208737995,
+      "linearize": 0,
+      "quantize-png": 0.000042665984010922494,
+      "text-layer": 0
+    },
+    "latency": {
+      "build-pdf": 0.0010742525708385047,
+      "downsample": 0.013149222056924963,
+      "extract-raster": 0.0465461171343647,
+      "inspect": 0.010785120975260479,
+      "jbig2-generic": 0.0032962944807405944,
+      "jpeg-recompress": 0.7502247068638224,
+      "linearize": 0.046610580112440854,
+      "quantize-png": 0.06442723199874067,
+      "text-layer": 0.06388647380686682
+    },
+    "memory": {
+      "build-pdf": 0.00008250353651685725,
+      "downsample": 0.024065500429241757,
+      "extract-raster": 0.02311533687096277,
+      "inspect": 0.033512926703984466,
+      "jbig2-generic": 0.00006559590186732969,
+      "jpeg-recompress": 0.4617061500071482,
+      "linearize": 0.1937679370828163,
+      "quantize-png": 0.011228308911666467,
+      "text-layer": 0.25245574055579584
+    },
+    "read_iops": {
+      "build-pdf": 0.019656019656019656,
+      "downsample": 0.019656019656019656,
+      "extract-raster": 0.0687960687960688,
+      "inspect": 0.21621621621621623,
+      "jbig2-generic": 0.022113022113022112,
+      "jpeg-recompress": 0.32186732186732187,
+      "linearize": 0.24324324324324326,
+      "quantize-png": 0.02457002457002457,
+      "text-layer": 0.06388206388206388
+    },
+    "size": {
+      "build-pdf": 0.003343813211488685,
+      "downsample": 0,
+      "extract-raster": 0,
+      "inspect": 0,
+      "jbig2-generic": 0.0005633565115805253,
+      "jpeg-recompress": 0.3294917959236604,
+      "linearize": 0.3221328136956512,
+      "quantize-png": 0.003334400857986554,
+      "text-layer": 0.3411338197996326
+    },
+    "write_iops": {
+      "build-pdf": 0,
+      "downsample": 0,
+      "extract-raster": 0,
+      "inspect": 0.47058823529411764,
+      "jbig2-generic": 0,
+      "jpeg-recompress": 0.47058823529411764,
+      "linearize": 0,
+      "quantize-png": 0.058823529411764705,
+      "text-layer": 0
+    }
+  },
+  "spreads": {
+    "disk_bytes": {
+      "inspect": 100,
+      "jpeg-recompress": 0,
+      "quantize-png": 50
+    },
+    "latency": {
+      "build-pdf": 7.996702502401757,
+      "downsample": 6.133177637507378,
+      "extract-raster": 6.807773793085814,
+      "inspect": 8.274736513347017,
+      "jbig2-generic": 13.525444335451967,
+      "jpeg-recompress": 3.722521482651431,
+      "linearize": 6.229647099311204,
+      "quantize-png": 3.8826846644065873,
+      "text-layer": 3.5261880245250827
+    },
+    "memory": {
+      "build-pdf": 0.0023826968554358247,
+      "downsample": 0.001419288001410711,
+      "extract-raster": 0.0005038862599869407,
+      "inspect": 0.20232786517185125,
+      "jbig2-generic": 0.004495122791770929,
+      "jpeg-recompress": 0.004279471556324758,
+      "linearize": 0.014255659143623804,
+      "quantize-png": 0.005777248216143312,
+      "text-layer": 0.0013482914360789329
+    },
+    "read_iops": {
+      "build-pdf": 0,
+      "downsample": 0,
+      "extract-raster": 0,
+      "inspect": 4.545454545454546,
+      "jbig2-generic": 11.11111111111111,
+      "jpeg-recompress": 0.7633587786259541,
+      "linearize": 0,
+      "quantize-png": 9.090909090909092,
+      "text-layer": 0
+    },
+    "size": {
+      "build-pdf": 0,
+      "jbig2-generic": 0,
+      "jpeg-recompress": 0.00003274697259150437,
+      "linearize": 0.0000022330041836784832,
+      "quantize-png": 0,
+      "text-layer": 0
+    },
+    "write_iops": {
+      "inspect": 100,
+      "jpeg-recompress": 0,
+      "quantize-png": 50
+    }
+  }
+}

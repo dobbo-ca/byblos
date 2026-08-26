@@ -42,7 +42,11 @@ if [ "${1:-}" = "--in-container" ]; then
 	# zero spread as zero tolerance, so a one-run baseline fails every candidate
 	# on jitter. The spreads these repetitions produce are the noise floor.
 	for n in 1 2 3; do
-		echo "=== run $n"
+		# The load is printed per run because contention shows up as ONE run
+		# uniformly slower than its siblings on every capability, which inflates
+		# the recorded latency band and makes the baseline permissive. Without
+		# this line that run looks like measurement.
+		echo "=== run $n  $(cat /proc/loadavg)"
 		/work/byblos-bench run -set /workset -out "/out/run-$n.json" -reps 3 -time "$CAPS"
 	done
 
@@ -55,7 +59,7 @@ if [ "${1:-}" = "--in-container" ]; then
 	# baseline just built. It MUST fail and exit 1. A control that passes means
 	# the scorer read jitter as improvement, which is the hole NoiseMargin
 	# exists to close, so the baseline is not fit to commit and is deleted.
-	echo "=== control run 4"
+	echo "=== control run 4  $(cat /proc/loadavg)"
 	/work/byblos-bench run -set /workset -out /out/run-4.json -reps 3 -time "$CAPS"
 	set +e
 	/work/byblos-bench score \
