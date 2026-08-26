@@ -528,7 +528,7 @@ func TestDivertClassCoversEveryReason(t *testing.T) {
 		// straight through so each decode-* rule can key on its own class.
 		"unsupported-codec-jbig2": "unsupported-codec-jbig2",
 		"unsupported-codec-jpx":   "unsupported-codec-jpx",
-		// pdfcpu v0.13.0 names this file type "tif", never "tiff"
+		// pdfcpu v0.15.0 names this file type "tif", never "tiff"
 		// (writeImage.go renderDeviceCMYKToTIFF / renderIndexedCMYKToTIFF both
 		// return "tif"), so "unsupported-codec-tif" is the reason extract.go
 		// actually emits. divertClass normalizes it to "unsupported-codec-tiff"

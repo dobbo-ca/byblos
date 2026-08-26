@@ -10,7 +10,7 @@ package pdfdoc
 // every untouched object survive without being re-derived.
 //
 // Three pdfcpu behaviours make this less obvious than it looks. All three are
-// verified against v0.13.0 and each one fails silently or fatally if ignored:
+// verified against v0.15.0 and each one fails silently or fatally if ignored:
 //
 //   - XRefTable.DereferenceStreamDict returns a pointer to a COPY. It ends in
 //     `sd, ok := entry.Object.(types.StreamDict); return &sd`, and a type

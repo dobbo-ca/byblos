@@ -195,26 +195,24 @@ func (d *doc) AppendContent(n int, ops []byte) (err error) {
 		return fmt.Errorf("byblos/pdfdoc: page %d has no dictionary", n)
 	}
 
+	// A page whose /Contents decodes to zero bytes -- absent, or an array of
+	// empty streams -- leaves the CTM at identity, and identity is not a guess:
+	// it is the only CTM zero bytes can leave. pageContents distinguishes that
+	// from a page whose streams failed to decode, which is refused; pdfcpu
+	// reports the two with the identical sentinel and the identical zero bytes,
+	// which is why byblos decodes them itself (byb-3iw).
+	//
+	// Recovered content is used AS content here, deliberately. A page carrying a
+	// bad Adler-32 has a real net CTM and stamping identity onto it would place
+	// the text layer wrong; pdfcpu v0.13 used these bytes too, silently. Page
+	// states the recovery through ContentRecovered.
 	ctm := identityMatrix
-	if _, ok := pd.Find("Contents"); ok {
-		cur, err := xt.PageContent(pd, n)
-		switch {
-		case errors.Is(err, model.ErrNoContent):
-			// /Contents is present but decodes to zero bytes -- e.g. an
-			// array of empty streams. That is legitimately empty content,
-			// not a failure: identity is not a guess, it is the only CTM
-			// zero bytes can leave. But pdfcpu reports a corrupt content
-			// stream with the identical sentinel and the identical zero
-			// bytes (see verifyEmptyContent), so confirm this page is
-			// actually blank before trusting identity as its CTM.
-			if err := d.verifyEmptyContent(pd["Contents"]); err != nil {
-				return fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
-			}
-		case err != nil:
-			return fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
-		default:
-			ctm = netCTM(cur)
-		}
+	cur, _, err := d.pageContents(pd)
+	if err != nil {
+		return fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
+	}
+	if len(cur) > 0 {
+		ctm = netCTM(cur)
 	}
 
 	var buf bytes.Buffer
@@ -418,19 +416,12 @@ func (d *doc) contentDepth(n int) (depth int, err error) {
 	if pd == nil {
 		return 0, fmt.Errorf("byblos/pdfdoc: page %d has no dictionary", n)
 	}
-	if _, ok := pd.Find("Contents"); !ok {
-		return 0, nil
-	}
-
-	cur, err := xt.PageContent(pd, n)
-	switch {
-	case errors.Is(err, model.ErrNoContent):
-		if verr := d.verifyEmptyContent(pd["Contents"]); verr != nil {
-			return 0, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, verr)
-		}
-		return 0, nil
-	case err != nil:
+	cur, _, err := d.pageContents(pd)
+	if err != nil {
 		return 0, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
+	}
+	if len(cur) == 0 {
+		return 0, nil
 	}
 
 	depth, unbalanced, lexErr := contentQDepth(cur)

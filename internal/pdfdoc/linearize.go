@@ -16,7 +16,7 @@ package pdfdoc
 // frees the hint-table objects of a file that arrives linearized
 // (deleteRedundantObject, guarded by IsLinearizationObject).
 //
-// FOUR pdfcpu v0.13.0 behaviours are load-bearing here. The first three are
+// FOUR pdfcpu v0.15.0 behaviours are load-bearing here. The first three are
 // already documented in write.go's package comment and apply unchanged; the
 // fourth is specific to serializing objects by hand:
 //

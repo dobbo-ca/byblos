@@ -18,7 +18,7 @@ import (
 type OptimizeOptions struct {
 	// Linearize requests a linearized ("fast web view") output.
 	//
-	// pdfcpu v0.13.0 cannot produce this and never will be asked to:
+	// pdfcpu v0.15.0 cannot produce this and never will be asked to:
 	// OptimizeContext frees linearization hint-table objects on write whenever
 	// IsLinearizationObject is true (pdfcpu write.go, deleteRedundantObject),
 	// and nothing in its write path ever emits a /Linearized dictionary.

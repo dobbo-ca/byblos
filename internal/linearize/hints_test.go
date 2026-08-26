@@ -49,7 +49,7 @@ import (
 //
 // Do NOT describe them as extracted from a qpdf-linearized file. That claim was
 // made here once and does not hold: 77 hint streams -- every PDF in pdfcpu
-// v0.13.0's testdata plus every corpus document, each run through
+// v0.15.0's testdata plus every corpus document, each run through
 // `qpdf --linearize` and inflated from /H -- match neither vector. The source
 // files, if there were any, are unidentified.
 //

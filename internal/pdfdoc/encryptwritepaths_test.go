@@ -9,7 +9,7 @@ package pdfdoc_test
 //
 // MECHANISM: pdfcpu re-encrypts a stream or string on write whenever
 // ctx.XRefTable.EncKey != nil (pkg/pdfcpu/writeObjects.go:551-556 for
-// streams, :425-426 for strings, v0.13.0), and EncKey stays set on the
+// streams, :425-426 for strings, v0.15.0), and EncKey stays set on the
 // context after api.ReadContext/pdfdoc.Open successfully opens an
 // owner-password-only document -- no password was needed to OPEN it, but the
 // key was still derived and stays on the context. Every write path below

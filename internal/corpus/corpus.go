@@ -12,6 +12,7 @@ package corpus
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/ascii85"
 	"fmt"
 	"strconv"
 	"strings"
@@ -1401,6 +1402,593 @@ func corruptContentStream(inArray bool) []byte {
 	}
 	return w.finish(cat)
 }
+
+// BadAdler32ContentStream returns a one-page document whose content stream is a
+// valid FlateDecode stream with a deliberately corrupted Adler-32 checksum.
+// The compressed data decodes perfectly until checksum validation, yielding
+// a recoverable prefix. This proves pdfcpu v0.15's stricter checksum handling
+// can still recover when only the trailing checksum is corrupt. See byb-3iw.
+//
+// NOT in All(). It exists to test recovery only.
+func BadAdler32ContentStream() []byte {
+	content := []byte("BT /F1 12 Tf 50 750 Td (Recoverable text.) Tj ET")
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write(content); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	compressed := z.Bytes()
+	if len(compressed) < 6 {
+		panic("compressed stream too short")
+	}
+	compressed[len(compressed)-1] ^= 0xFF
+
+	w := newWriter()
+	cat, pages, p1, c1 := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, c1))
+	w.fillRawStream(c1, "/Filter /FlateDecode", compressed)
+	return w.finish(cat)
+}
+
+// CleanContentsArray returns a one-page document whose /Contents is a
+// three-element array of ordinary, undamaged FlateDecode streams.
+//
+// Nothing about it is corrupt, and that is the point. Byblos decodes /Contents
+// itself (see pdfdoc.pageContents, byb-3iw), so the SEPARATOR between array
+// elements is now byblos's decision, and the corpus had no fixture that could
+// observe it: joining the elements with a newline changed clean pages by one
+// byte per element and the whole suite stayed green. ISO 32000-1 table 30 says
+// the elements are concatenated as a single stream with no byte inserted, which
+// is what pdfcpu and every other reader do.
+//
+// CleanContentsArrayExpected is the concatenation byblos must produce.
+func CleanContentsArray() []byte {
+	w := newWriter()
+	cat, pages, p1 := w.reserve(), w.reserve(), w.reserve()
+	ids := []int{w.reserve(), w.reserve(), w.reserve()}
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents [%d 0 R %d 0 R %d 0 R] >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, ids[0], ids[1], ids[2]))
+	for i, id := range ids {
+		var z bytes.Buffer
+		zw := zlib.NewWriter(&z)
+		if _, err := zw.Write([]byte(cleanArrayElements[i])); err != nil {
+			panic(err)
+		}
+		if err := zw.Close(); err != nil {
+			panic(err)
+		}
+		w.fillRawStream(id, "/Filter /FlateDecode", z.Bytes())
+	}
+	return w.finish(cat)
+}
+
+// cleanArrayElements are CleanContentsArray's three element payloads. Each ends
+// WITHOUT a trailing newline so that a separator inserted between them would
+// change the concatenation and be visible.
+var cleanArrayElements = [3]string{
+	"BT /F1 12 Tf 50 750 Td (one) Tj ET",
+	"BT /F1 12 Tf 50 730 Td (two) Tj ET",
+	"BT /F1 12 Tf 50 710 Td (three) Tj ET",
+}
+
+// CleanContentsArrayExpected is CleanContentsArray's decoded page content: the
+// three elements concatenated with no separator.
+var CleanContentsArrayExpected = cleanArrayElements[0] + cleanArrayElements[1] + cleanArrayElements[2]
+
+// BadAdler32InArray returns a two-element /Contents array where the first
+// stream has a bad Adler-32 and the second is good. This is 150277 p25's
+// class: one element fails, a sibling survives, and pdfcpu v0.13 returned
+// 89 bytes while round 1 returned 40. See byb-3iw.
+func BadAdler32InArray() []byte {
+	good := []byte("BT /F1 12 Tf 50 750 Td (Good sibling.) Tj ET")
+	bad := []byte("BT /F1 12 Tf 50 730 Td (Bad Adler.) Tj ET")
+
+	var zGood, zBad bytes.Buffer
+	zwGood := zlib.NewWriter(&zGood)
+	if _, err := zwGood.Write(good); err != nil {
+		panic(err)
+	}
+	if err := zwGood.Close(); err != nil {
+		panic(err)
+	}
+	zwBad := zlib.NewWriter(&zBad)
+	if _, err := zwBad.Write(bad); err != nil {
+		panic(err)
+	}
+	if err := zwBad.Close(); err != nil {
+		panic(err)
+	}
+	compBad := zBad.Bytes()
+	compBad[len(compBad)-1] ^= 0xFF
+
+	w := newWriter()
+	cat, pages, p1, cGood, cBad := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents [%d 0 R %d 0 R] >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, cBad, cGood))
+	w.fillRawStream(cBad, "/Filter /FlateDecode", compBad)
+	w.fillRawStream(cGood, "/Filter /FlateDecode", zGood.Bytes())
+	return w.finish(cat)
+}
+
+// MidBlockTruncation returns a FlateDecode stream truncated mid-deflate-block,
+// where a real PREFIX is recovered but bytes are lost. This is 150277 p25's
+// damage class. See byb-3iw.
+func MidBlockTruncation() []byte {
+	content := []byte("BT /F1 12 Tf 50 750 Td (This text will be cut short mid-stream.) Tj ET")
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write(content); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	compressed := z.Bytes()
+	// Truncate halfway through the deflate payload.
+	truncated := compressed[:len(compressed)/2]
+
+	w := newWriter()
+	cat, pages, p1, c1 := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, c1))
+	w.fillRawStream(c1, "/Filter /FlateDecode", truncated)
+	return w.finish(cat)
+}
+
+// Predictor12BadAdler returns a FlateDecode stream with /Predictor 12 and a
+// bad Adler-32. Round 1 recovered it without applying the predictor, handing
+// callers PNG-filtered bytes as PDF operators. Must refuse. See byb-3iw.
+// The payload is genuinely PNG-row-filtered before it is deflated, which is what
+// makes this fixture reach the checksum at all. An unfiltered payload is refused
+// earlier, by pdfcpu's own "unexpected PNG predictor" check on the first byte of
+// the first row, so it never exercises byblos's predictor gate.
+func Predictor12BadAdler() []byte {
+	content := []byte("BT /F1 12 Tf 50 750 Td (Text.) Tj ET")
+	// /Columns 8 /Colors 1 /BitsPerComponent 8: rows of 8 bytes, each preceded
+	// by a filter-type byte. 0 is PNG filter type None, so the row bytes are the
+	// content bytes and the un-filtered result is the content itself.
+	const columns = 8
+	for len(content)%columns != 0 {
+		content = append(content, ' ')
+	}
+	var filtered []byte
+	for i := 0; i < len(content); i += columns {
+		filtered = append(filtered, 0x00)
+		filtered = append(filtered, content[i:i+columns]...)
+	}
+
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write(filtered); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	compressed := z.Bytes()
+	compressed[len(compressed)-1] ^= 0xFF
+
+	w := newWriter()
+	cat, pages, p1, c1 := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, c1))
+	dict := "/Filter /FlateDecode /DecodeParms << /Predictor 12 /Colors 1 /BitsPerComponent 8 /Columns 8 >>"
+	w.fillRawStream(c1, dict, compressed)
+	return w.finish(cat)
+}
+
+// FilterChainBadAdler returns a filter chain [/FlateDecode /ASCII85Decode]
+// with a bad Adler-32. Round 1 returned ASCII85 ciphertext as PDF operators.
+// Must refuse. See byb-3iw.
+// The chain is /Filter [/ASCII85Decode /FlateDecode], which is the order real
+// producers emit and the order a reader applies left to right: un-ASCII85 first,
+// then inflate. The payload is therefore genuinely ASCII85-encoded deflate data,
+// with the corruption applied to the Adler-32 INSIDE the flate layer before the
+// ASCII85 encoding wraps it.
+//
+// Getting that order backwards makes an invalid document rather than a chain: a
+// [/FlateDecode /ASCII85Decode] stream holding plain deflate data asks the reader
+// to ASCII85-decode ordinary text, which fails for reasons that have nothing to
+// do with the checksum.
+//
+// FilterChainBadAdlerExpected is the content a reader must recover. pdfcpu v0.13
+// recovered it in full, because it nilled the checksum error before running the
+// remaining filters, so anything less is a regression.
+func FilterChainBadAdler() []byte {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write([]byte(FilterChainBadAdlerExpected)); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	compressed := z.Bytes()
+	compressed[len(compressed)-1] ^= 0xFF
+
+	var a85 bytes.Buffer
+	enc := ascii85.NewEncoder(&a85)
+	if _, err := enc.Write(compressed); err != nil {
+		panic(err)
+	}
+	if err := enc.Close(); err != nil {
+		panic(err)
+	}
+	a85.WriteString("~>") // the EOD marker pdfcpu's ASCII85Decode expects
+
+	w := newWriter()
+	cat, pages, p1, c1 := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, c1))
+	w.fillRawStream(c1, "/Filter [/ASCII85Decode /FlateDecode]", a85.Bytes())
+	return w.finish(cat)
+}
+
+// FilterChainBadAdlerExpected is FilterChainBadAdler's decoded content.
+const FilterChainBadAdlerExpected = "BT /F1 12 Tf 50 750 Td (Chain.) Tj ET"
+
+// BadAdlerWithTrailingByte returns a one-page document whose FlateDecode content
+// stream has a bad Adler-32 AND one extra byte after the zlib stream, because its
+// /Length swallowed the EOL before `endstream`.
+//
+// That producer bug is routine, and it is the shape that refuted an earlier
+// version of byb-3iw's fix. pdfcpu's relaxed mode repairs a SHORT /Length but
+// leaves a long one's extra bytes in Raw, so a recovery that assumes the Adler-32
+// is the last four bytes patches the wrong offsets. Measured: v0.13 returned the
+// complete content, that version refused the page.
+//
+// InArray is the same stream beside a healthy sibling, which is the worse half:
+// there the loss was SILENT, half the page's bytes gone with no error -- byb-3iw's
+// own 150277 p25 shape reproduced by the fix for it.
+//
+// BadAdlerTrailingExpected is the damaged element's content.
+func BadAdlerWithTrailingByte() []byte        { return badAdlerTrailing(false) }
+func BadAdlerWithTrailingByteInArray() []byte { return badAdlerTrailing(true) }
+
+// BadAdlerTrailingExpected and BadAdlerTrailingSiblingExpected are the two
+// elements' contents in BadAdlerWithTrailingByteInArray.
+const (
+	BadAdlerTrailingExpected        = "BT /F1 12 Tf 50 750 Td (Trailing byte.) Tj ET"
+	BadAdlerTrailingSiblingExpected = "BT /F1 12 Tf 50 700 Td (Sibling.) Tj ET"
+)
+
+func badAdlerTrailing(inArray bool) []byte {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write([]byte(BadAdlerTrailingExpected)); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	bad := z.Bytes()
+	bad[len(bad)-1] ^= 0xFF
+	// The extra byte an over-declared /Length swallows. fillRawStream writes
+	// /Length as the byte count it is given, so appending it here is exactly the
+	// producer bug: the declared length includes a byte the zlib stream does not.
+	bad = append(bad, '\n')
+
+	var good bytes.Buffer
+	gw := zlib.NewWriter(&good)
+	if _, err := gw.Write([]byte(BadAdlerTrailingSiblingExpected)); err != nil {
+		panic(err)
+	}
+	if err := gw.Close(); err != nil {
+		panic(err)
+	}
+
+	w := newWriter()
+	cat, pages, p1, cBad := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	contents := fmt.Sprintf("%d 0 R", cBad)
+	cGood := 0
+	if inArray {
+		cGood = w.reserve()
+		contents = fmt.Sprintf("[%d 0 R %d 0 R]", cBad, cGood)
+	}
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents %s >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, contents))
+	w.fillRawStream(cBad, "/Filter /FlateDecode", bad)
+	if cGood != 0 {
+		w.fillRawStream(cGood, "/Filter /FlateDecode", good.Bytes())
+	}
+	return w.finish(cat)
+}
+
+// DoubleFlateBadInner returns a one-page document whose content stream is flate
+// compressed TWICE -- /Filter [/FlateDecode /FlateDecode] -- with the Adler-32 of
+// the INNER layer corrupted and the outer layer intact.
+//
+// The damaged flate layer is therefore not the first one in the pipeline. A
+// recovery that repairs the first flate layer it finds rewrites a trailer that was
+// already correct, re-decodes the same broken pipeline, and drops the element:
+// measured, v0.13 read 372 bytes and that version refused the page, while the
+// array form returned 19 of 391 bytes silently (byb-3iw).
+//
+// InArray pairs it with a healthy sibling, which is the silent half.
+//
+// DoubleFlateExpected is the damaged element's content, sized past one deflate
+// window so the inner stream spans more than a single block.
+func DoubleFlateBadInner() []byte        { return doubleFlate(false, false) }
+func DoubleFlateBadInnerInArray() []byte { return doubleFlate(true, false) }
+
+// DoubleFlateBothBad is DoubleFlateBadInner with BOTH flate layers' Adler-32
+// trailers corrupted, and InArray pairs it with a healthy sibling.
+//
+// Two damaged layers is the shape that refuted a recovery which repaired only ONE
+// of them: every single-layer repair is defeated by the other layer's damage, so
+// the element was dropped -- v0.13 read the content in full and byblos refused the
+// page, or returned half the array's bytes silently. pdfcpu v0.13 recovered both
+// because it nilled the checksum error on EVERY filter application, which is why
+// byblos now decodes one filter at a time (byb-3iw).
+func DoubleFlateBothBad() []byte        { return doubleFlate(false, true) }
+func DoubleFlateBothBadInArray() []byte { return doubleFlate(true, true) }
+
+// DoubleFlateExpected and DoubleFlateSiblingExpected are the two elements'
+// contents in DoubleFlateBadInnerInArray.
+var (
+	DoubleFlateExpected = strings.Repeat("BT /F1 12 Tf 50 750 Td (Double flate.) Tj ET\n", 8)
+	// Deliberately short, so a reader that returns only this is obviously
+	// returning the sibling rather than the whole page.
+	DoubleFlateSiblingExpected = "BT ET 0 0 m\n"
+)
+
+func doubleFlate(inArray, bothBad bool) []byte {
+	// Inner: zlib the payload, then corrupt its Adler-32.
+	var inner bytes.Buffer
+	iw := zlib.NewWriter(&inner)
+	if _, err := iw.Write([]byte(DoubleFlateExpected)); err != nil {
+		panic(err)
+	}
+	if err := iw.Close(); err != nil {
+		panic(err)
+	}
+	bad := inner.Bytes()
+	bad[len(bad)-1] ^= 0xFF
+
+	// Outer: zlib the corrupted inner stream. This layer is intact, so a reader
+	// that stops at the first flate layer sees nothing wrong with it.
+	var outer bytes.Buffer
+	ow := zlib.NewWriter(&outer)
+	if _, err := ow.Write(bad); err != nil {
+		panic(err)
+	}
+	if err := ow.Close(); err != nil {
+		panic(err)
+	}
+	outerBytes := outer.Bytes()
+	if bothBad {
+		// Corrupt the OUTER trailer as well, so neither layer's checksum is right.
+		outerBytes[len(outerBytes)-1] ^= 0xFF
+	}
+
+	var good bytes.Buffer
+	gw := zlib.NewWriter(&good)
+	if _, err := gw.Write([]byte(DoubleFlateSiblingExpected)); err != nil {
+		panic(err)
+	}
+	if err := gw.Close(); err != nil {
+		panic(err)
+	}
+
+	w := newWriter()
+	cat, pages, p1, cBad := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	contents := fmt.Sprintf("%d 0 R", cBad)
+	cGood := 0
+	if inArray {
+		cGood = w.reserve()
+		contents = fmt.Sprintf("[%d 0 R %d 0 R]", cBad, cGood)
+	}
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents %s >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, contents))
+	w.fillRawStream(cBad, "/Filter [/FlateDecode /FlateDecode]", outerBytes)
+	if cGood != 0 {
+		w.fillRawStream(cGood, "/Filter /FlateDecode", good.Bytes())
+	}
+	return w.finish(cat)
+}
+
+// OnePageRawStream returns a one-page document whose /Contents is a single stream
+// with the given stream-dictionary entries and raw, already-encoded bytes.
+//
+// It exists so a test can build a damaged stream whose bytes it computes itself,
+// without another named fixture. Everything here is a fixture constructor rather
+// than a document in All(), so nothing generic existed for that.
+func OnePageRawStream(dictEntries string, raw []byte) []byte {
+	w := newWriter()
+	cat, pages, p1, c1 := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, c1))
+	w.fillRawStream(c1, dictEntries, raw)
+	return w.finish(cat)
+}
+
+// PartialPredictorRowCutTrailer returns a one-page /Contents array whose first
+// element is a /Predictor 12 stream with a PARTIAL final row and an Adler-32
+// trailer cut to one byte, beside a healthy sibling.
+//
+// It is the shape that reaches the trailer-length guard in pdfdoc.repairTrailer,
+// which a comment once called unreachable. pdfcpu swallows a truncated trailer on
+// its passThru path, but WITH a predictor it uses decodePostProcessRows, which
+// returns io.ErrUnexpectedEOF unswallowed when the last row is short -- so byblos's
+// recovery is entered with fewer than four trailer bytes. Without the guard that
+// document panics with a slice-bounds error instead of dropping the element
+// (byb-3iw).
+//
+// The sibling is what makes the test observable: the damaged element is dropped and
+// the page still reads, where pdfcpu v0.13 refused the whole page.
+func PartialPredictorRowCutTrailer() []byte {
+	// /Columns 8 /Colors 1 /BitsPerComponent 8: rows of one filter-type byte plus
+	// eight data bytes. The payload is deliberately one byte short of a whole row.
+	const columns = 8
+	payload := []byte("BT /F1 12 Tf 50 750 Td (Partial row.) Tj ET")
+	var filtered []byte
+	for i := 0; i < len(payload); i += columns {
+		end := i + columns
+		if end > len(payload) {
+			end = len(payload) // the short final row
+		}
+		filtered = append(filtered, 0x00)
+		filtered = append(filtered, payload[i:end]...)
+	}
+
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write(filtered); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	// Cut the four-byte Adler-32 down to one.
+	cut := z.Bytes()[:z.Len()-3]
+
+	var good bytes.Buffer
+	gw := zlib.NewWriter(&good)
+	if _, err := gw.Write([]byte(PartialPredictorSiblingExpected)); err != nil {
+		panic(err)
+	}
+	if err := gw.Close(); err != nil {
+		panic(err)
+	}
+
+	w := newWriter()
+	cat, pages, p1, cBad, cGood := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents [%d 0 R %d 0 R] >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, cBad, cGood))
+	dict := "/Filter /FlateDecode /DecodeParms << /Predictor 12 /Colors 1 /BitsPerComponent 8 /Columns 8 >>"
+	w.fillRawStream(cBad, dict, cut)
+	w.fillRawStream(cGood, "/Filter /FlateDecode", good.Bytes())
+	return w.finish(cat)
+}
+
+// PartialPredictorSiblingExpected is the healthy element's content in
+// PartialPredictorRowCutTrailer, and the whole page's content once the damaged
+// element is dropped.
+const PartialPredictorSiblingExpected = "BT /F1 12 Tf 50 700 Td (Healthy sibling.) Tj ET"
+
+// TruncatedAdlerTrailer returns a one-page document whose FlateDecode content
+// stream has COMPLETE deflate data and a trailer cut short: two of the Adler-32's
+// four bytes are missing.
+//
+// It is the one shape where the deflate data inflates cleanly and there is still
+// no trailer to repair. A recovery that sizes its buffer as end+4 without checking
+// that four bytes remain reads past the end of the stream and PANICS, which is a
+// crash on a malformed file rather than a refusal (byb-3iw).
+func TruncatedAdlerTrailer() []byte {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write([]byte("BT /F1 12 Tf 50 750 Td (Cut trailer.) Tj ET")); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	cut := z.Bytes()[:z.Len()-2]
+
+	w := newWriter()
+	cat, pages, p1, c1 := w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents %d 0 R >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, c1))
+	w.fillRawStream(c1, "/Filter /FlateDecode", cut)
+	return w.finish(cat)
+}
+
+// CorruptElementBesideHealthySibling returns a one-page document whose /Contents
+// array holds CorruptContentStreamPayload -- a valid zlib header followed by a
+// RESERVED deflate block type, so it inflates to NOTHING -- next to an ordinary
+// healthy stream.
+//
+// This is the case CorruptContentStream cannot observe. That fixture pairs the
+// corrupt stream with an EMPTY one, so the sibling contributes no bytes either
+// way and a reader that discards the whole page looks identical to one that
+// keeps the sibling. pdfcpu v0.13's relaxed mode dropped the damaged element and
+// returned the sibling's bytes; refusing the page instead loses content byblos
+// used to read (byb-3iw).
+//
+// CorruptElementSiblingExpected is the sibling's content.
+func CorruptElementBesideHealthySibling() []byte {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	if _, err := zw.Write([]byte(CorruptElementSiblingExpected)); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+
+	w := newWriter()
+	cat, pages, p1, cBad, cGood := w.reserve(), w.reserve(), w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << /Font << /F1 %s >> >> /Contents [%d 0 R %d 0 R] >>",
+		pages, PageWidthPt, PageHeightPt, helveticaFont, cBad, cGood))
+	w.fillRawStream(cBad, "/Filter /FlateDecode", CorruptContentStreamPayload)
+	w.fillRawStream(cGood, "/Filter /FlateDecode", z.Bytes())
+	return w.finish(cat)
+}
+
+// CorruptElementSiblingExpected is the healthy element's content in
+// CorruptElementBesideHealthySibling.
+const CorruptElementSiblingExpected = "BT /F1 12 Tf 50 700 Td (Healthy sibling.) Tj ET"
+
+// NullContentsRef returns a one-page document whose /Contents is an indirect
+// reference to an object that does not exist.
+//
+// ISO 32000-1 7.3.10 makes a reference to a nonexistent object null, and 7.3.9
+// makes null equivalent to omitting the entry, so this is a legally BLANK page.
+// pdfcpu v0.13's PageContent had an explicit arm for it; a reader without one
+// refuses a page every other reader renders empty (byb-3iw).
+func NullContentsRef() []byte {
+	w := newWriter()
+	cat, pages, p1 := w.reserve(), w.reserve(), w.reserve()
+	w.fill(cat, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	w.fill(pages, fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", p1))
+	// 9999 is deliberately outside the xref table this writer emits.
+	w.fill(p1, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d]"+
+		" /Resources << >> /Contents 9999 0 R >>",
+		pages, PageWidthPt, PageHeightPt))
+	return w.finish(cat)
+}
+
+// BadAdler32InArray returns a two-element /Contents array where the first
 
 // BookletPages is how many pages booklet() carries. Six to ten was the range
 // byb-woy asked for: enough that the page-offset hint table's per-page loop

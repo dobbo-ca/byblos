@@ -2,7 +2,7 @@ package pdfdoc
 
 // Deterministic pdfcpu output (byb-c53).
 //
-// pdfcpu v0.13.0's writer is nondeterministic three ways, and only the first
+// pdfcpu v0.15.0's writer is nondeterministic three ways, and only the first
 // two are stamps that could be patched after the fact: ensureInfoDict
 // (info.go) writes CreationDate/ModDate from time.Now(), fileID (crypto.go)
 // hashes time.Now() nanoseconds into the trailer's /ID -- and writeDeepDict
