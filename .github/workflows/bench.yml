@@ -130,19 +130,11 @@ jobs:
           check goos_goarch "$(go env GOOS)_$(go env GOARCH)"
           echo "stale=$stale" >> "$GITHUB_OUTPUT"
           if [ "$stale" = true ]; then
-            # A STALE BASELINE IS A HARD STOP, not a warning.
-            #
-            # The design (section 7 step 6) says to re-measure the base side on
-            # this runner when the baseline is stale. The scorer cannot consume
-            # that: bench.Score takes (Baseline, head Run) and has no argument
-            # for a fresh base run, and `byblos-bench baseline` refuses fewer
-            # than three runs, so one base run cannot be promoted into one
-            # either. Scoring head against totals recorded for a different
-            # harness or a different bench set would produce deltas that mean
-            # nothing, and a meaningless number that looks like a verdict is
-            # worse than no verdict.
-            #
-            # So: refuse, and say exactly how to fix it. Tracked as byb-99d.
+            # A STALE BASELINE IS A HARD STOP when the harness or bench set
+            # changed. A fresh base run measured here cannot repair a comparison
+            # between different harness versions or different document sets --
+            # that is comparing different work. Refuse, and say exactly how to
+            # fix it. Closed by byb-99d.
             echo "::error::baseline is stale:$reasons. Refresh it -- three runs of one commit on ubuntu-24.04, then byblos-bench baseline -runs a,b,c."
             exit 1
           fi
@@ -194,13 +186,27 @@ jobs:
           set -euo pipefail
           go run ./cmd/byblos-bench run -set ./bench-v1 -out head.json -time "$CAPS"
 
+      # Measure the base for the touched capabilities on the same runner as
+      # head. This makes latency scoreable: the baseline cannot carry absolute
+      # durations (design spec 5.3), but a fresh base run measured here can be
+      # compared to head on the same machine. Implemented by byb-99d.
+      - name: measure fresh base for touched capabilities
+        env:
+          CAPS: ${{ steps.touched.outputs.caps }}
+        run: |
+          set -euo pipefail
+          commit=$(jq -r '.fingerprint.commit' internal/bench/baseline.json)
+          git checkout "$commit"
+          go run ./cmd/byblos-bench run -set ./bench-v1 -out base.json -time "$CAPS"
+          git checkout -
+
       - name: score
         id: score
         run: |
           set -euo pipefail
           set +e
           go run ./cmd/byblos-bench score -baseline internal/bench/baseline.json \
-            -head head.json -out table.md
+            -head head.json -base-run base.json -out table.md
           rc=$?
           set -e
           echo "rc=$rc" >> "$GITHUB_OUTPUT"

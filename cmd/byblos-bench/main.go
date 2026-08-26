@@ -49,7 +49,7 @@ func usage() {
   byblos-bench measure -capability C -doc PATH [-reps N]
   byblos-bench run -set DIR -out FILE [-time C1,C2] [-reps N]
   byblos-bench baseline -runs A.json,B.json,C.json -out FILE -commit SHA -benchset SHA
-  byblos-bench score -baseline FILE -head FILE [-out FILE]
+  byblos-bench score -baseline FILE -head FILE [-base-run FILE] [-out FILE]
 `)
 	os.Exit(2)
 }
@@ -253,6 +253,7 @@ func cmdScore(args []string) error {
 	fs := flag.NewFlagSet("score", flag.ExitOnError)
 	baselinePath := fs.String("baseline", "internal/bench/baseline.json", "committed baseline")
 	headPath := fs.String("head", "", "head run JSON")
+	baseRunPath := fs.String("base-run", "", "optional fresh base run JSON, measured on the same runner as head")
 	out := fs.String("out", "", "where to write the markdown table; stdout if empty")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -271,7 +272,21 @@ func cmdScore(args []string) error {
 		return err
 	}
 
-	res := bench.Score(base, head)
+	var res bench.Result
+	if *baseRunPath != "" {
+		body, err := os.ReadFile(*baseRunPath)
+		if err != nil {
+			return err
+		}
+		var baseRun bench.Run
+		if err := json.Unmarshal(body, &baseRun); err != nil {
+			return err
+		}
+		res = bench.Score(base, head, baseRun)
+	} else {
+		res = bench.Score(base, head)
+	}
+
 	md := res.Markdown()
 	if *out != "" {
 		if err := os.WriteFile(*out, []byte(md), 0o644); err != nil {
