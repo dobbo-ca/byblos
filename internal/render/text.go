@@ -119,6 +119,14 @@ func (r *renderer) resolveFont(name string) *textFont {
 		r.fontsBy[name] = nil
 		return nil
 	}
+	if r.fontBudget >= maxFontRetainedBytes {
+		// Already over budget: refuse before even asking the caller, so a
+		// long run of names past the limit cannot keep paying FontFor's own
+		// decode cost (byb-utl's pdfdoc.RenderFont has no cache of its own --
+		// every call re-decodes) just to be discarded here.
+		r.fontsBy[name] = nil
+		return nil
+	}
 	src, ok := r.fonts(name)
 	if !ok {
 		r.fontsBy[name] = nil
@@ -181,6 +189,21 @@ func (r *renderer) resolveFont(name string) *textFont {
 			r.progsBy = map[[sha256.Size]byte]*fontProg{}
 		}
 		r.progsBy[key] = prog
+	}
+	// Charged once per NAME resolved, whether or not progsBy already held
+	// this program -- bug class 9: pdfdoc.RenderFont has no cache of its own
+	// (byb-utl), so a resource dict aliasing one dict under many Tf names
+	// (byb-rq3's own shape) re-decodes the full program on every one of
+	// those calls even though progsBy dedups the PARSE. Charging only on a
+	// progsBy miss priced the retained result, not the decode work: an
+	// aliased program with no /Widths or /W froze the budget at one
+	// program's length and let every further name through for free. /Widths
+	// and /W are never deduped -- each resolved name gets its own
+	// slice/map -- so they are charged the same way, per name.
+	r.fontBudget += int64(len(program)) + 8*int64(len(src.Widths)) + 16*int64(len(src.W))
+	if r.fontBudget > maxFontRetainedBytes {
+		r.fontsBy[name] = nil
+		return nil
 	}
 	tf := &textFont{fnt: prog.fnt, t1: prog.t1, upem: prog.upem, gwork: prog.gwork,
 		first: src.FirstChar, width: src.Widths,

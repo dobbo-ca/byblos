@@ -3,6 +3,7 @@ package render
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"image/color"
 	"runtime"
 	"strings"
@@ -573,4 +574,131 @@ func TestTextStateSavedByQ(t *testing.T) {
 		t.Fatalf("Page: %v", err)
 	}
 	assertExactPixels(t, img, 100, 100, []rect{{10, 30, 30, 50}, {50, 40, 60, 50}})
+}
+
+// TestResolveFontBoundsPageRetainedBytes pins byb-rq3: 2000 Tf names, all
+// aliased to one /Widths-bearing 65536-entry dict (the shape FontFor rebuilds
+// a fresh slice for on every call, faithful to a caller that rebuilds Widths
+// per dict deref), inking nothing. Without the budget in resolveFont, this
+// page retains >1 GiB live for zero pixels; the ceiling below is generous (4x
+// maxFontRetainedBytes) so the assertion is not flaky against map/slice
+// overhead, and reverting the guard pushes the real delta to ~1 GiB, not a
+// marginal overshoot.
+//
+// IT SURVIVES EVERY SINGLE-GUARD MUTATION, AND THAT IS EXPECTED. resolveFont
+// carries two refusals -- the pre-fetch one (fontBudget already spent, refuse
+// before calling FontFor) and the post-charge one (this name pushed the
+// budget over) -- and on this input either alone stops the retention. Measured
+// in both directions: neutering just the pre-fetch check leaves this test
+// PASS, and so does neutering just the post-charge check. Only the COMPOUND
+// mutation reddens it, at 0.09s and the full >1 GiB.
+//
+// It earns its place because it is the only test that measures the QUANTITY
+// byb-rq3 is about -- live retained heap for a page that inks nothing -- where
+// the three tests around it each pin one guard's mechanism selectively:
+// TestResolveFontStopsFetchingPastBudget for the pre-fetch refusal,
+// TestResolveFontRefusesOversizedSingleName for the post-charge refusal, and
+// TestResolveFontChargesProgramBytesPerAliasedName for charging per NAME
+// rather than per distinct program. Delete any of those and a guard goes
+// unpinned; delete this one and the bead's own number goes unmeasured.
+func TestResolveFontBoundsPageRetainedBytes(t *testing.T) {
+	const n = 2000
+	const wlen = 65536
+	var buf strings.Builder
+	buf.WriteString("BT\n")
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&buf, "/F%d 12 Tf\n", i)
+	}
+	buf.WriteString("ET\n")
+	src := buf.String()
+
+	fonts := func(name string) (Font, bool) {
+		w := make([]float64, wlen)
+		for i := range w {
+			w[i] = 500
+		}
+		return Font{Widths: w, FirstChar: 0, BaseFont: "Recon"}, true
+	}
+
+	box := content.Box{URX: 612, URY: 792}
+	var m0, m1 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m0)
+	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fonts)
+	runtime.ReadMemStats(&m1)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+
+	ceiling := 4 * maxFontRetainedBytes // generous: real unguarded delta is ~1 GiB
+	if delta := int64(m1.HeapAlloc - m0.HeapAlloc); delta > ceiling {
+		t.Errorf("HeapAlloc live delta = %d bytes (%.2f MiB); want <= %d bytes (%.2f MiB)",
+			delta, float64(delta)/(1<<20), ceiling, float64(ceiling)/(1<<20))
+	}
+}
+
+// TestResolveFontRefusesOversizedSingleName isolates the post-charge guard in
+// resolveFont: one Tf name whose /Widths array alone exceeds
+// maxFontRetainedBytes crosses the budget on its first and only call, before
+// the early pre-fetch check (which only fires once the budget is ALREADY
+// exceeded) ever sees it. resolveFont must still refuse to retain it.
+func TestResolveFontRefusesOversizedSingleName(t *testing.T) {
+	wlen := int(maxFontRetainedBytes/8) + 1 // one array alone costs > the budget
+	r := &renderer{fonts: func(name string) (Font, bool) {
+		return Font{Widths: make([]float64, wlen), BaseFont: "Recon"}, true
+	}}
+	if tf := r.resolveFont("F1"); tf != nil {
+		t.Errorf("resolveFont(F1) returned a non-nil *textFont with %d Widths entries; want nil, a %d-entry Widths array alone exceeds the budget", len(tf.width), wlen)
+	}
+	if tf, ok := r.fontsBy["F1"]; !ok || tf != nil {
+		t.Errorf("fontsBy[F1] = (non-nil=%v, present=%v); want a cached nil entry, not a retained textFont", tf != nil, ok)
+	}
+}
+
+// TestResolveFontStopsFetchingPastBudget isolates the pre-fetch guard in
+// resolveFont: once the running total already exceeds maxFontRetainedBytes,
+// further distinct Tf names must not even reach FontFor -- FontFor is the
+// seam pdfdoc.RenderFont sits behind, and pdfdoc has no font cache of its
+// own, so every extra call is a full re-decode paid only to be discarded.
+func TestResolveFontStopsFetchingPastBudget(t *testing.T) {
+	const wlen = 65536 // 512 KiB/name; ~32 names exhaust a 16 MiB budget
+	calls := 0
+	r := &renderer{fonts: func(name string) (Font, bool) {
+		calls++
+		return Font{Widths: make([]float64, wlen), BaseFont: "Recon"}, true
+	}}
+	for i := 0; i < 2000; i++ {
+		r.resolveFont(fmt.Sprintf("F%d", i))
+	}
+	maxCalls := int(maxFontRetainedBytes/(8*wlen)) + 2 // +2: the crossing call, plus slack
+	if calls > maxCalls {
+		t.Errorf("FontFor called %d times for 2000 distinct names; want <= %d once the budget is exhausted", calls, maxCalls)
+	}
+}
+
+// TestResolveFontChargesProgramBytesPerAliasedName pins bug class 9 in the
+// shape two reviewers found in byb-utl/byb-rq3's fix: charging program bytes
+// only on a progsBy MISS prices the retained, deduped PARSE result, not the
+// decode work pdfdoc.RenderFont repeats on every call (pdfdoc has no cache of
+// its own). A font dict with no /Widths and no /W -- the standard-14 shape --
+// used to charge exactly 0 per name once its program had been seen once, so
+// FontFor kept being called for every one of many aliased Tf names. The
+// charge must be per NAME resolved, not per distinct program parsed.
+func TestResolveFontChargesProgramBytesPerAliasedName(t *testing.T) {
+	const programLen = 15 << 20 // under maxFontRetainedBytes alone, deliberately
+	calls := 0
+	r := &renderer{fonts: func(name string) (Font, bool) {
+		calls++
+		// A fresh slice each call, matching pdfdoc.RenderFont's no-cache
+		// shape: every call re-decodes, so nothing here should look
+		// "already retained" to a byte-identity check.
+		return Font{Program: make([]byte, programLen), BaseFont: "Recon"}, true
+	}}
+	for i := 0; i < 2000; i++ {
+		r.resolveFont(fmt.Sprintf("F%d", i))
+	}
+	const maxCalls = 4 // one program's worth of budget admits ~1 name; generous slack
+	if calls > maxCalls {
+		t.Errorf("FontFor called %d times for 2000 aliased names with no /Widths or /W; want <= %d once the budget is exhausted", calls, maxCalls)
+	}
 }

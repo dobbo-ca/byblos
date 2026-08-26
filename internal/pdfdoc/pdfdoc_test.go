@@ -2,9 +2,12 @@ package pdfdoc
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"errors"
+	"fmt"
 	"image"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -886,5 +889,207 @@ func TestImageInfoReportsTheDeclaredFilter(t *testing.T) {
 		if info.Filter != tc.want {
 			t.Errorf("ImageInfo(%q).Filter = %q; want %q", tc.name, info.Filter, tc.want)
 		}
+	}
+}
+
+// deflateN returns n zero bytes flate-compressed at max level: a small file
+// on disk that decodes to n bytes in memory -- the shape of a font-program
+// flate bomb (byb-utl).
+func deflateN(t *testing.T, n int) []byte {
+	t.Helper()
+	var z bytes.Buffer
+	w, err := zlib.NewWriterLevel(&z, zlib.BestCompression)
+	if err != nil {
+		t.Fatalf("zlib.NewWriterLevel: %v", err)
+	}
+	buf := make([]byte, 1<<20)
+	for left := n; left > 0; {
+		c := len(buf)
+		if left < c {
+			c = left
+		}
+		if _, err := w.Write(buf[:c]); err != nil {
+			t.Fatalf("zlib write: %v", err)
+		}
+		left -= c
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("zlib close: %v", err)
+	}
+	return z.Bytes()
+}
+
+// fontBombPDF builds a one-page document whose /FontFile2 decodes to
+// decodedBytes -- a flate bomb sized by the caller, so the test can sit both
+// under and over maxFontProgramBytes.
+func fontBombPDF(t *testing.T, decodedBytes int) []byte {
+	t.Helper()
+	bomb := deflateN(t, decodedBytes)
+	return buildPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		"<< /Length 16 >>\nstream\nBT /F1 12 Tf ET\nendstream",
+		"<< /Type /Font /Subtype /TrueType /BaseFont /Recon /FirstChar 0 /LastChar 0 /Widths [500] /FontDescriptor 6 0 R >>",
+		"<< /Type /FontDescriptor /FontName /Recon /Flags 4 /ItalicAngle 0 /Ascent 700 /Descent -200 /CapHeight 700 /StemV 80 /FontBBox [0 0 1000 1000] /FontFile2 7 0 R >>",
+		fmt.Sprintf("<< /Length %d /Length1 %d /Filter /FlateDecode >>\nstream\n%s\nendstream",
+			len(bomb), decodedBytes, bomb),
+	})
+}
+
+// TestRenderFontBoundsDecodedProgramSize pins byb-utl: a /FontFile2 whose
+// declared /Length1 and whose actual flate-bomb decode both claim far more
+// than maxFontProgramBytes must not make renderFont allocate anywhere near
+// that much. TotalAlloc's ceiling here is generous (8x the budget) so the
+// assertion is not flaky against GC/runtime overhead; reverting the guard
+// (renderFont's sd.DecodeWithLimit back to sd.Decode) pushes the real delta
+// to 512 MiB and this fails hard, not marginally.
+func TestRenderFontBoundsDecodedProgramSize(t *testing.T) {
+	const decoded = 128 << 20 // 128 MiB, far past maxFontProgramBytes (16 MiB)
+	pdf := fontBombPDF(t, decoded)
+
+	d, err := Open(bytes.NewReader(pdf))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+
+	var m0, m1 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m0)
+	rf, ok := d.RenderFont(p.Scope, "F1")
+	runtime.ReadMemStats(&m1)
+
+	if !ok {
+		t.Fatal("RenderFont ok=false; a bad font program must degrade, not fail resolution")
+	}
+	if len(rf.Program) > maxFontProgramBytes {
+		t.Errorf("len(Program) = %d; want <= maxFontProgramBytes (%d)", len(rf.Program), maxFontProgramBytes)
+	}
+	const ceiling = 8 * maxFontProgramBytes // generous: real unguarded delta is 512 MiB
+	if delta := int64(m1.TotalAlloc - m0.TotalAlloc); delta > ceiling {
+		t.Errorf("TotalAlloc delta = %d bytes (%.2f MiB); want <= %d bytes (%.2f MiB)",
+			delta, float64(delta)/(1<<20), ceiling, float64(ceiling)/(1<<20))
+	}
+}
+
+// aliasedFontPDF builds a one-page document whose /Resources /Font dict names
+// n resource names (F0..Fn-1), all indirect references to the SAME font dict
+// object -- the byb-rq3 shape: many Tf names aliasing one dict. That font
+// dict's /FontDescriptor carries a /FontFile2 flate stream that decodes to
+// decodedBytes.
+func aliasedFontPDF(t *testing.T, n, decodedBytes int) []byte {
+	t.Helper()
+	bomb := deflateN(t, decodedBytes)
+	var names strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&names, "/F%d 5 0 R ", i)
+	}
+	return buildPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << %s>> >> /Contents 4 0 R >>", names.String()),
+		"<< /Length 0 >>\nstream\n\nendstream",
+		"<< /Type /Font /Subtype /TrueType /BaseFont /Recon /FirstChar 0 /LastChar 0 /Widths [500] /FontDescriptor 6 0 R >>",
+		"<< /Type /FontDescriptor /FontName /Recon /Flags 4 /ItalicAngle 0 /Ascent 700 /Descent -200 /CapHeight 700 /StemV 80 /FontBBox [0 0 1000 1000] /FontFile2 7 0 R >>",
+		fmt.Sprintf("<< /Length %d /Length1 %d /Filter /FlateDecode >>\nstream\n%s\nendstream",
+			len(bomb), decodedBytes, bomb),
+	})
+}
+
+// TestRenderFontCachesByFontObject pins the third fact byb-utl and byb-rq3
+// share: pdfdoc has no cache of its own, so a resource dict aliasing one
+// font object under many Tf names (byb-rq3's exact shape) made every one of
+// those names re-run sd.DecodeWithLimit's full decode. render.resolveFont's
+// own budget cannot see this: a font with no /Widths or /W charges 0 bytes
+// per name, so nothing on the caller side stopped it. RenderFont now
+// memoizes by the font dict's object identity, so N names resolving to the
+// SAME dict decode once, not N times.
+//
+// TotalAlloc's ceiling is generous (8x one decode) so the assertion is not
+// flaky; reverting the cache (RenderFont calling d.renderFont directly)
+// pushes the real delta to roughly 50x one decode and this fails hard.
+func TestRenderFontCachesByFontObject(t *testing.T) {
+	const decoded = 8 << 20 // 8 MiB: under maxFontProgramBytes, so every call succeeds
+	const names = 50        // census MAX Tf names/page
+	pdf := aliasedFontPDF(t, names, decoded)
+
+	d, err := Open(bytes.NewReader(pdf))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+
+	var m0, m1 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m0)
+	for i := 0; i < names; i++ {
+		rf, ok := d.RenderFont(p.Scope, fmt.Sprintf("F%d", i))
+		if !ok {
+			t.Fatalf("RenderFont(F%d) ok=false", i)
+		}
+		if len(rf.Program) != decoded {
+			t.Fatalf("RenderFont(F%d) len(Program) = %d; want %d", i, len(rf.Program), decoded)
+		}
+	}
+	runtime.ReadMemStats(&m1)
+
+	const ceiling = 8 * decoded // generous: N re-decodes would cost ~50x this
+	if delta := int64(m1.TotalAlloc - m0.TotalAlloc); delta > ceiling {
+		t.Errorf("TotalAlloc delta over %d aliased names = %d bytes (%.2f MiB); want <= %d bytes (%.2f MiB) -- looks like every name re-decoded instead of hitting the font-object cache",
+			names, delta, float64(delta)/(1<<20), ceiling, float64(ceiling)/(1<<20))
+	}
+}
+
+// unfilteredFontPDF builds a one-page document whose /FontFile2 carries n
+// literal bytes and NO /Filter -- the shape pdfcpu's own
+// DecodeLengthWithLimit short-circuits (types/streamdict.go: "no filter ...
+// nothing to decode"), returning sd.Raw untouched with maxDecodeBytes never
+// consulted.
+func unfilteredFontPDF(t *testing.T, n int) []byte {
+	t.Helper()
+	raw := bytes.Repeat([]byte{0x41}, n)
+	return buildPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		"<< /Length 0 >>\nstream\n\nendstream",
+		"<< /Type /Font /Subtype /TrueType /BaseFont /Recon /FirstChar 0 /LastChar 0 /Widths [500] /FontDescriptor 6 0 R >>",
+		"<< /Type /FontDescriptor /FontName /Recon /Flags 4 /ItalicAngle 0 /Ascent 700 /Descent -200 /CapHeight 700 /StemV 80 /FontBBox [0 0 1000 1000] /FontFile2 7 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", n, raw),
+	})
+}
+
+// TestRenderFontBoundsUnfilteredProgramSize pins the gap byb-utl's own
+// DecodeWithLimit does not close: it is enforced inside pdfcpu's filter
+// stages (types.StreamDict.decodeLength), so a stream with NO /Filter
+// returns sd.Raw untouched, maxDecodeBytes never consulted
+// (DecodeLengthWithLimit's "nothing to decode" short-circuit). A literal,
+// uncompressed /FontFile2 bigger than maxFontProgramBytes must still be
+// refused, not admitted 1:1.
+func TestRenderFontBoundsUnfilteredProgramSize(t *testing.T) {
+	pdf := unfilteredFontPDF(t, maxFontProgramBytes+1)
+
+	d, err := Open(bytes.NewReader(pdf))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatalf("Page: %v", err)
+	}
+
+	rf, ok := d.RenderFont(p.Scope, "F1")
+	if !ok {
+		t.Fatal("RenderFont ok=false; an oversized program must degrade, not fail resolution")
+	}
+	if len(rf.Program) > maxFontProgramBytes {
+		t.Errorf("len(Program) = %d; want <= maxFontProgramBytes (%d), an unfiltered stream must be bounded too", len(rf.Program), maxFontProgramBytes)
 	}
 }
