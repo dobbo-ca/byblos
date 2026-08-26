@@ -790,7 +790,10 @@ func (d *doc) renderFont(sc int, name string) (rf RenderFont, err error) {
 			return rf, fmt.Errorf("byblos/pdfdoc: /Font %q descendant is not a dict", name)
 		}
 		rf.Type0 = true
-		rf.DW, _ = d.number(desc["DW"])
+		rf.DW = 1000 // ISO 32000-1 9.7.4.3 default, overwritten below only if /DW parses as a number.
+		if n, ok := d.number(desc["DW"]); ok {
+			rf.DW = n
+		}
 		rf.W = d.cidWidths(desc)
 		widthDict = desc
 	}

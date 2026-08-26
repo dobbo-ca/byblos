@@ -58,9 +58,11 @@ type Font struct {
 	// See RenderFont in pdfdoc.go.
 	Type0 bool
 	// W and DW mirror the descendant CIDFont's /W -- flattened by the caller
-	// to CID -> width in thousandths -- and /DW (ISO 32000-1 9.7.4.3). A CID
-	// in neither takes DW's spec default 1000; a zero DW means an absent one
-	// (an explicit /DW 0 is indistinguishable and lands on the default too).
+	// to CID -> width in thousandths -- and /DW (ISO 32000-1 9.7.4.3), except
+	// DW is already resolved: it is the CIDFont's /DW when present, else the
+	// spec default 1000 (byb-ctz). The caller MUST set DW for a Type0 font --
+	// the zero value now means an explicit /DW 0, not "unset", so a caller
+	// that forgets it gets 0-width CIDs instead of the default.
 	W  map[uint16]float64
 	DW float64
 }
@@ -241,16 +243,14 @@ func (f *textFont) w0(code byte) float64 {
 }
 
 // w0CID is the CID's glyph displacement in text space: /W in thousandths
-// where present, else /DW, whose absence -- a zero dw -- means the spec
-// default 1000 (ISO 32000-1 9.7.4.3).
+// where present, else /DW. dw is already resolved by the caller (byb-ctz) --
+// the CIDFont's /DW when present, else the spec default 1000 (ISO 32000-1
+// 9.7.4.3) -- so an explicit /DW 0 advances 0, not 1000.
 func (f *textFont) w0CID(cid uint16) float64 {
 	if w, ok := f.wmap[cid]; ok {
 		return w / 1000
 	}
-	if f.dw != 0 {
-		return f.dw / 1000
-	}
-	return 1
+	return f.dw / 1000
 }
 
 // winAnsiC1 maps codes 0x80..0x9f -- where WinAnsi (CP1252) departs from
