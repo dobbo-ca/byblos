@@ -25,6 +25,14 @@ import (
 
 var pngSignature = [8]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
 
+// maxImagePixels bounds a PNG's declared Width*Height. Restated from
+// internal/pdfbuild's constant of the same name and value rather than
+// imported -- see internal/render's maxRasterPixels for why this module
+// restates a shared bound instead of importing across a package boundary.
+// 1<<26 = 67,108,864 is this module's design point (also internal/jbig2's
+// MaxPagePixels): 256 MB of RGBA, roughly twice a 600 DPI A4.
+const maxImagePixels = 1 << 26
+
 // EmbedPNG lifts a PNG file's pixel data into a ready EncodedImage under
 // /FlateDecode, plus the DPI its pHYs chunk declares (0 if the file declares
 // none -- see BuildPage's doc comment on why 0 is not silently defaulted).
@@ -49,6 +57,15 @@ func EmbedPNG(data []byte) (EncodedImage, float64, error) {
 	}
 	if info.hasTRNS {
 		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedPNG: colour type %d has a tRNS chunk, which needs an /SMask split this function does not do", info.colorType)
+	}
+	// byb-37h: refuse an oversized IHDR before it becomes an EncodedImage
+	// that a caller other than BuildPDF might use directly. Same bound and
+	// basis as internal/pdfbuild's maxImagePixels (restated, not imported --
+	// see that constant's comment); computed in uint64 because width and
+	// height are each a raw uint32 out of IHDR, and their product can
+	// overflow int before an int comparison would catch it.
+	if uint64(info.width)*uint64(info.height) > maxImagePixels {
+		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedPNG: image is %dx%d (%d pixels), which exceeds the maximum of %d pixels", info.width, info.height, uint64(info.width)*uint64(info.height), maxImagePixels)
 	}
 
 	var cs ColorSpace

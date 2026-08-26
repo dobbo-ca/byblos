@@ -13,6 +13,7 @@ import (
 	"compress/zlib"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
@@ -86,6 +87,50 @@ func TestValidatePage(t *testing.T) {
 			page: func() Page {
 				img := validImage()
 				img.Width = 1<<31 + 1
+				return Page{Image: img, WidthPt: 612, HeightPt: 792}
+			}(),
+			wantErr: "exceeds the maximum",
+		},
+		{
+			// byb-37h: Width*Height past maxImagePixels, with neither axis
+			// alone anywhere near byb-jo9's old 1<<31 bound -- pins that the
+			// new guard fires on the PRODUCT, not a per-axis check.
+			name: "pixel budget (byb-37h)",
+			page: func() Page {
+				img := validImage()
+				img.Width, img.Height = 1<<13+1, 1<<13+1 // (2^13+1)^2 > 1<<26
+				return Page{Image: img, WidthPt: 612, HeightPt: 792}
+			}(),
+			wantErr: "exceeds the maximum",
+		},
+		{
+			// Width and Height each at the largest value a real PNG IHDR
+			// can declare (uint32 max); their product overflows int64
+			// before an unwidened comparison would see it -- bug class 10.
+			// If the guard compared plain int64 instead of uint64, this
+			// product would wrap to a small positive number and pass.
+			name: "pixel budget product overflow guard (byb-37h)",
+			page: func() Page {
+				img := validImage()
+				img.Width, img.Height = 1<<32-1, 1<<32-1
+				return Page{Image: img, WidthPt: 612, HeightPt: 792}
+			}(),
+			wantErr: "exceeds the maximum",
+		},
+		{
+			// byb-37h: Width and Height are declared int, not uint32, and
+			// Page is a public struct a caller can build directly -- so an
+			// axis can be large enough that uint64(Width)*uint64(Height)
+			// itself wraps mod 2^64 and comes out UNDER the budget (here it
+			// computes to exactly 0). Bug class 10 one level up: an axis
+			// bound must run before the product, not instead of a widened
+			// product. Width alone (1<<61) is already far past
+			// maxImagePixels, so the per-axis check must catch this even
+			// though the product check alone would not.
+			name: "pixel budget axis overflows uint64 product (byb-37h)",
+			page: func() Page {
+				img := validImage()
+				img.Width, img.Height = 1<<61, 8
 				return Page{Image: img, WidthPt: 612, HeightPt: 792}
 			}(),
 			wantErr: "exceeds the maximum",
@@ -202,5 +247,63 @@ func TestValidatePage(t *testing.T) {
 				t.Fatalf("validatePage() = %q, want it to contain %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestValidatePageRefusesOversizedImageCheaply pins the CPU half of byb-37h:
+// a 1 x 999,000,000 /Indexed image, backed by ~255 KB of deflated zeros,
+// used to make validatePage spend seconds streaming maxSampleValue's row
+// loop 999 million times over before it ever found a bad sample -- flat
+// memory, all cost in CPU. The maxImagePixels guard must refuse it before
+// maxSampleValue is reached at all. This asserts elapsed time, not just the
+// error string: the unfixed code also eventually returns an error (a short
+// stream, once the 255 KB of zeros run out), just after paying the full
+// cost -- a string-only assertion would pass on either version.
+//
+// IT SURVIVES EVERY SINGLE-GUARD MUTATION, AND THAT IS EXPECTED. Height is
+// 999,000,000, so the axis bound and the product bound each refuse this input
+// on their own: neutering either one alone leaves this test PASS in 0.39s
+// (measured, both directions). Only the COMPOUND mutation -- both bounds gone
+// -- reddens it, and then it reddens at the full 3.3s. It earns its place
+// anyway because it is the only assertion in the package on the COST of the
+// rejection path, which is the whole substance of byb-37h; the two
+// TestValidatePage subtests named for the bounds are what pin them
+// individually and selectively. Do not "fix" this by narrowing the input to
+// something one bound alone catches -- no such input exists for the CPU half,
+// because a row count large enough to spend seconds is already past both.
+func TestValidatePageRefusesOversizedImageCheaply(t *testing.T) {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	buf := make([]byte, 1<<20)
+	for i := 0; i < 256; i++ {
+		_, _ = zw.Write(buf)
+	}
+	_ = zw.Close()
+
+	page := Page{
+		Image: pdfdoc.EncodedImage{
+			Width: 1, Height: 999_000_000, BPC: 1, Filter: "FlateDecode",
+			ColorSpace: pdfdoc.ColorSpace{Name: "Indexed", Base: "DeviceGray", HiVal: 1, Lookup: []byte{0, 255}},
+			Data:       z.Bytes(),
+		},
+		WidthPt: 0.001, HeightPt: 999000,
+	}
+
+	start := time.Now()
+	err := validatePage(page)
+	el := time.Since(start)
+	t.Logf("validatePage err = %v, elapsed = %v", err, el)
+
+	if err == nil {
+		t.Fatal("validatePage on a 999M-row declared image: want an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds the maximum") {
+		t.Fatalf("validatePage() = %q, want it to contain %q", err.Error(), "exceeds the maximum")
+	}
+	// The bug measured 3.3s on this exact input; 100ms is two orders of
+	// magnitude below that and comfortably above a guard-only refusal.
+	const ceiling = 100 * time.Millisecond
+	if el > ceiling {
+		t.Fatalf("elapsed %v exceeds the %v ceiling", el, ceiling)
 	}
 }

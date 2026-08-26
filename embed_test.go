@@ -2,12 +2,14 @@ package byblos
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"runtime"
 	"testing"
 )
 
@@ -149,6 +151,93 @@ func TestEmbedPNGDeclaresDPIFromPHYs(t *testing.T) {
 	}
 	if dpi < 299 || dpi > 301 {
 		t.Errorf("dpi = %v; want ~300", dpi)
+	}
+}
+
+// writeHostileChunk appends one length-prefixed, CRC-terminated PNG chunk to b.
+func writeHostileChunk(b *bytes.Buffer, typ string, data []byte) {
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(data)))
+	b.Write(l[:])
+	c := crc32.NewIEEE()
+	b.WriteString(typ)
+	_, _ = c.Write([]byte(typ))
+	b.Write(data)
+	_, _ = c.Write(data)
+	var s [4]byte
+	binary.BigEndian.PutUint32(s[:], c.Sum32())
+	b.Write(s[:])
+}
+
+// hostilePNG builds a well-formed but tiny-on-disk PNG (colour type 3,
+// indexed, 8-bit) that declares w x 1 pixels: an IDAT holding one filter byte
+// plus w zero samples, compressed. byb-37h's repro: w = 2147483647 makes a
+// ~2 MB file that claims 2.1 billion pixels.
+func hostilePNG(t *testing.T, w uint32) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	b.Write(pngSignature[:])
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:], w)
+	binary.BigEndian.PutUint32(ihdr[4:], 1)
+	ihdr[8], ihdr[9], ihdr[10], ihdr[11], ihdr[12] = 8, 3, 0, 0, 0
+	writeHostileChunk(&b, "IHDR", ihdr)
+	writeHostileChunk(&b, "PLTE", []byte{0, 0, 0, 255, 255, 255})
+
+	var z bytes.Buffer
+	zw, err := zlib.NewWriterLevel(&z, zlib.BestCompression)
+	if err != nil {
+		t.Fatalf("zlib.NewWriterLevel: %v", err)
+	}
+	_, _ = zw.Write([]byte{0}) // filter type None
+	buf := make([]byte, 1<<20)
+	for left := int64(w); left > 0; {
+		c := int64(len(buf))
+		if left < c {
+			c = left
+		}
+		_, _ = zw.Write(buf[:c])
+		left -= c
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zlib close: %v", err)
+	}
+	writeHostileChunk(&b, "IDAT", z.Bytes())
+	writeHostileChunk(&b, "IEND", nil)
+	return b.Bytes()
+}
+
+// TestEmbedPNGRefusesOversizedImage pins byb-37h: a PNG whose IHDR declares
+// far more pixels than maxImagePixels must be refused by EmbedPNG itself,
+// cheaply -- not merely by a later BuildPDF stage. This is a cost assertion,
+// not just an error-string one: the bead's own bug let a 2 MB file drive
+// TotalAlloc up by 6.34 GiB and take 2.89s, and a test that only checks the
+// error string would pass equally well against the unfixed code once some
+// unrelated guard fires downstream.
+func TestEmbedPNGRefusesOversizedImage(t *testing.T) {
+	data := hostilePNG(t, 2147483647)
+	t.Logf("hostile PNG file = %d bytes", len(data))
+
+	var m0, m1 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m0)
+	_, _, err := EmbedPNG(data)
+	runtime.ReadMemStats(&m1)
+
+	if err == nil {
+		t.Fatal("EmbedPNG on an oversized IHDR: want an error, got nil")
+	}
+	t.Logf("EmbedPNG err = %v", err)
+
+	delta := m1.TotalAlloc - m0.TotalAlloc
+	t.Logf("TotalAlloc delta = %d bytes", delta)
+	// Generous ceiling: EmbedPNG parses the ~2 MB file (chunk-walks it,
+	// copies IDAT), so some multiple of the input is expected. The bug
+	// allocated 6.34 GiB; 64 MiB is three orders of magnitude below that and
+	// comfortably above a plain parse of a 2 MB file.
+	const ceiling = 64 << 20
+	if delta > ceiling {
+		t.Fatalf("TotalAlloc delta %d bytes exceeds the %d byte ceiling", delta, ceiling)
 	}
 }
 

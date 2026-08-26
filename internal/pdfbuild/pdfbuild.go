@@ -129,6 +129,22 @@ func inRange(v float64) bool {
 	return !math.IsNaN(v) && v >= minCoord && v <= maxCoord
 }
 
+// maxImagePixels bounds an EncodedImage's Width*Height, restated (not
+// imported -- see internal/render's maxRasterPixels, which restates the same
+// number for the same reason) from this module's design point:
+// internal/jbig2's MaxPagePixels and internal/render's maxRasterPixels are
+// both 1<<26 = 67,108,864, arrived at independently as 256 MB of RGBA,
+// roughly twice a 600 DPI A4. A census over the pinned sample (5,671
+// documents, 169,376 pages) found the largest single decoded font program at
+// 1,043,560 B and the largest per-page retained font bytes at 2,821,308 B --
+// this module's other stated budget, 16<<20 (16 MiB), sits 16x and ~4.5x
+// above those respectively, and 1<<26 pixels is the same order of margin
+// applied to image dimensions instead of bytes. It refuses byb-37h's hostile
+// inputs (a declared 2147483647x1 or 1x999000000 image) many orders of
+// magnitude below the point where validatePage or Write would otherwise
+// allocate or loop over them.
+const maxImagePixels = 1 << 26
+
 // colorSpaceObject renders cs as the object /ColorSpace takes: a name for a
 // device space, or the [/Indexed base hival <lookup>] array of ISO 32000-1
 // section 8.6.6.3.
@@ -231,21 +247,24 @@ func validatePage(p Page) error {
 	if img.Width <= 0 || img.Height <= 0 {
 		return fmt.Errorf("image dimensions %dx%d are not positive", img.Width, img.Height)
 	}
-	// byb-jo9: maxSampleValue computes rowLen := (img.Width*img.BPC+7)/8. BPC
-	// is capped at 8 by the FlateDecode switch below, so bounding Width here
-	// keeps that product inside int64 -- a large enough Width (e.g. 1<<61)
-	// wraps rowLen around to a small positive value, and maxInRow then
-	// slices row[:width] with the original, un-overflowed Width past that
-	// short row's capacity, which panics instead of returning an error.
-	// (Widths that only push rowLen negative, e.g. 1<<60, are already caught
-	// as an ordinary short-stream error further down, not this panic --
-	// it's specifically the wrap past zero that's unguarded.) Height is a
-	// loop counter in that same function, not a multiplicand, so it does not
-	// share this failure mode and is left as the plain >0 check above.
-	// 1<<31 matches the existing dimension bound in content/lexer.go's
-	// inlineInt.
-	if img.Width > 1<<31 {
-		return fmt.Errorf("image width %d exceeds the maximum of %d", img.Width, 1<<31)
+	// byb-37h: each axis is bounded by maxImagePixels BEFORE the product is
+	// taken, before either dimension reaches maxSampleValue or the scaling
+	// arithmetic in Write. Width and Height are declared ints and can arrive
+	// from parsed file headers (EmbedPNG's IHDR is a uint32 each way) or from
+	// a caller-built Page, so either can be large enough that Width*Height
+	// overflows uint64 itself -- a uint64 product alone is not enough, it
+	// just moves the wrap from 2^63 to 2^64 (e.g. Width=1<<61, Height=8
+	// still computes to 0 and passes). Bounding each axis to maxImagePixels
+	// first makes the subsequent product at most (1<<26)*(1<<26) = 1<<52,
+	// nowhere near uint64's range, so it cannot wrap. This also subsumes
+	// byb-jo9's old `Width > 1<<31` bound: maxImagePixels is 1<<26, so any
+	// Width admitted here is already far under 1<<31, which is what made
+	// rowLen := (img.Width*img.BPC+7)/8 wrap in the first place.
+	if img.Width > maxImagePixels || img.Height > maxImagePixels {
+		return fmt.Errorf("image is %dx%d, which exceeds the maximum of %d pixels", img.Width, img.Height, maxImagePixels)
+	}
+	if uint64(img.Width)*uint64(img.Height) > maxImagePixels {
+		return fmt.Errorf("image is %dx%d (%d pixels), which exceeds the maximum of %d pixels", img.Width, img.Height, uint64(img.Width)*uint64(img.Height), maxImagePixels)
 	}
 	if len(img.Data) == 0 {
 		return fmt.Errorf("image has no data")
