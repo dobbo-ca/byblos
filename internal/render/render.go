@@ -106,6 +106,23 @@ var (
 	// source-pixel budget exists (decoding already happened behind ImageFor,
 	// under the caller's own budgets).
 	maxFillWork int64 = 1 << 28
+
+	// maxFontRetainedBytes bounds bytes resolveFont charges against the
+	// current page across fontsBy: each resolved Tf NAME's program bytes
+	// (progsBy dedups the PARSE, not the decode -- pdfdoc.RenderFont has no
+	// cache of its own, so every name pays a fresh decode even when it
+	// aliases an already-parsed program) plus that name's own /Widths and
+	// /W arrays, which are never deduped at all. 16<<20 is this module's
+	// stated per-unit memory concession (see internal/jbig2's
+	// maxStreamBitmapBytes); a census of the pinned sample's font-bearing
+	// pages found the worst single page retaining 2,821,308 bytes of
+	// program plus 655,360 bytes of metric arrays (about 3.5 MiB), so the
+	// bound is a 4.5x margin over anything actually seen. Without it, 2000
+	// Tf names aliased to one /Widths-bearing 65536-entry dict retain >1
+	// GiB live for a page that inks nothing (byb-rq3); charging only on a
+	// progsBy miss instead of per name left a font with no /Widths or /W
+	// uncharged past the first name and let every alias through for free.
+	maxFontRetainedBytes int64 = 16 << 20
 )
 
 // Image is a decoded image XObject ready for Do to sample. Decoding is the
@@ -362,13 +379,14 @@ type subpath struct {
 
 // renderer carries the canvas and the per-call budgets.
 type renderer struct {
-	img      *image.RGBA
-	images   ImageFor
-	fonts    FontFor
-	fontsBy  map[string]*textFont   // Tf resolutions, nil entry = known unusable
-	progsBy  map[[32]byte]*fontProg // parsed font programs by content hash
-	points   int64                  // flattened points held for the current path
-	fillWork int64                  // active-edge x scanline units spent
+	img        *image.RGBA
+	images     ImageFor
+	fonts      FontFor
+	fontsBy    map[string]*textFont   // Tf resolutions, nil entry = known unusable
+	progsBy    map[[32]byte]*fontProg // parsed font programs by content hash
+	points     int64                  // flattened points held for the current path
+	fillWork   int64                  // active-edge x scanline units spent
+	fontBudget int64                  // bytes charged against maxFontRetainedBytes so far
 }
 
 // path is the current path under construction, all points already in device

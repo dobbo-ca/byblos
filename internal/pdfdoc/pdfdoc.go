@@ -244,13 +244,14 @@ type Doc interface {
 }
 
 type doc struct {
-	ctx      *model.Context
-	scopes   []scope
-	images   map[int]ImageInfo
-	streams  map[int]*types.StreamDict    // image stream dicts, keyed like images
-	refs     map[int]types.IndirectRef    // xref identity of those streams, for writing
-	nextID   int                          // synthetic ids for direct (non-indirect) image objects
-	fontRefs map[string]types.IndirectRef // embedded fonts, keyed by TrueTypeFont.BaseFont
+	ctx       *model.Context
+	scopes    []scope
+	images    map[int]ImageInfo
+	streams   map[int]*types.StreamDict    // image stream dicts, keyed like images
+	refs      map[int]types.IndirectRef    // xref identity of those streams, for writing
+	nextID    int                          // synthetic ids for direct (non-indirect) image objects
+	fontRefs  map[string]types.IndirectRef // embedded fonts, keyed by TrueTypeFont.BaseFont
+	fontCache map[int]fontCacheEntry       // RenderFont results, keyed like images
 }
 
 type scope struct {
@@ -696,6 +697,18 @@ type RenderFont struct {
 // from a declared count).
 const maxCIDWidthEntries = 65536
 
+// maxFontProgramBytes bounds how large a single decoded /FontFile,
+// /FontFile2 or /FontFile3 stream may grow to. Without it, a compressed font
+// program is an ordinary flate bomb: a 131,407-byte PDF with a 130,466-byte
+// /FontFile2 stream decodes to 128 MiB and drags 512 MiB of TotalAlloc
+// behind it (byb-utl). 16<<20 is this module's stated per-unit memory
+// concession (see internal/jbig2's maxStreamBitmapBytes); a census of the
+// pinned sample's 124,790 font-bearing pages found the single largest
+// decoded font program at 1,043,560 bytes, so the bound is a 16x margin over
+// anything actually seen. Enforced during decode via DecodeWithLimit, not
+// after the bytes already exist.
+const maxFontProgramBytes = 16 << 20
+
 // RenderFont resolves the named /Font resource for rendering. A composite
 // /Subtype /Type0 font (byb-6z1) is resolved through its descendant CIDFont
 // when /Encoding is Identity-H, per render.Font's own contract (text.go)
@@ -709,8 +722,41 @@ const maxCIDWidthEntries = 65536
 // only alongside actual vertical-layout support, on a corpus that has some.
 // See Font.Type0 in text.go.
 func (d *doc) RenderFont(sc int, name string) (RenderFont, bool) {
+	// Memoized by the font dict's object identity, not by (scope, name): a
+	// resource dict aliasing one dict under many Tf names (byb-rq3's shape)
+	// would otherwise re-run sd.DecodeWithLimit's full read-to-the-limit on
+	// EVERY name, including a rejected /FontFile whose Program comes back
+	// empty -- render.resolveFont's own budget charges 0 bytes for that
+	// result, so nothing on the caller side bounds the repeat. Keyed by
+	// object number (identify's synthetic ids are never reused, so a direct
+	// dict -- unexercised in the corpus per the Font method's comment --
+	// just never hits).
+	obj, ok := d.lookupResource(sc, "Font", name)
+	if !ok {
+		return RenderFont{}, false
+	}
+	id := d.identify(obj)
+	if id >= 0 {
+		if c, hit := d.fontCache[id]; hit {
+			return c.rf, c.ok
+		}
+	}
 	rf, err := d.renderFont(sc, name)
-	return rf, err == nil
+	entry := fontCacheEntry{rf: rf, ok: err == nil}
+	if id >= 0 {
+		if d.fontCache == nil {
+			d.fontCache = map[int]fontCacheEntry{}
+		}
+		d.fontCache[id] = entry
+	}
+	return entry.rf, entry.ok
+}
+
+// fontCacheEntry is one memoized RenderFont result, keyed by font dict
+// object number in doc.fontCache.
+type fontCacheEntry struct {
+	rf RenderFont
+	ok bool
 }
 
 func (d *doc) renderFont(sc int, name string) (rf RenderFont, err error) {
@@ -769,7 +815,15 @@ func (d *doc) renderFont(sc int, name string) (rf RenderFont, err error) {
 		if err != nil || sd == nil {
 			continue
 		}
-		if err := sd.Decode(); err != nil {
+		if err := sd.DecodeWithLimit(maxFontProgramBytes); err != nil {
+			continue
+		}
+		if len(sd.Content) > maxFontProgramBytes {
+			// DecodeWithLimit only consults maxDecodeBytes inside a filter
+			// stage: an unfiltered stream (no /Filter, or a preserved image
+			// filter) returns sd.Raw untouched (types.StreamDict.
+			// DecodeLengthWithLimit), so a literal oversized program must be
+			// bounded here too -- see maxFontProgramBytes.
 			continue
 		}
 		rf.Program = sd.Content
