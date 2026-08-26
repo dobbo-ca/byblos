@@ -48,7 +48,11 @@ jobs:
       && github.event.pull_request.head.repo.full_name == github.repository
       && contains(fromJSON(vars.BENCH_ACTORS || '["cdobbyn"]'), github.actor)
 
-    runs-on: ubuntu-24.04
+    # ARM, because the committed baseline is measured on linux/arm64 and the
+    # fingerprint check below compares the platform. An amd64 runner reports
+    # every arm64 baseline stale and hard-stops the job, so the runner and the
+    # baseline must agree. Free for public repositories.
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: write # push the attempt record to bench-attempts
       pull-requests: write # post the table, close a failing candidate
@@ -127,7 +131,11 @@ jobs:
           check harness_sha256 "$harness"
           check bench_set_sha256 "$benchset"
           check go_version "$(go env GOVERSION)"
-          check goos_goarch "$(go env GOOS)_$(go env GOARCH)"
+          # SLASH, not underscore. Fingerprint.GOOSGOARCH is written by
+          # cmd/byblos-bench as runtime.GOOS + "/" + runtime.GOARCH, so an
+          # underscore here never matches any baseline and reports every one of
+          # them stale.
+          check goos_goarch "$(go env GOOS)/$(go env GOARCH)"
           echo "stale=$stale" >> "$GITHUB_OUTPUT"
           if [ "$stale" = true ]; then
             # A STALE BASELINE IS A HARD STOP when the harness or bench set
@@ -135,7 +143,7 @@ jobs:
             # between different harness versions or different document sets --
             # that is comparing different work. Refuse, and say exactly how to
             # fix it. Closed by byb-99d.
-            echo "::error::baseline is stale:$reasons. Refresh it -- three runs of one commit on ubuntu-24.04, then byblos-bench baseline -runs a,b,c."
+            echo "::error::baseline is stale:$reasons. Refresh it -- three runs of one commit on ubuntu-24.04-arm, then byblos-bench baseline -runs a,b,c -commit SHA -benchset SHA -harness SHA."
             exit 1
           fi
 
