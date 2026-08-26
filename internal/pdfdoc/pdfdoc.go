@@ -877,7 +877,21 @@ func (d *doc) ImageInfo(id int) (ImageInfo, bool) {
 //     collapses byte-identical image XObjects, so the map ExtractImagesRaw
 //     returns for page 2 of a duplex scan is keyed by page 1's object number.
 //     See the dup-raster corpus document.
-func (d *doc) RawImage(id int) ([]byte, string, error) {
+func (d *doc) RawImage(id int) (data []byte, fileType string, err error) {
+	// The same shape as RawImageGlobals and renderFont below: this hands an
+	// arbitrary image dict to pdfcpu, which reads entries it does not check
+	// for. pdfcpu's pdfImage does `bpc := *sd.IntEntry("BitsPerComponent")`
+	// (writeImage.go:151), so an image XObject with no /BitsPerComponent
+	// nil-dereferences inside the library rather than returning an error --
+	// nothing byblos can see coming, so it has to be recovered. A corrupt
+	// image must divert or skip, not take the process down (byb-11r).
+	//
+	// THIS WAS THE ONLY pdfcpu SEAM IN THIS FILE WITHOUT THE GUARD, and it
+	// stayed latent because the extract path diverts most bad pages before
+	// reaching here. Rendering draws EVERY image XObject on the page, so
+	// byb-547's RenderPage made it live: govdocs1/400566.pdf p1 crashed
+	// outright, 1 file in the 5,672-file pinned sample.
+	defer catchPanic(fmt.Sprintf("rendering image %d", id), &err)
 	sd, ok := d.streams[id]
 	if !ok {
 		return nil, "", fmt.Errorf("byblos/pdfdoc: image %d has not been resolved on this document", id)

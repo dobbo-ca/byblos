@@ -9,6 +9,7 @@ package byblos_test
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"errors"
 	"fmt"
@@ -267,4 +268,81 @@ func TestRenderPageRejectsAPageOutOfRange(t *testing.T) {
 	if _, err := byblos.RenderPage(bytes.NewReader(pdf), 2, 400); err == nil {
 		t.Error("RenderPage(page 2) on a one-page document: want an error, got nil")
 	}
+}
+
+// brokenImagePDF is a 200x200 page carrying TWO things: an image XObject with
+// NO /BitsPerComponent, drawn over the lower-left quadrant, and a black
+// rectangle in the upper-left that has nothing to do with it.
+//
+// The missing entry is the whole fixture. pdfcpu's pdfImage reads it as
+// `bpc := *sd.IntEntry("BitsPerComponent")` (writeImage.go:151) and
+// nil-dereferences -- it does not return an error, it crashes -- so this is a
+// panic byblos can only handle by recovering it.
+func brokenImagePDF() []byte {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	_, _ = zw.Write(make([]byte, 4*4))
+	_ = zw.Close()
+	raster := z.Bytes()
+
+	content := "q 100 0 0 100 10 10 cm /Im0 Do Q\n0 0 0 rg 10 150 50 20 re f"
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]" +
+			" /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width 4 /Height 4"+
+			" /ColorSpace /DeviceGray /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream",
+			len(raster), raster),
+	}
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	offs := make([]int, len(objs)+1)
+	for i, o := range objs {
+		offs[i+1] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
+	}
+	x := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objs)+1)
+	for i := 1; i <= len(objs); i++ {
+		fmt.Fprintf(&b, "%010d 00000 n \n", offs[i])
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, x)
+	return b.Bytes()
+}
+
+// TestRenderPageSurvivesAnImageThatCrashesPdfcpu pins byb-11r: pdfdoc.RawImage
+// was the only pdfcpu seam in internal/pdfdoc without a catchPanic, and
+// RenderPage is what made that reachable -- rendering draws EVERY image
+// XObject on a page, while the extract path diverts most bad pages before it
+// gets there. Measured: govdocs1/400566.pdf p1 crashed the process outright,
+// 1 file of the 5,672-file pinned sample, while ExtractPageRaster returned a
+// clean "not a single raster: has-text" on the same page.
+//
+// THE ASSERTION IS NOT "IT DID NOT CRASH". A guard that swallowed the whole
+// page would also not crash, and would be wrong: a corrupt image must skip and
+// leave the rest of the page rendered. So this checks all three of no panic,
+// the unrelated rectangle PRESENT, and the image's own area still WHITE.
+func TestRenderPageSurvivesAnImageThatCrashesPdfcpu(t *testing.T) {
+	img, err := byblos.RenderPage(bytes.NewReader(brokenImagePDF()), 1, 400)
+	if err != nil {
+		t.Fatalf("RenderPage: %v -- a corrupt image must skip, not fail the page", err)
+	}
+	// scale is 2 (a 200pt page at a 400px long edge) and device y is flipped.
+	// The rectangle is user (10,150)-(60,170) -> device (20,60)-(120,100).
+	// The image is user (10,10)-(110,110)    -> device (20,180)-(220,380).
+	isWhite := func(x, y int) bool {
+		r, g, b, _ := img.At(x, y).RGBA()
+		return r == 0xffff && g == 0xffff && b == 0xffff
+	}
+	if isWhite(50, 80) {
+		t.Error("the rectangle at device (50,80) is white: the whole page was abandoned, " +
+			"not just the corrupt image")
+	}
+	if !isWhite(100, 300) {
+		t.Error("device (100,300) is painted: the corrupt image drew something rather than " +
+			"being skipped")
+	}
+	t.Logf("rectangle drawn, corrupt image skipped, page %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
 }
