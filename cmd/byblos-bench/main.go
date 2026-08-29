@@ -48,7 +48,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage:
   byblos-bench measure -capability C -doc PATH [-reps N]
   byblos-bench run -set DIR -out FILE [-time C1,C2] [-reps N]
-  byblos-bench baseline -runs A.json,B.json,C.json -out FILE -commit SHA -benchset SHA
+  byblos-bench baseline -runs A.json,B.json,C.json -out FILE -commit SHA -benchset SHA -harness SHA
   byblos-bench score -baseline FILE -head FILE [-base-run FILE] [-out FILE]
 `)
 	os.Exit(2)
@@ -199,6 +199,24 @@ func cmdBaseline(args []string) error {
 	harness := fs.String("harness", "", "sha256 over cmd/byblos-bench and internal/bench/map.go")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// An unpassed fingerprint flag is not a missing label. Baseline.Validate
+	// compares the field, so an empty one is stale against every run that could
+	// ever score against it, and the pin is worthless. One measured baseline
+	// was already lost this way with an empty harness_sha256.
+	//
+	// .github/workflows/bench.yml is the single definition of the harness
+	// value, because CI computes it there and a value computed any other way is
+	// stale on arrival:
+	//
+	//	harness=$(cat cmd/byblos-bench/*.go internal/bench/map.go | sha256sum | cut -d' ' -f1)
+	for _, f := range []struct{ flag, value string }{
+		{"-commit", *commit}, {"-benchset", *benchSet}, {"-harness", *harness},
+	} {
+		if strings.TrimSpace(f.value) == "" {
+			return fmt.Errorf("%s is required: an empty fingerprint field is stale against every run", f.flag)
+		}
 	}
 
 	var paths []string
