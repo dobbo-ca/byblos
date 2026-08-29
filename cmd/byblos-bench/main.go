@@ -69,11 +69,14 @@ func cmdMeasure(args []string) error {
 	if err != nil {
 		return err
 	}
-	s, err := measure(*capability, filepathBase(*doc), body, *reps)
+	samples, err := measure(*capability, filepathBase(*doc), body, *reps)
 	if err != nil {
 		return err
 	}
-	return json.NewEncoder(os.Stdout).Encode(s)
+	// An array, Run first, so the parent decodes one value and cannot silently
+	// read half the measurement. Two samples for a capability with a Prepare,
+	// one for a capability without.
+	return json.NewEncoder(os.Stdout).Encode(samples)
 }
 
 // filepathBase is a one-line wrapper over path/filepath.Base.
@@ -121,7 +124,8 @@ func cmdRun(args []string) error {
 			n = *reps
 		}
 		for _, doc := range docs {
-			s, err := fork(self, tg.Capability, doc, n)
+			// The capability's Run, plus its Prepare where it has one.
+			samples, err := fork(self, tg.Capability, doc, n)
 			if err != nil {
 				run.Skipped = append(run.Skipped, bench.Skip{
 					Capability: tg.Capability,
@@ -130,7 +134,7 @@ func cmdRun(args []string) error {
 				})
 				continue
 			}
-			run.Samples = append(run.Samples, s)
+			run.Samples = append(run.Samples, samples...)
 		}
 	}
 
@@ -162,25 +166,30 @@ func skipReason(err error) string {
 	return err.Error()
 }
 
-// fork runs one measure child and decodes its sample. A child that exits
-// non-zero having printed ErrIneligible is a skip; any other non-zero exit is
-// a failure of the run.
-func fork(self, capability, doc string, reps int) (bench.Sample, error) {
+// fork runs one measure child and decodes its samples: the capability's Run and
+// its Prepare. A child that exits non-zero having printed ErrIneligible is a
+// skip; any other non-zero exit is a failure of the run.
+func fork(self, capability, doc string, reps int) ([]bench.Sample, error) {
 	cmd := exec.Command(self, "measure",
 		"-capability", capability, "-doc", doc, "-reps", strconv.Itoa(reps))
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
 		if strings.Contains(stderr.String(), bench.ErrIneligible.Error()) {
-			return bench.Sample{}, errChildSkipped
+			return nil, errChildSkipped
 		}
-		return bench.Sample{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	var s bench.Sample
-	if err := json.Unmarshal(stdout.Bytes(), &s); err != nil {
-		return bench.Sample{}, fmt.Errorf("decode child output: %w", err)
+	var samples []bench.Sample
+	if err := json.Unmarshal(stdout.Bytes(), &samples); err != nil {
+		return nil, fmt.Errorf("decode child output: %w", err)
 	}
-	return s, nil
+	// Half a measurement recorded as a whole one would understate a capability's
+	// cost and silently drop its Prepare pair from the score.
+	if len(samples) == 0 {
+		return nil, fmt.Errorf("child returned no samples for %s", capability)
+	}
+	return samples, nil
 }
 
 // cmdBaseline reduces N repeated runs of the SAME commit to a committed

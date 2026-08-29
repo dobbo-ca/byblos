@@ -25,12 +25,31 @@ const JPEGQuality = 75
 
 // Case is how one capability is exercised.
 //
-// Prepare builds the input and is NOT measured. Run does the work that is
-// measured and returns the bytes it produced, or nil for a capability that
-// produces no encoded output.
+// Prepare builds the input Run takes. Run does the work and returns the bytes
+// it produced, or nil for a capability that produces no encoded output.
+//
+// A NIL Prepare means the capability has no preparation step: Run takes the
+// document bytes directly. That is not the same as a Prepare that returns the
+// document unchanged, and the difference is measured. Both halves are now
+// counted (byb-om7.12), so a do-nothing Prepare would post a sample whose
+// entire cost is the 24 bytes of boxing the input into an any -- a base so
+// small that a few bytes of drift reads as tens of percent and breaches the
+// regression ceiling, which is exactly the failure byb-99d found on the disk
+// counters. Nil says there is nothing there to measure.
 type Case struct {
 	Prepare func(doc []byte) (any, error)
 	Run     func(in any) ([]byte, error)
+}
+
+// Input returns what Run takes, doing the preparation if there is any.
+//
+// Callers that measure the two halves separately use Prepare directly; this is
+// for callers that only want to exercise the case.
+func (c Case) Input(doc []byte) (any, error) {
+	if c.Prepare == nil {
+		return doc, nil
+	}
+	return c.Prepare(doc)
 }
 
 // CaseFor returns the case for a capability string.
@@ -52,12 +71,10 @@ func rasterOf(doc []byte) (image.Image, error) {
 	return pr.Image, nil
 }
 
-// passthrough is Prepare for a case that measures a call taking the raw PDF.
-func passthrough(doc []byte) (any, error) { return doc, nil }
-
 var cases = map[string]Case{
+	// inspect, extract-raster, jpeg-recompress and linearize have NO Prepare:
+	// each takes the document bytes and its Run is the whole capability.
 	"inspect": {
-		Prepare: passthrough,
 		Run: func(in any) ([]byte, error) {
 			_, err := byblos.Inspect(bytes.NewReader(in.([]byte)))
 			return nil, err
@@ -65,7 +82,6 @@ var cases = map[string]Case{
 	},
 
 	"extract-raster": {
-		Prepare: passthrough,
 		Run: func(in any) ([]byte, error) {
 			_, err := byblos.ExtractPageRaster(bytes.NewReader(in.([]byte)), 1)
 			if errors.Is(err, byblos.ErrNotSingleRaster) {
@@ -76,7 +92,9 @@ var cases = map[string]Case{
 	},
 
 	"jbig2-generic": {
-		// Extraction and binarisation are setup. Only the encode is measured.
+		// Extraction and binarisation are the preparation, and they are measured
+		// as their own sample rather than folded into the encode's counters.
+		// They cost far more than the encode does -- byb-om7.12.
 		Prepare: func(doc []byte) (any, error) {
 			img, err := rasterOf(doc)
 			if err != nil {
@@ -147,7 +165,6 @@ var cases = map[string]Case{
 	},
 
 	"jpeg-recompress": {
-		Prepare: passthrough,
 		Run: func(in any) ([]byte, error) {
 			var buf bytes.Buffer
 			opts := byblos.OptimizeOptions{RecompressJPEG: true, JPEGQuality: JPEGQuality}
@@ -159,7 +176,6 @@ var cases = map[string]Case{
 	},
 
 	"linearize": {
-		Prepare: passthrough,
 		Run: func(in any) ([]byte, error) {
 			var buf bytes.Buffer
 			opts := byblos.OptimizeOptions{Linearize: true}
