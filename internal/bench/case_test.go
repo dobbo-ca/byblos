@@ -35,7 +35,7 @@ func TestCasesRunOnTheGeneratedCorpus(t *testing.T) {
 			if !ok {
 				t.Fatalf("no case for %q", tg.Capability)
 			}
-			in, err := c.Prepare(doc)
+			in, err := c.Input(doc)
 			if errors.Is(err, bench.ErrIneligible) {
 				t.Skipf("scan is ineligible for %s", tg.Capability)
 			}

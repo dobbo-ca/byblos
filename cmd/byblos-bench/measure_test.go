@@ -17,14 +17,16 @@ func TestMeasureRecordsDeterministicMetrics(t *testing.T) {
 		t.Fatal("corpus.ByName(\"scan\") not found")
 	}
 
-	first, err := measure("jbig2-generic", "scan", doc, 0)
+	firstS, err := measure("jbig2-generic", "scan", doc, 0)
 	if err != nil {
 		t.Fatalf("first measure: %v", err)
 	}
-	second, err := measure("jbig2-generic", "scan", doc, 0)
+	first := firstS[0]
+	secondS, err := measure("jbig2-generic", "scan", doc, 0)
 	if err != nil {
 		t.Fatalf("second measure: %v", err)
 	}
+	second := secondS[0]
 
 	if first.OutBytes != second.OutBytes {
 		t.Errorf("OutBytes differs across runs: %d then %d", first.OutBytes, second.OutBytes)
@@ -42,10 +44,15 @@ func TestMeasureRecordsDeterministicMetrics(t *testing.T) {
 func TestMeasureTimesOnlyWhenAsked(t *testing.T) {
 	doc, _ := corpus.ByName("scan")
 
-	untimed, err := measure("inspect", "scan", doc, 0)
+	untimedS, err := measure("inspect", "scan", doc, 0)
 	if err != nil {
 		t.Fatalf("untimed: %v", err)
 	}
+	// inspect has no Prepare, so it yields exactly one sample.
+	if len(untimedS) != 1 {
+		t.Fatalf("inspect returned %d samples, want 1: it has no preparation step", len(untimedS))
+	}
+	untimed := untimedS[0]
 	if len(untimed.WallNS) != 0 {
 		t.Errorf("recorded %d timings with reps 0", len(untimed.WallNS))
 	}
@@ -53,10 +60,11 @@ func TestMeasureTimesOnlyWhenAsked(t *testing.T) {
 		t.Error("an untimed sample reports a latency")
 	}
 
-	timed, err := measure("inspect", "scan", doc, 3)
+	timedS, err := measure("inspect", "scan", doc, 3)
 	if err != nil {
 		t.Fatalf("timed: %v", err)
 	}
+	timed := timedS[0]
 	if len(timed.WallNS) != 3 {
 		t.Errorf("recorded %d timings with reps 3", len(timed.WallNS))
 	}

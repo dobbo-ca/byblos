@@ -169,11 +169,22 @@ jobs:
             [ -n "$f" ] || continue
             case "$f" in
               *_test.go) continue ;;
-              inspect.go) add inspect ;;
-              extract.go) add extract-raster ;;
+              # A CAPABILITY'S Case.Prepare IS NOW SCORED TOO (byb-om7.12), so a
+              # file is touched by every capability that calls it from EITHER
+              # half. That widens four rows below: ExtractPageRaster is Prepare
+              # for jbig2-generic, quantize-png, downsample and build-pdf;
+              # Inspect is Prepare for text-layer; QuantizeIndexed is Prepare for
+              # build-pdf. Timing a capability times both its halves, so naming
+              # the capability is enough.
+              inspect.go) add inspect; add text-layer ;;
+              extract.go)
+                add extract-raster; add jbig2-generic; add quantize-png
+                add downsample; add build-pdf ;;
               build.go|internal/pdfbuild/*) add build-pdf ;;
-              jbig2.go|internal/jbig2/*|sauvola.go) add jbig2-generic ;;
-              quantize.go|quantize_indexed.go) add quantize-png ;;
+              jbig2.go|internal/jbig2/*) add jbig2-generic ;;
+              sauvola.go) add jbig2-generic ;;
+              quantize.go) add quantize-png ;;
+              quantize_indexed.go) add quantize-png; add build-pdf ;;
               downsample.go) add downsample ;;
               optimize.go) add jpeg-recompress; add linearize ;;
               internal/linearize/*) add linearize ;;

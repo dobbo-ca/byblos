@@ -4,6 +4,16 @@
 // See docs/superpowers/specs/2026-08-11-bench-map-design.md.
 package bench
 
+// PrepareSuffix names the sample that measures a capability's Case.Prepare
+// rather than its Case.Run -- the extraction, binarisation and quantisation
+// that used to be uncounted setup (byb-om7.12).
+//
+// It lives in this file because this file is inside the harness fingerprint
+// (.github/workflows/bench.yml hashes cmd/byblos-bench and internal/bench/map.go).
+// Changing the suffix renames every Prepare pair, which would silently orphan
+// the stored totals for all of them, so it must invalidate a committed baseline.
+const PrepareSuffix = ":prepare"
+
 // Target names the benchmark that measures one capability's cost.
 //
 // Weights are NOT stored here. A capability's weight is its measured share of
