@@ -320,7 +320,7 @@ func Open(rs io.ReadSeeker) (Doc, error) {
 // with the document. The reservation comes from the trailer /Size, and pdfcpu's
 // object-count cap is held to that size (plus an eighth), so a trailer that lies low is
 // refused as an objects limit, not parsed unreserved. With no /Size to read the
-// worst case is reserved, as far as the budget allows.
+// worst case is reserved, as far as half the budget allows.
 //
 // The decode slot is 4 x the stream cap, but never more than the budget leaves
 // after the table: lim's stream cap is lowered to fit, so a budget that cannot
@@ -336,7 +336,9 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	if !ok || size <= 0 {
 		size = lim.Objects()
 		if budget > 0 {
-			size = min(size, max((budget-limits.DecodeBytes(minStream))/limits.PerObjectBytes, 1))
+			// Half the budget to the table, so the decode slot keeps a
+			// stream cap worth having (budget/8) beside it.
+			size = min(size, max(budget/2/limits.PerObjectBytes, 1))
 		}
 	}
 	// A linearized file's last trailer can sit a few entries under the real

@@ -226,3 +226,26 @@ func TestDefaultConfigCarriesTheLimits(t *testing.T) {
 		t.Errorf("MaxDecodeBytes %d, MaxObjectCount %d", c.Limits.MaxDecodeBytes, c.Limits.MaxObjectCount)
 	}
 }
+
+// A valid file with more than 64 KiB after %%EOF hides startxref from
+// trailerSize. OpenBudgeted must still take a 3 MiB content stream under a
+// 300 MiB budget (poppler and pdfcpu read such files).
+func TestOpenBudgetedWithoutASizeKeepsAUsableStreamCap(t *testing.T) {
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
+	data := limitsZeros(t, 3<<20)
+	pdf := limitsPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(data), data),
+	})
+	pdf = append(pdf, bytes.Repeat([]byte(" "), 70<<10)...)
+	d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), limits.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := d.Page(1); err != nil {
+		t.Errorf("Page(1): %v", err)
+	}
+}
