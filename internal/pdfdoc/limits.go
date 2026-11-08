@@ -31,8 +31,8 @@ func trailerSize(rs io.ReadSeeker) (size int64, ok bool) {
 		return 0, false
 	}
 	// Offsets count from the %PDF header, as a reader takes them.
-	if i := bytes.Index(readAt(rs, 0, 1024), []byte("%PDF-")); i > 0 {
-		off += int64(i)
+	if i := indexFrom(rs, []byte("%PDF-"), 0, end); i > 0 {
+		off += i
 	}
 	// Cross-reference stream: /Size is in the dictionary at the startxref offset.
 	if h := readAt(rs, off, 4096); len(h) > 0 && h[0] >= '0' && h[0] <= '9' {

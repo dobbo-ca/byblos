@@ -41,6 +41,7 @@ func TestTrailerSize(t *testing.T) {
 		{"xref stream before the tail", xrefStream(200 << 10), 777777, true},
 		{"linearized classic: first-page trailer, not the last", linearized, 77, true},
 		{"xref stream after leading junk", strings.Repeat(" ", 20) + junkXref, 888, true},
+		{"xref stream after 70 KiB of leading junk", strings.Repeat(" ", 70<<10) + junkXref, 888, true},
 		{"no startxref", "%PDF-1.4\n garbage", 0, false},
 		{"empty", "", 0, false},
 	} {
