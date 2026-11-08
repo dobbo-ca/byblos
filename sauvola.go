@@ -99,13 +99,13 @@ func Sauvola(img image.Image) (*Bitmap, error) {
 			sq := sumSq[y1][x1] - sumSq[y0][x1] - sumSq[y1][x0] + sumSq[y0][x0]
 
 			mean := float64(s) / float64(n)
-			variance := float64(sq)/float64(n) - mean*mean
+			variance := float64(sq)/float64(n) - float64(mean*mean)
 			if variance < 0 {
 				variance = 0 // guards float rounding at near-uniform windows
 			}
 			stddev := math.Sqrt(variance)
 
-			threshold := mean * (1 + k*(stddev/r-1))
+			threshold := float64(mean * (1 + float64(k*(float64(stddev/r)-1))))
 			v := gray.GrayAt(x, y).Y
 			if float64(v) < threshold {
 				out.Set(x, y, 1)

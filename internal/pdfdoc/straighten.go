@@ -124,7 +124,7 @@ func rotationMatrix(tDeg, cx, cy float64) matrix {
 	cosT, sinT := math.Cos(t), math.Sin(t)
 	return matrix{
 		a: cosT, b: sinT, c: -sinT, d: cosT,
-		e: cx*(1-cosT) + cy*sinT,
-		f: cy*(1-cosT) - cx*sinT,
+		e: float64(cx*(1-cosT)) + float64(cy*sinT),
+		f: float64(cy*(1-cosT)) - float64(cx*sinT),
 	}
 }

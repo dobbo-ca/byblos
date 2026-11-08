@@ -130,7 +130,7 @@ func prepareWord(w PositionedWord) (*preparedWord, error) {
 		tz: 100 * float64(b.Dx()) * 1000 / (natFU * fs),
 		tx: float64(b.Min.X),
 		// 0.2*fs is -Descent/UnitsPerEm; see glyphlessTrueTypeFont's comment.
-		ty: float64(b.Min.Y) + 0.2*fs,
+		ty: float64(b.Min.Y) + float64(0.2*fs),
 	}, nil
 }
 

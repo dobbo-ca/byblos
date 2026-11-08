@@ -297,7 +297,7 @@ func (r *renderer) showText(gs *gstate, raw []byte) error {
 	// advance moves the text matrix by one code's displacement (9.4.4) --
 	// shared between the paths so the Tc/Tz arithmetic exists exactly once.
 	advance := func(w0 float64, wordSp bool) {
-		tx := gs.fontSize*w0 + gs.charSp
+		tx := float64(gs.fontSize*w0) + gs.charSp
 		if wordSp {
 			tx += gs.wordSp
 		}

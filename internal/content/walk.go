@@ -22,18 +22,18 @@ var Identity = Matrix{1, 0, 0, 1, 0, 0}
 // Mul returns the matrix that applies m first and then n.
 func (m Matrix) Mul(n Matrix) Matrix {
 	return Matrix{
-		m[0]*n[0] + m[1]*n[2],
-		m[0]*n[1] + m[1]*n[3],
-		m[2]*n[0] + m[3]*n[2],
-		m[2]*n[1] + m[3]*n[3],
-		m[4]*n[0] + m[5]*n[2] + n[4],
-		m[4]*n[1] + m[5]*n[3] + n[5],
+		float64(m[0]*n[0]) + float64(m[1]*n[2]),
+		float64(m[0]*n[1]) + float64(m[1]*n[3]),
+		float64(m[2]*n[0]) + float64(m[3]*n[2]),
+		float64(m[2]*n[1]) + float64(m[3]*n[3]),
+		float64(m[4]*n[0]) + float64(m[5]*n[2]) + n[4],
+		float64(m[4]*n[1]) + float64(m[5]*n[3]) + n[5],
 	}
 }
 
 // Apply maps a point through m.
 func (m Matrix) Apply(x, y float64) (float64, float64) {
-	return x*m[0] + y*m[2] + m[4], x*m[1] + y*m[3] + m[5]
+	return float64(x*m[0]) + float64(y*m[2]) + m[4], float64(x*m[1]) + float64(y*m[3]) + m[5]
 }
 
 // Box is an axis-aligned rectangle in PDF user space: points, origin
@@ -82,7 +82,7 @@ func (q Quad) shoelace() float64 {
 	var twoA float64
 	for i := 0; i < 4; i++ {
 		j := (i + 1) % 4
-		twoA += q[2*i]*q[2*j+1] - q[2*j]*q[2*i+1]
+		twoA += float64(q[2*i]*q[2*j+1]) - float64(q[2*j]*q[2*i+1])
 	}
 	return twoA
 }
@@ -120,7 +120,7 @@ func (q Quad) containsPoints(pts []float64, tol float64) bool {
 		}
 		for k := 0; k+1 < len(pts); k += 2 {
 			tx, ty := pts[k], pts[k+1]
-			cross := ex*(ty-py) - ey*(tx-px)
+			cross := float64(ex*(ty-py)) - float64(ey*(tx-px))
 			// Dividing by l turns cross (a scaled area) into a perpendicular
 			// distance in points, which is what makes tol mean points rather
 			// than something that scales with the edge's length.
@@ -872,7 +872,7 @@ func recordPaint(s *Scan, path *pathBox, gs gstate, op string) {
 		// Ink spreads half the line width either side of the path. Without this
 		// a border stroked along the raster's own edge would look contained by
 		// it, when half the ink actually falls outside.
-		r := gs.lineWidth * deviceScale(gs.ctm) / 2
+		r := float64(gs.lineWidth * deviceScale(gs.ctm) / 2)
 		box = Box{LLX: box.LLX - r, LLY: box.LLY - r, URX: box.URX + r, URY: box.URY + r}
 	}
 	s.order++
@@ -888,7 +888,7 @@ func recordPaint(s *Scan, path *pathBox, gs gstate, op string) {
 // worst axis — close enough for a pen width, and nowhere near the tolerances
 // classify decides on.
 func deviceScale(m Matrix) float64 {
-	return math.Sqrt(math.Abs(m[0]*m[3] - m[1]*m[2]))
+	return math.Sqrt(math.Abs(float64(m[0]*m[3]) - float64(m[1]*m[2])))
 }
 
 // addPoints adds every coordinate pair in nums, mapped through m.

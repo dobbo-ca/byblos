@@ -73,8 +73,8 @@ func Write(out io.Writer, pages []Page) error {
 	for i, p := range pages {
 		img := p.Image
 		scale := math.Min(p.WidthPt/float64(img.Width), p.HeightPt/float64(img.Height))
-		dw := float64(img.Width) * scale
-		dh := float64(img.Height) * scale
+		dw := float64(float64(img.Width) * scale)
+		dh := float64(float64(img.Height) * scale)
 		if !inRange(dw) || !inRange(dh) {
 			return fmt.Errorf("byblos/pdfbuild: page %d: scaled image size %gx%g is not representable", i+1, dw, dh)
 		}

@@ -486,7 +486,7 @@ func flattenCubic(dst *[]point, p0, c1, c2, p3 point, depth int) {
 		return
 	}
 	// de Casteljau split at t = 1/2.
-	m := func(a, b point) point { return point{(a.x + b.x) / 2, (a.y + b.y) / 2} }
+	m := func(a, b point) point { return point{float64((a.x + b.x) / 2), float64((a.y + b.y) / 2)} }
 	ab, bc, cd := m(p0, c1), m(c1, c2), m(c2, p3)
 	abc, bcd := m(ab, bc), m(bc, cd)
 	mid := m(abc, bcd)
@@ -502,8 +502,8 @@ func cubicFlat(p0, c1, c2, p3 point) bool {
 		return math.Hypot(c1.x-p0.x, c1.y-p0.y) <= flatTol &&
 			math.Hypot(c2.x-p0.x, c2.y-p0.y) <= flatTol
 	}
-	d1 := math.Abs(dx*(p0.y-c1.y) - dy*(p0.x-c1.x))
-	d2 := math.Abs(dx*(p0.y-c2.y) - dy*(p0.x-c2.x))
+	d1 := math.Abs(float64(dx*(p0.y-c1.y)) - float64(dy*(p0.x-c1.x)))
+	d2 := math.Abs(float64(dx*(p0.y-c2.y)) - float64(dy*(p0.x-c2.x)))
 	return d1 <= flatTol*l && d2 <= flatTol*l
 }
 
@@ -914,7 +914,7 @@ func (r *renderer) fillEdges(edges []edge, evenOdd bool, clip clipRect, col colo
 			}
 			live = append(live, e)
 			if e.ytop <= yc {
-				xs = append(xs, crossing{x: e.x + (yc-e.ytop)*e.dxdy, dir: e.dir})
+				xs = append(xs, crossing{x: e.x + float64((yc-e.ytop)*e.dxdy), dir: e.dir})
 			}
 		}
 		active = live
@@ -991,7 +991,7 @@ func (r *renderer) strokeSubpaths(subs []subpath, gs gstate, clip clipRect) erro
 		if l == 0 {
 			return nil
 		}
-		nx, ny := -dy/l*half, dx/l*half
+		nx, ny := float64(-dy/l*half), float64(dx/l*half)
 		q := [4]point{
 			{a.x + nx, a.y + ny}, {b.x + nx, b.y + ny},
 			{b.x - nx, b.y - ny}, {a.x - nx, a.y - ny},
@@ -1004,7 +1004,7 @@ func (r *renderer) strokeSubpaths(subs []subpath, gs gstate, clip clipRect) erro
 		var q [8]point
 		for i := range q {
 			a := -2 * math.Pi * float64(i) / 8
-			q[i] = point{c.x + rad*math.Cos(a), c.y + rad*math.Sin(a)}
+			q[i] = point{c.x + float64(rad*math.Cos(a)), c.y + float64(rad*math.Sin(a))}
 		}
 		return fillRing(q[:])
 	}
@@ -1059,7 +1059,7 @@ func (r *renderer) drawImage(name string, gs gstate) error {
 		return nil
 	}
 	m := gs.ctm
-	det := m[0]*m[3] - m[1]*m[2]
+	det := float64(m[0]*m[3]) - float64(m[1]*m[2])
 	if det == 0 || math.IsNaN(det) || math.IsInf(det, 0) {
 		return nil // a singular CTM places the image with zero area
 	}
@@ -1098,8 +1098,8 @@ func (r *renderer) drawImage(name string, gs gstate) error {
 		for x := x0; x < x1; x++ {
 			// Row-vector inverse: [u v] = [x-e, y-f] * [[a b],[c d]]^-1.
 			dx := float64(x) + 0.5 - m[4]
-			u := (dx*m[3] - dy*m[2]) / det
-			v := (dy*m[0] - dx*m[1]) / det
+			u := (float64(dx*m[3]) - float64(dy*m[2])) / det
+			v := (float64(dy*m[0]) - float64(dx*m[1])) / det
 			if !(u >= 0 && u < 1 && v >= 0 && v < 1) {
 				continue
 			}
@@ -1171,7 +1171,7 @@ func (r *renderer) compose(x, y int, sr, sg, sb, sa uint32) {
 // deviceScale is walk.go's: how much the CTM magnifies lengths, exact for
 // rotations and uniform scales.
 func deviceScale(m content.Matrix) float64 {
-	return math.Sqrt(math.Abs(m[0]*m[3] - m[1]*m[2]))
+	return math.Sqrt(math.Abs(float64(m[0]*m[3]) - float64(m[1]*m[2])))
 }
 
 // Operand helpers, the same conventions as walk.go's unexported ones.

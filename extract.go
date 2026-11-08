@@ -963,8 +963,8 @@ func sameRotation(a, b content.Matrix) bool {
 	if an == 0 || bn == 0 {
 		return false
 	}
-	cross := a[0]*b[1] - a[1]*b[0]
-	dot := a[0]*b[0] + a[1]*b[1]
+	cross := float64(a[0]*b[1]) - float64(a[1]*b[0])
+	dot := float64(a[0]*b[0]) + float64(a[1]*b[1])
 	return dot > 0 && math.Abs(cross)/(an*bn) < 1e-6
 }
 
