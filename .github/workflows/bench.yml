@@ -59,6 +59,7 @@ jobs:
 
     env:
       CGO_ENABLED: 0
+      GOPRIVATE: github.com/dobbo-ca/deflate-go,github.com/dobbo-ca/jpeg-go,github.com/dobbo-ca/jp2k-go,github.com/dobbo-ca/webp-go
       GH_TOKEN: ${{ github.token }}
       PR: ${{ github.event.pull_request.number }}
       # Interpolating ${{ }} straight into a run: block pastes the value into
@@ -77,6 +78,37 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+      # Private dobbo-ca Go modules (deflate-go, jpeg-go, jp2k-go, webp-go) are
+      # fetched with a short-lived GitHub App token, minted per job. Skipped when
+      # the variable is unset, and for fork and Dependabot PRs, which get no
+      # secrets (the action would fail on an empty key). Nothing in go.mod needs
+      # a private copy today, so a skipped mint leaves the job green.
+      - id: app
+        if: ${{ vars.CI_READ_APP_ID != '' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.CI_READ_APP_ID }}
+          private-key: ${{ secrets.CI_READ_APP_KEY }}
+          owner: dobbo-ca
+          repositories: deflate-go,jpeg-go,jp2k-go,webp-go
+          permission-contents: read
+      - if: ${{ steps.app.outputs.token != '' }}
+        env:
+          TOKEN: ${{ steps.app.outputs.token }}
+        # $GITHUB_ENV is a file in the runner temp dir; it carries the four-entry
+        # insteadOf (never a dobbo-ca/ prefix) to the later go steps.
+        run: |
+          {
+            echo "GIT_CONFIG_COUNT=4"
+            echo "GIT_CONFIG_KEY_0=url.https://x-access-token:${TOKEN}@github.com/dobbo-ca/deflate-go.insteadOf"
+            echo "GIT_CONFIG_VALUE_0=https://github.com/dobbo-ca/deflate-go"
+            echo "GIT_CONFIG_KEY_1=url.https://x-access-token:${TOKEN}@github.com/dobbo-ca/jpeg-go.insteadOf"
+            echo "GIT_CONFIG_VALUE_1=https://github.com/dobbo-ca/jpeg-go"
+            echo "GIT_CONFIG_KEY_2=url.https://x-access-token:${TOKEN}@github.com/dobbo-ca/jp2k-go.insteadOf"
+            echo "GIT_CONFIG_VALUE_2=https://github.com/dobbo-ca/jp2k-go"
+            echo "GIT_CONFIG_KEY_3=url.https://x-access-token:${TOKEN}@github.com/dobbo-ca/webp-go.insteadOf"
+            echo "GIT_CONFIG_VALUE_3=https://github.com/dobbo-ca/webp-go"
+          } >> "$GITHUB_ENV"
 
       - name: restore the bench set
         id: benchset
