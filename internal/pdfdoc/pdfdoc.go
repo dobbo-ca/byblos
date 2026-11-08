@@ -84,7 +84,24 @@ func defaultConfig() *model.Configuration {
 	// takes the package defaults. openDoc narrows them to the caller's Limits.
 	conf.Limits.MaxDecodeBytes = limits.Limits{}.StreamBytes()
 	conf.Limits.MaxObjectCount = int(limits.Limits{}.Objects())
+	conf.Limits.MaxObjectStreamTotalCount = int(limits.Limits{}.Objects())
+	conf.Limits.MaxTotalDecodeBytes = limits.Limits{}.StreamBytes()
 	return conf
+}
+
+// pdfcpuLimit is the *LimitError for a refusal by one of pdfcpu's cumulative
+// limits (object stream entries, decoded bytes per parse) or its per-stream
+// decode cap, and nil for any other error.
+func pdfcpuLimit(lim limits.Limits, err error) error {
+	switch {
+	case errors.Is(err, model.ErrLimitExceeded) && errors.Is(err, filter.ErrDecodeLimitExceeded):
+		return &limits.LimitError{Name: "stream-bytes", Got: lim.TotalDecodeBytes() + 1, Max: lim.TotalDecodeBytes()}
+	case errors.Is(err, model.ErrLimitExceeded):
+		return &limits.LimitError{Name: "objects", Got: lim.ObjectStreamEntries() + 1, Max: lim.ObjectStreamEntries()}
+	case errors.Is(err, filter.ErrDecodeLimitExceeded):
+		return &limits.LimitError{Name: "stream-bytes", Got: lim.StreamBytes() + 1, Max: lim.StreamBytes()}
+	}
+	return nil
 }
 
 // ErrUnsupportedCodec reports an image stream whose compression filter pdfcpu
@@ -318,18 +335,18 @@ func Open(rs io.ReadSeeker) (Doc, error) {
 // reserved from the package memory budget (limits.SetMemoryLimit) before pdfcpu
 // parses. The returned release gives the reservation back; call it when done
 // with the document. The reservation comes from objectsIn: the larger of the
-// trailer /Size and an upper bound on the objects pdfcpu can create (distinct
-// "N G obj" numbers plus the /N of every object stream), found in one pass
-// before pdfcpu reads anything, because pdfcpu rebuilds the table by scanning
-// whenever it distrusts the trailer and that scan ignores its object-count cap.
-// pdfcpu's cap is held to that count (plus an eighth).
+// trailer /Size and the count of "obj" headers, found in one pass before pdfcpu
+// reads anything, because pdfcpu rebuilds the table by scanning whenever it
+// distrusts the trailer and that scan ignores its object-count cap. pdfcpu's
+// cap is held to that count (plus an eighth), and the objects packed in object
+// streams, which have no header, to the same count in total.
 //
 // The decode slot is 4 x the stream cap, but never more than the budget leaves
 // after the table: lim's stream cap is lowered to fit, so a budget that cannot
 // hold a 64 MiB decode still takes the document, and refuses only a stream
 // that would not fit.
 func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, func(), error) {
-	size := objectsIn(rs, lim.Objects())
+	size := objectsIn(rs)
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
 		return nil, nil, err
 	}
@@ -339,16 +356,17 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	// count, so the cap has a margin; it is the most an understated /Size parses
 	// unreserved.
 	lim.MaxObjects = min(size+size/8+64, lim.Objects())
-	streams := lim.StreamBytes()
+	streams, total := lim.StreamBytes(), lim.TotalDecodeBytes()
 	if budget > 0 {
-		streams = min(streams, max((budget-limits.ObjectTableBytes(size))/4, minStream))
+		slot := max((budget-limits.ObjectTableBytes(size))/4, minStream)
+		streams, total = min(streams, slot), min(total, slot)
 	}
-	lim.MaxStreamBytes = streams
+	lim.MaxStreamBytes, lim.MaxTotalDecodeBytes = streams, total
 	// One reservation for the document's life: the object table and the slot its
 	// stream decodes (one at a time) run in. A decode that reserved for itself
 	// while the document held its table would wait on that table, alone or
 	// against other documents doing the same, until ctx ended.
-	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+limits.DecodeBytes(streams))
+	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+limits.DecodeBytes(max(streams, total)))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -363,7 +381,7 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 // openDoc is Open with the caps of lim. The /Size cap is checked before the parse
 // on every path; only OpenBudgeted also reserves memory.
 func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
-	return openSized(cctx, rs, lim, objectsIn(rs, lim.Objects()))
+	return openSized(cctx, rs, lim, objectsIn(rs))
 }
 
 // openSized is openDoc given the object count objectsIn found.
@@ -382,19 +400,26 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 	// for a trailer that understates /Size.
 	conf.Limits.MaxDecodeBytes = lim.StreamBytes()
 	conf.Limits.MaxObjectCount = int(lim.Objects())
-	// pdfcpu reads an object stream's /N by its own rules, which no scan here
-	// tracks, and holds that many objects: a stream may not claim more than the
-	// reservation.
-	conf.Limits.MaxObjectStreamCount = int(size)
+	// The cumulative limits of pergamon-go: pdfcpu reads an object stream's /N
+	// by its own rules, which no scan here tracks, so it counts the entries and
+	// the decoded bytes of the parse itself and refuses at the limit.
+	conf.Limits.MaxObjectStreamTotalCount = int(lim.ObjectStreamEntries())
+	conf.Limits.MaxTotalDecodeBytes = lim.TotalDecodeBytes()
 	ctx, err := api.ReadContext(cctx, rs, conf)
 	if err != nil {
+		if le := pdfcpuLimit(lim, err); le != nil {
+			return nil, le
+		}
 		// A trailer that understates /Size is caught by pdfcpu's own count, untyped.
-		if msg := err.Error(); strings.Contains(msg, "xref subsection object range exceeds limit") || strings.Contains(msg, "object stream N ") {
+		if strings.Contains(err.Error(), "xref subsection object range exceeds limit") {
 			return nil, &limits.LimitError{Name: "objects", Got: lim.Objects() + 1, Max: lim.Objects()}
 		}
 		return nil, fmt.Errorf("byblos/pdfdoc: read: %w", err)
 	}
 	if err := ctx.EnsurePageCount(); err != nil {
+		if le := pdfcpuLimit(lim, err); le != nil {
+			return nil, le
+		}
 		return nil, fmt.Errorf("byblos/pdfdoc: page count: %w", err)
 	}
 	if err := limits.Check("pages", int64(ctx.PageCount), lim.Pages()); err != nil {
@@ -507,6 +532,10 @@ func (d *doc) Page(n int) (p *Page, err error) {
 	// changed answer because of it.
 	pd, _, inh, err := xt.PageDict(context.Background(), n, false)
 	if err != nil {
+		// Object streams are decoded when first read, so the cumulative limits can end a page.
+		if le := pdfcpuLimit(d.lim, err); le != nil {
+			return nil, le
+		}
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}
 	if pd == nil || inh == nil {

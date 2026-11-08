@@ -57,6 +57,16 @@ rasterized at all. Pages that are neither are detected and reported
   translating it would make those files MPL-2.0. It is also *orchestration over
   the very binaries this project removes*, so porting it would not have helped.
 
+## Building against byblos
+
+byblos parses PDFs with [pergamon-go](https://github.com/dobbo-ca/pergamon-go),
+a fork of pdfcpu that adds cumulative per-parse limits. A `replace` in byblos's
+`go.mod` does not apply to a program that imports it, so that program's own
+`go.mod` needs the same line, or it builds against upstream pdfcpu and fails to
+compile:
+
+    replace github.com/pdfcpu/pdfcpu => github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.1
+
 ## License
 
 Apache-2.0. Reimplemented from format specifications, not ported.

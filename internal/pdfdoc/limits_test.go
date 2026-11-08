@@ -407,18 +407,8 @@ func TestObjectBoundCountsEveryHeaderForm(t *testing.T) {
 		for k := 1; k <= 1000; k++ {
 			fmt.Fprintf(&sb, form+"\n<< >>\nendobj\n", k)
 		}
-		if got := objectBound(strings.NewReader(sb.String()), 200_000); got != 1000 {
+		if got := objectBound(strings.NewReader(sb.String())); got != 1000 {
 			t.Errorf("%s: bound = %d; want 1000", form, got)
-		}
-	}
-}
-
-// Objects packed in object streams have no header; their /N is counted.
-func TestObjectStreamsReserveForPackedObjects(t *testing.T) {
-	for _, dict := range []string{"/Type /ObjStm /N 5000 /First 10", "/N 5000 /First 10 /Type /ObjStm", "/Type 9 0 R /N 5000 /First 10"} {
-		pdf := "%PDF-1.5\n1 0 obj\n<< " + dict + " /Length 0 >>\nstream\n\nendstream\nendobj\n"
-		if got := objectBound(strings.NewReader(pdf), 200_000); got != 5001 {
-			t.Errorf("%s: bound = %d; want 5001", dict, got)
 		}
 	}
 }
@@ -427,6 +417,12 @@ func TestObjectStreamsReserveForPackedObjects(t *testing.T) {
 // object stream of n entries (a few bytes compressed). The dictionary is dict
 // with %N and %F filled in; obj 4 holds n and obj 8 holds the prolog length.
 func objStmPDF(t *testing.T, n, streams int, dict string) []byte {
+	t.Helper()
+	return objStmPDFWith(t, n, streams, dict, "")
+}
+
+// objStmPDFWith is objStmPDF with lure, a comment line after the header.
+func objStmPDFWith(t *testing.T, n, streams int, dict, lure string) []byte {
 	t.Helper()
 	prolog := strings.Repeat("7 0 ", n)
 	var z bytes.Buffer
@@ -440,7 +436,7 @@ func objStmPDF(t *testing.T, n, streams int, dict string) []byte {
 		offs[num] = out.Len()
 		fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", num, body)
 	}
-	out.WriteString("%PDF-1.5\n")
+	out.WriteString("%PDF-1.5\n" + lure)
 	obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
 	obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
 	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>")
@@ -499,20 +495,142 @@ func TestIndirectObjectStreamCountIsAccepted(t *testing.T) {
 	openBudgetedOK(t, objStmPDF(t, 10, 1, "/Type /ObjStm /N 4 0 R /First %F"))
 }
 
-// Outline dictionaries have an indirect /First and no /N.
-func TestObjectBoundIgnoresIndirectFirst(t *testing.T) {
-	pdf := "%PDF-1.5\n1 0 obj\n<< /Type /Outlines /First 5 0 R /Last 6 0 R /Count 2 >>\nendobj\n"
-	if got := objectBound(strings.NewReader(pdf), 200_000); got != 1 {
-		t.Errorf("bound = %d; want 1", got)
-	}
-}
-
 // A match that straddles a chunk boundary counts once.
 func TestObjectBoundAcrossChunks(t *testing.T) {
 	for _, pad := range []int{64<<10 - 40, 64<<10 - 3, 64 << 10, 128<<10 - 300, 128<<10 + 7} {
 		pdf := strings.Repeat(" ", pad) + "7 0 obj\n<< /Type /ObjStm /N 4 /First 9 >>\nstream\nendstream\nendobj\n"
-		if got := objectBound(strings.NewReader(pdf), 200_000); got != 5 {
-			t.Errorf("pad %d: bound = %d; want 5", pad, got)
+		if got := objectBound(strings.NewReader(pdf)); got != 1 {
+			t.Errorf("pad %d: bound = %d; want 1", pad, got)
+		}
+	}
+}
+
+// The cumulative limits (pergamon-go v0.16.4-pergamon.1): each object stream
+// is under every per-stream cap, so only the sum over the parse refuses them.
+// The comment line is a decoy that once raised the pre-scan's bound, and the
+// form feed spells /First as no scan here reads it. Both files sat under
+// 310 KB and took 600 MB and 2.8 GB to parse.
+func TestCumulativeObjectStreamEntriesAreRefused(t *testing.T) {
+	const dict, lure = "/Type /ObjStm /N %N /First\x0c%F", "% /Type /ObjStm /N 15000 /First 0 stream\n"
+	for name, c := range map[string]struct {
+		streams int
+		budget  int64
+	}{"300 streams under 32 MiB": {300, 32 << 20}, "1500 streams under 300 MiB": {1500, 300 << 20}} {
+		t.Run(name, func(t *testing.T) {
+			defer limits.SetMemoryLimit(limits.SetMemoryLimit(c.budget))
+			pdf := objStmPDFWith(t, 15000, c.streams, dict, lure)
+			before := limitsTotalAlloc()
+			_, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), limits.Limits{})
+			delta := limitsTotalAlloc() - before
+			if err == nil {
+				release()
+			}
+			var le *limits.LimitError
+			if !errors.As(err, &le) || le.Name != "objects" || !errors.Is(err, limits.ErrLimit) || errors.Is(err, limits.ErrMemoryLimit) {
+				t.Fatalf("err = %v; want a permanent *LimitError objects", err)
+			}
+			if delta > 32<<20 {
+				t.Errorf("TotalAlloc delta = %d MiB; want the parse stopped by the first stream's count", delta>>20)
+			}
+		})
+	}
+}
+
+// padTreePDF is a page tree of k intermediate Pages nodes, each alone in its own
+// Flate object stream that inflates to pad bytes. pdfcpu decodes a stream when
+// the first object in it is read, so the tree is what decodes them.
+func padTreePDF(k, pad int) []byte {
+	var out bytes.Buffer
+	offs := map[int]int{}
+	obj := func(n int, b string) { offs[n] = out.Len(); fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", n, b) }
+	out.WriteString("%PDF-1.5\n")
+	first := 100 + k
+	kids := ""
+	for i := 0; i < k; i++ {
+		kids += fmt.Sprintf("%d 0 R ", first+i)
+	}
+	obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	obj(2, fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", kids, k))
+	// page leaf shared
+	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>")
+	for i := 0; i < k; i++ {
+		prolog := fmt.Sprintf("%d 0 ", first+i)
+		body := "<< /Type /Pages /Parent 2 0 R /Kids [3 0 R] /Count 1 >>"
+		var z bytes.Buffer
+		zw := zlib.NewWriter(&z)
+		zw.Write([]byte(prolog + body + strings.Repeat(" ", pad)))
+		zw.Close()
+		obj(4+i, fmt.Sprintf("<< /Type /ObjStm /N 1 /First %d /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(prolog), z.Len(), z.Bytes()))
+	}
+	x := 4 + k
+	size := first + k
+	var rows bytes.Buffer
+	for i := 0; i < size; i++ {
+		typ, a, b := 1, 0, 0
+		switch {
+		case i == 0:
+			typ, b = 0, 65535
+		case i == x:
+			a = out.Len()
+		case i >= first:
+			typ, a = 2, 4+i-first
+		case offs[i] == 0:
+			typ = 0
+		default:
+			a = offs[i]
+		}
+		rows.Write([]byte{byte(typ), byte(a >> 24), byte(a >> 16), byte(a >> 8), byte(a), byte(b >> 8), byte(b)})
+	}
+	xo := out.Len()
+	fmt.Fprintf(&out, "%d 0 obj\n<< /Type /XRef /Size %d /W [1 4 2] /Root 1 0 R /Length %d >>\nstream\n%s\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n", x, size, rows.Len(), rows.Bytes(), xo)
+	return out.Bytes()
+}
+
+// 40 streams of 20 MiB each decode under the 64 MiB stream cap; the sum is what
+// the cumulative decoded-byte limit refuses, as the page tree reaches them.
+func TestCumulativeDecodedBytesAreRefused(t *testing.T) {
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
+	d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(padTreePDF(40, 20<<20)), limits.Limits{})
+	if err == nil {
+		defer release()
+		for n := 1; n <= d.PageCount() && err == nil; n++ {
+			_, err = d.Page(n)
+		}
+	}
+	var le *limits.LimitError
+	if !errors.As(err, &le) || le.Name != "stream-bytes" || !errors.Is(err, limits.ErrLimit) || errors.Is(err, limits.ErrMemoryLimit) {
+		t.Fatalf("err = %v; want a permanent *LimitError stream-bytes", err)
+	}
+}
+
+// Both limits are Limits fields, and a file under them opens.
+func TestObjectStreamLimitsAreConfigurable(t *testing.T) {
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
+	packed := objStmPDF(t, 10, 1, "/Type /ObjStm /N %N /First %F")
+	padded := padTreePDF(3, 1<<20)
+	for name, c := range map[string]struct {
+		pdf  []byte
+		lim  limits.Limits
+		want string
+	}{
+		"entries":   {packed, limits.Limits{MaxObjectStreamEntries: 5}, "objects"},
+		"decoded":   {padded, limits.Limits{MaxTotalDecodeBytes: 2 << 20}, "stream-bytes"},
+		"roomy":     {packed, limits.Limits{MaxObjectStreamEntries: 10}, ""},
+		"roomy too": {padded, limits.Limits{MaxTotalDecodeBytes: 4 << 20}, ""},
+	} {
+		d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(c.pdf), c.lim)
+		if err == nil {
+			for n := 1; n <= d.PageCount() && err == nil; n++ {
+				_, err = d.Page(n)
+			}
+			release()
+		}
+		var le *limits.LimitError
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("%s: err = %v; want it to open", name, err)
+		case c.want != "" && (!errors.As(err, &le) || le.Name != c.want):
+			t.Errorf("%s: err = %v; want *LimitError %s", name, err, c.want)
 		}
 	}
 }

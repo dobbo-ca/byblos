@@ -51,18 +51,19 @@ func trailerSize(rs io.ReadSeeker) (size int64, ok bool) {
 // of the trailer /Size and objectBound. The trailer is only a claim; pdfcpu
 // rebuilds the table by scanning when it cannot use it (a corrupt xref stream,
 // a startxref that lands on an object), and holds every object it finds.
-func objectsIn(rs io.ReadSeeker, limit int64) int64 {
+func objectsIn(rs io.ReadSeeker) int64 {
 	size, _ := trailerSize(rs)
-	return max(size, objectBound(rs, limit))
+	return max(size, objectBound(rs))
 }
 
-// objectBound is an upper bound on the objects pdfcpu can create from the
-// file, from one pass through a fixed buffer: every "obj" token (not "endobj"),
-// with no regard to the number before it, plus the /N of every /ObjStm
-// dictionary, whose packed objects have no header. pdfcpu reads a header by
-// its own rules (cleanObjProlog), so any reading of the numbers here can
-// differ from it; a token count cannot undercount its table inserts.
-func objectBound(rs io.ReadSeeker, limit int64) (n int64) {
+// objectBound is an upper bound on the objects with a header that pdfcpu can
+// create from the file, from one pass through a fixed buffer: every "obj" token
+// (not "endobj"), with no regard to the number before it. pdfcpu reads a header
+// by its own rules (cleanObjProlog), so any reading of the numbers here can
+// differ from it; a token count cannot undercount its table inserts. Objects
+// packed in object streams have no header and are not counted: pdfcpu holds
+// them to MaxObjectStreamTotalCount.
+func objectBound(rs io.ReadSeeker) (n int64) {
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return 0
 	}
@@ -79,7 +80,7 @@ func objectBound(rs io.ReadSeeker, limit int64) (n int64) {
 		if err != nil {
 			hi = len(b)
 		}
-		n += headersIn(b, lo, hi) + packedIn(b, lo, hi, limit)
+		n += headersIn(b, lo, hi)
 		if err != nil {
 			return n
 		}
@@ -100,62 +101,6 @@ func headersIn(b []byte, lo, hi int) (n int64) {
 			n++
 		}
 	}
-}
-
-// packedIn sums the /N of the object stream dictionaries whose /First (a direct
-// integer; an outline's is a reference) starts in [lo, hi), so that a file that
-// states its packed objects is reserved for them. It is only a reading: pdfcpu
-// tokenizes the dictionary by its own rules, and openSized holds every stream it
-// reads to the reservation, so a stream this misreads is refused there.
-func packedIn(b []byte, lo, hi int, limit int64) (n int64) {
-	for i := lo; ; {
-		j := bytes.Index(b[i:], []byte("/First"))
-		if j < 0 || i+j >= hi {
-			return n
-		}
-		p := i + j
-		i = p + 1
-		if v, ok := directInt(b[p+len("/First"):]); !ok || v < 0 {
-			continue
-		}
-		// The dictionary: after the last "obj" before p, up to "stream" after it.
-		s, e := max(p-256, 0), min(p+256, len(b))
-		if k := bytes.LastIndex(b[s:p], []byte("obj")); k >= 0 {
-			s += k + 3
-		}
-		if k := bytes.Index(b[p:e], []byte("stream")); k >= 0 {
-			e = p + k
-		}
-		v, found := int64(0), false
-		for w := b[s:e]; !found; {
-			k := bytes.Index(w, []byte("/N"))
-			if k < 0 {
-				break
-			}
-			w = w[k+2:]
-			if len(w) > 0 && (isSpace(w[0]) || w[0] >= '0' && w[0] <= '9') {
-				if x, ok := directInt(w); ok {
-					v, found = min(x, limit+1), true
-				}
-			}
-		}
-		n += v
-	}
-}
-
-// directInt reads a non-negative integer at the start of b, but not the "n g R"
-// reference that has one.
-func directInt(b []byte) (int64, bool) {
-	v, ok := intAfter(b)
-	if !ok {
-		return 0, false
-	}
-	f := bytes.Fields(b[:min(len(b), 64)])
-	return v, !(len(f) > 2 && len(f[2]) > 0 && f[2][0] == 'R')
-}
-
-func isSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == 0
 }
 
 // indexFrom returns the offset of the first occurrence of pat that starts in

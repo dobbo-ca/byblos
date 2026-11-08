@@ -59,6 +59,15 @@ type Limits struct {
 	// Each defaults to MaxPageStreamBytes / 512 (262 144 at the default). Past
 	// it the call fails: dropping images would change classification.
 	MaxImages, MaxInlineImages, MaxUnresolved int64
+	// MaxObjectStreamEntries caps the objects packed in object streams (their
+	// /N) summed over one parse. Default: the object count the reservation
+	// covers, since a packed object has a table entry like any other.
+	MaxObjectStreamEntries int64
+	// MaxTotalDecodeBytes caps the bytes pdfcpu decodes over one parse (object
+	// streams, and whatever else it decodes through the table; decoding a
+	// stream twice counts it twice). Default: MaxStreamBytes, so what the parse
+	// retains stays inside the one decode slot the reservation holds.
+	MaxTotalDecodeBytes int64
 }
 
 const DefaultFontProgramBytes = 16 << 20
@@ -70,14 +79,18 @@ func def(v, d int64) int64 {
 	return d
 }
 
-func (l Limits) Objects() int64          { return def(l.MaxObjects, 200_000) }
-func (l Limits) Pages() int64            { return def(l.MaxPages, 10_000) }
-func (l Limits) StreamBytes() int64      { return def(l.MaxStreamBytes, 64<<20) }
-func (l Limits) PageStreamBytes() int64  { return def(l.MaxPageStreamBytes, 128<<20) }
-func (l Limits) ImagePixels() int64      { return def(l.MaxImagePixels, 500_000_000) }
-func (l Limits) Images() int64           { return def(l.MaxImages, l.PageStreamBytes()/512) }
-func (l Limits) InlineImages() int64     { return def(l.MaxInlineImages, l.PageStreamBytes()/512) }
-func (l Limits) Unresolved() int64       { return def(l.MaxUnresolved, l.PageStreamBytes()/512) }
+func (l Limits) Objects() int64         { return def(l.MaxObjects, 200_000) }
+func (l Limits) Pages() int64           { return def(l.MaxPages, 10_000) }
+func (l Limits) StreamBytes() int64     { return def(l.MaxStreamBytes, 64<<20) }
+func (l Limits) PageStreamBytes() int64 { return def(l.MaxPageStreamBytes, 128<<20) }
+func (l Limits) ImagePixels() int64     { return def(l.MaxImagePixels, 500_000_000) }
+func (l Limits) Images() int64          { return def(l.MaxImages, l.PageStreamBytes()/512) }
+func (l Limits) InlineImages() int64    { return def(l.MaxInlineImages, l.PageStreamBytes()/512) }
+func (l Limits) Unresolved() int64      { return def(l.MaxUnresolved, l.PageStreamBytes()/512) }
+func (l Limits) ObjectStreamEntries() int64 {
+	return min(def(l.MaxObjectStreamEntries, l.Objects()), l.Objects())
+}
+func (l Limits) TotalDecodeBytes() int64 { return def(l.MaxTotalDecodeBytes, l.StreamBytes()) }
 func (l Limits) FontProgramBytes() int64 { return def(l.MaxFontProgramBytes, DefaultFontProgramBytes) }
 
 // Check returns a *LimitError when got > max.
