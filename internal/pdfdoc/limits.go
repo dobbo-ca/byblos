@@ -57,16 +57,16 @@ func objectsIn(rs io.ReadSeeker, limit int64) int64 {
 }
 
 // objectBound is an upper bound on the objects pdfcpu can create from the
-// file, from one pass through a fixed buffer: the distinct object numbers in
-// "N G obj" headers (a bitset; a number above limit counts as over it, and a
-// rewritten object counts once) plus the /N of every /ObjStm dictionary, whose
-// packed objects have no header.
+// file, from one pass through a fixed buffer: every "obj" token (not "endobj"),
+// with no regard to the number before it, plus the /N of every /ObjStm
+// dictionary, whose packed objects have no header. pdfcpu reads a header by
+// its own rules (cleanObjProlog), so any reading of the numbers here can
+// differ from it; a token count cannot undercount its table inserts.
 func objectBound(rs io.ReadSeeker, limit int64) (n int64) {
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return 0
 	}
 	const ov = 256 // longest look-behind or look-ahead of a match
-	seen := make([]uint64, limit/64+1)
 	buf := make([]byte, 2*ov+64<<10)
 	kept := 0
 	for first := true; ; first = false {
@@ -79,7 +79,7 @@ func objectBound(rs io.ReadSeeker, limit int64) (n int64) {
 		if err != nil {
 			hi = len(b)
 		}
-		n += headersIn(b, lo, hi, seen, limit) + packedIn(b, lo, hi, limit)
+		n += headersIn(b, lo, hi) + packedIn(b, lo, hi, limit)
 		if err != nil {
 			return n
 		}
@@ -87,9 +87,8 @@ func objectBound(rs io.ReadSeeker, limit int64) (n int64) {
 	}
 }
 
-// headersIn counts the object numbers in "N G obj" headers starting in [lo, hi)
-// of b that seen does not hold yet, and records them.
-func headersIn(b []byte, lo, hi int, seen []uint64, limit int64) (n int64) {
+// headersIn counts the "obj" tokens, "endobj" excepted, starting in [lo, hi) of b.
+func headersIn(b []byte, lo, hi int) (n int64) {
 	for i := lo; ; {
 		j := bytes.Index(b[i:], []byte("obj"))
 		if j < 0 || i+j >= hi {
@@ -97,20 +96,7 @@ func headersIn(b []byte, lo, hi int, seen []uint64, limit int64) (n int64) {
 		}
 		p := i + j
 		i = p + 3
-		if p >= 3 && string(b[p-3:p]) == "end" {
-			continue
-		}
-		_, s, ok := numBefore(b, p)
-		if !ok {
-			continue
-		}
-		num, _, ok := numBefore(b, s)
-		switch {
-		case !ok:
-		case num > limit:
-			n += limit + 1
-		case seen[num/64]&(1<<(num%64)) == 0:
-			seen[num/64] |= 1 << (num % 64)
+		if p < 3 || string(b[p-3:p]) != "end" {
 			n++
 		}
 	}
@@ -151,24 +137,6 @@ func packedIn(b []byte, lo, hi int, limit int64) (n int64) {
 
 func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == 0
-}
-
-// numBefore parses the unsigned integer that ends at p, past any white space,
-// and returns where it starts.
-func numBefore(b []byte, p int) (v int64, start int, ok bool) {
-	e := p
-	for e > 0 && isSpace(b[e-1]) {
-		e--
-	}
-	s := e
-	for s > 0 && e-s < 10 && b[s-1] >= '0' && b[s-1] <= '9' {
-		s--
-	}
-	if s == e {
-		return 0, 0, false
-	}
-	v, _ = strconv.ParseInt(string(b[s:e]), 10, 64)
-	return v, s, true
 }
 
 // indexFrom returns the offset of the first occurrence of pat that starts in

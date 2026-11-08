@@ -397,20 +397,19 @@ func TestObjectBudgetDoesNotRestOnTheTrailer(t *testing.T) {
 	wantObjectsLimit(t, "startxref on an object", sz.Bytes(), lim)
 }
 
-// An incremental update that rewrites the same objects is not counted twice.
-func TestRewrittenObjectsCountOnce(t *testing.T) {
-	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
-	b := plainObjects(1000)
-	for r := 0; r < 50; r++ {
-		for i := 4; i <= 1000; i++ {
-			fmt.Fprintf(b, "%d 0 obj\n<< >>\nendobj\n", i)
+// pdfcpu reads "<k> 5 0 obj", "<k>.5 0 obj" and "<k>0000000005 0 obj" as
+// object k, not 5, so the bound counts tokens, not numbers.
+func TestObjectBoundCountsEveryHeaderForm(t *testing.T) {
+	for _, form := range []string{"%d 5 0 obj", "%d.5 0 obj", "%dx5 0 obj", "%d0000000005 0 obj"} {
+		var sb strings.Builder
+		sb.WriteString("%PDF-1.4\n")
+		for k := 1; k <= 1000; k++ {
+			fmt.Fprintf(&sb, form+"\n<< >>\nendobj\n", k)
+		}
+		if got := objectBound(strings.NewReader(sb.String()), 200_000); got != 1000 {
+			t.Errorf("%s: bound = %d; want 1000", form, got)
 		}
 	}
-	_, release, err := OpenBudgeted(context.Background(), bytes.NewReader(b.Bytes()), limits.Limits{MaxObjects: 1100})
-	if err != nil {
-		t.Fatal(err)
-	}
-	release()
 }
 
 // Objects packed in object streams have no header; their /N is counted.
