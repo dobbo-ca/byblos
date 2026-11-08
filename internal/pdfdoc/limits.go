@@ -103,10 +103,10 @@ func headersIn(b []byte, lo, hi int) (n int64) {
 }
 
 // packedIn sums the /N of the object stream dictionaries whose /First (a direct
-// integer; an outline's is a reference) starts in [lo, hi). It keys on /First,
-// not /Type, which pdfcpu also accepts by reference. A /N it cannot read as a
-// direct integer nearby (pdfcpu resolves a reference, and takes the value from
-// anywhere in the dictionary) counts as the per-stream maximum, so it refuses.
+// integer; an outline's is a reference) starts in [lo, hi), so that a file that
+// states its packed objects is reserved for them. It is only a reading: pdfcpu
+// tokenizes the dictionary by its own rules, and openSized holds every stream it
+// reads to the reservation, so a stream this misreads is refused there.
 func packedIn(b []byte, lo, hi int, limit int64) (n int64) {
 	for i := lo; ; {
 		j := bytes.Index(b[i:], []byte("/First"))
@@ -126,7 +126,7 @@ func packedIn(b []byte, lo, hi int, limit int64) (n int64) {
 		if k := bytes.Index(b[p:e], []byte("stream")); k >= 0 {
 			e = p + k
 		}
-		v, found := limit+1, false
+		v, found := int64(0), false
 		for w := b[s:e]; !found; {
 			k := bytes.Index(w, []byte("/N"))
 			if k < 0 {

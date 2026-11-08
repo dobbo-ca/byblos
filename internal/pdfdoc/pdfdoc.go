@@ -382,10 +382,14 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 	// for a trailer that understates /Size.
 	conf.Limits.MaxDecodeBytes = lim.StreamBytes()
 	conf.Limits.MaxObjectCount = int(lim.Objects())
+	// pdfcpu reads an object stream's /N by its own rules, which no scan here
+	// tracks, and holds that many objects: a stream may not claim more than the
+	// reservation.
+	conf.Limits.MaxObjectStreamCount = int(size)
 	ctx, err := api.ReadContext(cctx, rs, conf)
 	if err != nil {
 		// A trailer that understates /Size is caught by pdfcpu's own count, untyped.
-		if strings.Contains(err.Error(), "xref subsection object range exceeds limit") {
+		if msg := err.Error(); strings.Contains(msg, "xref subsection object range exceeds limit") || strings.Contains(msg, "object stream N ") {
 			return nil, &limits.LimitError{Name: "objects", Got: lim.Objects() + 1, Max: lim.Objects()}
 		}
 		return nil, fmt.Errorf("byblos/pdfdoc: read: %w", err)

@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/jpeg"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -422,19 +423,80 @@ func TestObjectStreamsReserveForPackedObjects(t *testing.T) {
 	}
 }
 
-// An object stream whose /N is not a direct integer (pdfcpu resolves it), or
-// missing, counts as the per-stream maximum.
-func TestObjectStreamsUnreadableCountAsMaximum(t *testing.T) {
-	for _, dict := range []string{
-		"/Type /ObjStm /N 4 0 R /First 10",
-		"/Type /ObjStm /First 10",
-		"/Type /ObjStm /First 10 /Pad (" + strings.Repeat("x", 300) + ") /N 4",
-	} {
-		pdf := "%PDF-1.5\n1 0 obj\n<< " + dict + " /Length 0 >>\nstream\n\nendstream\nendobj\n"
-		if got := objectBound(strings.NewReader(pdf), 200_000); got <= 200_000 {
-			t.Errorf("%.40s: bound = %d; want over the cap", dict, got)
-		}
+// objStmPDF is a one-page file whose xref stream makes `streams` copies of one
+// object stream of n entries (a few bytes compressed). The dictionary is dict
+// with %N and %F filled in; obj 4 holds n and obj 8 holds the prolog length.
+func objStmPDF(t *testing.T, n, streams int, dict string) []byte {
+	t.Helper()
+	prolog := strings.Repeat("7 0 ", n)
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	zw.Write([]byte(prolog + "0"))
+	zw.Close()
+	dict = strings.NewReplacer("%N", strconv.Itoa(n), "%F", strconv.Itoa(len(prolog))).Replace(dict)
+	var out bytes.Buffer
+	offs := map[int]int{}
+	obj := func(num int, body string) {
+		offs[num] = out.Len()
+		fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", num, body)
 	}
+	out.WriteString("%PDF-1.5\n")
+	obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>")
+	obj(4, strconv.Itoa(n))
+	obj(8, strconv.Itoa(len(prolog)))
+	for s := 0; s < streams; s++ {
+		obj(9+s, fmt.Sprintf("<< %s /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", dict, z.Len(), z.Bytes()))
+	}
+	x := 9 + streams
+	size := x + 1 + streams
+	var rows bytes.Buffer
+	for i := 0; i < size; i++ {
+		typ, a, b := 1, 0, 0
+		switch {
+		case i == 0:
+			typ, b = 0, 65535
+		case i == 5 || i == 6 || i == 7:
+			typ, b = 0, 0
+		case i == x:
+			a = out.Len()
+		case i > x:
+			typ, a = 2, 9+i-x-1
+		default:
+			a = offs[i]
+		}
+		rows.Write([]byte{byte(typ), byte(a >> 24), byte(a >> 16), byte(a >> 8), byte(a), byte(b >> 8), byte(b)})
+	}
+	xo := out.Len()
+	fmt.Fprintf(&out, "%d 0 obj\n<< /Type /XRef /Size %d /W [1 4 2] /Root 1 0 R /Length %d >>\nstream\n%s\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n", x, size, rows.Len(), rows.Bytes(), xo)
+	return out.Bytes()
+}
+
+// pdfcpu reads /First and /N by its own tokenizer (a reference, a form feed or
+// NUL or a comment between name and value, +n, #-escaped names, a repeated key
+// where the last wins), so no reading of the dictionary here can be trusted to
+// see what it sees. It enforces the bound itself, on the stream it reads.
+func TestObjectStreamCountIsHeldByPdfcpu(t *testing.T) {
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
+	for name, dict := range map[string]string{
+		"first ref": "/Type /ObjStm /N %N /First 8 0 R",
+		"form feed": "/Type /ObjStm /N %N /First\x0c%F",
+		"nul":       "/Type /ObjStm /N %N /First\x00%F",
+		"comment":   "/Type /ObjStm /N %N /First %c\n%F",
+		"plus":      "/Type /ObjStm /N %N /First +%F",
+		"hex name":  "/Type /ObjStm /N %N /Fir#73t %F",
+		"dup N":     "/Type /ObjStm /N 1 /First %F /N %N",
+	} {
+		wantObjectsLimit(t, name, objStmPDF(t, 1_000_000, 1, dict), limits.Limits{})
+		wantObjectsLimit(t, name+" x5", objStmPDF(t, 1_000_000, 5, dict), limits.Limits{})
+	}
+}
+
+// ISO 32000 lets /N be indirect; such a file is not refused for it.
+func TestIndirectObjectStreamCountIsAccepted(t *testing.T) {
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
+	openBudgetedOK(t, objStmPDF(t, 10, 1, "/Type /ObjStm /N 4 0 R /First %F"))
 }
 
 // Outline dictionaries have an indirect /First and no /N.
