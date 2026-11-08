@@ -136,3 +136,14 @@ func TestNoLimitReservesNothing(t *testing.T) {
 	}
 	r()
 }
+
+// BenchmarkReserve is the whole per-document cost of the limiter when the
+// budget never binds: one reservation and its release.
+func BenchmarkReserve(b *testing.B) {
+	prev := SetMemoryLimit(1 << 40)
+	defer SetMemoryLimit(prev)
+	for b.Loop() {
+		release, _ := Reserve(context.Background(), 1<<20)
+		release()
+	}
+}

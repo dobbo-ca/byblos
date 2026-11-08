@@ -144,6 +144,13 @@ func SetMemoryLimit(n int64) int64 {
 	return prev
 }
 
+// MemoryLimit is the budget now in force; <= 0 means none.
+func MemoryLimit() int64 {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	return global.cur()
+}
+
 // Reserve takes n bytes from the budget before the caller allocates them,
 // waiting in FIFO order under ctx. Its own need over the whole limit is a
 // permanent *LimitError; a wait that ctx ends is an error wrapping

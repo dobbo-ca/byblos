@@ -314,21 +314,45 @@ func Open(rs io.ReadSeeker) (Doc, error) {
 	return openDoc(context.Background(), rs, limits.Limits{})
 }
 
-// OpenBudgeted is Open under lim, with the object table reserved from the
-// package memory budget (limits.SetMemoryLimit) before pdfcpu parses. The
-// returned release gives the reservation back; call it when done with the
-// document. The reservation comes from the trailer /Size, so a document that
-// lies low is bounded by pdfcpu's own object-count cap, set from lim too.
+// OpenBudgeted is Open under lim, with the object table and one stream decode
+// reserved from the package memory budget (limits.SetMemoryLimit) before pdfcpu
+// parses. The returned release gives the reservation back; call it when done
+// with the document. The reservation comes from the trailer /Size, and pdfcpu's
+// object-count cap is held to that size (plus an eighth), so a trailer that lies low is
+// refused as an objects limit, not parsed unreserved. With no /Size to read the
+// worst case is reserved, as far as the budget allows.
+//
+// The decode slot is 4 x the stream cap, but never more than the budget leaves
+// after the table: lim's stream cap is lowered to fit, so a budget that cannot
+// hold a 64 MiB decode still takes the document, and refuses only a stream
+// that would not fit.
 func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, func(), error) {
-	size, _ := trailerSize(rs)
+	size, ok := trailerSize(rs)
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
 		return nil, nil, err
 	}
+	budget := limits.MemoryLimit()
+	const minStream = 1 << 20
+	if !ok || size <= 0 {
+		size = lim.Objects()
+		if budget > 0 {
+			size = min(size, max((budget-limits.DecodeBytes(minStream))/limits.PerObjectBytes, 1))
+		}
+	}
+	// A linearized file's last trailer can sit a few entries under the real
+	// count, so the cap has a margin; it is the most an understated /Size parses
+	// unreserved.
+	lim.MaxObjects = min(size+size/8+64, lim.Objects())
+	streams := lim.StreamBytes()
+	if budget > 0 {
+		streams = min(streams, max((budget-limits.ObjectTableBytes(size))/4, minStream))
+	}
+	lim.MaxStreamBytes = streams
 	// One reservation for the document's life: the object table and the slot its
 	// stream decodes (one at a time) run in. A decode that reserved for itself
 	// while the document held its table would wait on that table, alone or
 	// against other documents doing the same, until ctx ended.
-	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+limits.DecodeBytes(lim.StreamBytes()))
+	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+limits.DecodeBytes(streams))
 	if err != nil {
 		return nil, nil, err
 	}

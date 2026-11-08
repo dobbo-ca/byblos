@@ -114,13 +114,13 @@ returns an error wrapping `ErrPassword`.
 |---|---|
 | Budget | `SetMemoryLimit` and the FIFO wait under `ctx` as in the contract. Default: half of `GOMEMLIMIT`, else half of the cgroup `memory.max`, else none. |
 | Object table | Reserved before the parse as `/Size` x 1536 bytes. `TestEstimateCoversAllocation` holds the estimate to between 1.0x and 1.25x of the live heap pdfcpu's parse leaves (measured 1512 to 1519 bytes per object at 20 000 and 100 000 objects). |
-| `/Size` | Read from the last trailer or cross-reference stream dictionary in the file's final 64 KiB before the parse. Cap 200 000 (`objects`). A file whose trailer cannot be found is read under pdfcpu's own object-count cap, which byblos sets to the same value. |
+| `/Size` | Read from the last trailer or cross-reference stream dictionary in the file's final 64 KiB before the parse. Cap 200 000 (`objects`). pdfcpu's object-count cap is held to that `/Size` plus an eighth (a linearized file's last trailer can sit a little under the real count), so a trailer that understates it is refused as `objects` rather than parsed unreserved. A file whose trailer cannot be found reserves for the 200 000 cap, or for as many objects as the budget leaves room for. |
 | Pages | 10 000 (`pages`), checked after pdfcpu reads the page count. |
 | Non-image streams | Content streams, form XObject streams and `/JBIG2Globals` decode under `DecodeWithLimit`: 64 MiB each (`stream-bytes`); content and form streams of one page together 128 MiB (`page-stream-bytes`). A form invoked many times on a page counts once. `OpenBudgeted` reserves, with the object table and for the document's life, four times the stream cap for the decodes to run in one at a time (pdfcpu's doubling buffer plus its copy peaks at about 3.7x; `TestDecodeReservationCoversPeak`). Decodes reserve nothing of their own: one that did would wait on its own document's table, alone or against other documents doing the same. |
 | Image streams | `RawImage` checks width x height against 500 000 000 px (`image-pixels`) from the dictionary, refuses a header with a width or height of 0 or less (pdfcpu reads a limit of 0 as its 512 MiB default and a negative one as none), then sets pdfcpu's per-stream decode limit (`Configuration.Limits.MaxDecodeBytes`) to the image's declared decoded size, four components at the declared depth plus one predictor byte per row (`image-bytes`; at least 1 MiB when the last filter is DCT, JPX or JBIG2, whose Flate layer yields compressed bytes). pdfcpu's default for the same decode is 512 MiB. byblos has no decoder of its own for these streams. The decoded bytes are the caller's to reserve. |
 | Font program | 16 MiB (`font-program-bytes`); a font over the cap is skipped, as before. |
 | pdfcpu | Object streams are decoded under 64 MiB (`MaxDecodeBytes`); `MaxObjectCount` is the `/Size` cap. `defaultConfig()` carries both defaults, so Optimize, Properties and the writer's validator are bounded too; pdfcpu's untyped object-range error on a trailer that understates `/Size` comes back as `*LimitError{objects}`. |
-| Cost of the decode slot | The slot is held whether or not the file has a large stream, because a deflate stream's size cannot be known before it is inflated. A budget under about 256 MiB plus the object table therefore refuses (`memory-budget`, permanent) even a small file. Under kleio's 300 MiB that leaves room for about 30 000 objects. |
+| Decode slot | The table and one decode are reserved together, once, for the document's life: 4 x the stream cap, which is the measured peak of pdfcpu's doubling output buffer. The slot is held whether or not the file has a large stream, because a deflate stream's size cannot be known before it is inflated. Where the budget cannot hold 4 x 64 MiB after the table, the stream cap is lowered to a quarter of what the table leaves (at least 1 MiB) and the document still opens; a stream past the lowered cap is refused as `stream-bytes`. Under kleio's 300 MiB, 40 000 objects leave a cap of about 59 MiB; a table that alone exceeds the budget is `memory-budget`, permanent. |
 
 The caps are checked in `Open`, so every entry point that parses a document
 enforces them with their defaults. Only `InspectDocument` takes a `Limits` and
@@ -130,8 +130,10 @@ reserves from the budget; the others reserve nothing yet (see Planned).
 
 The PNG embed, `EncodedImage`, `Downsample`, `RenderPage` raster, flattened
 path, scanline, q-stack and operand caps, the content-walk caps and the JBIG2
-decoder budget below are still package constants. They are not on the inspect
-path. Making them configurable is the last row of the Planned table.
+decoder budget below are still package constants. The content-walk caps are on
+the inspect path (they bound what `InspectDocument` retains per page) and are
+not in the budget: the walk's retained records are bounded by them, not
+reserved. Making them configurable is the last row of the Planned table.
 
 ### Enforced, still constants
 
@@ -150,6 +152,7 @@ path. Making them configurable is the last row of the Planned table.
 | Content-walk form nesting | 8 | `internal/content/walk.go:387` |
 | Content-walk operands | 8192 | `internal/content/walk.go:391` |
 | Content-walk text shows | 1<<16 | `internal/content/walk.go:397` |
+| Content-walk recorded paints | 1<<18 | `internal/content/walk.go` (`maxPaints`) |
 | Content-walk form invocations | 4096 | `internal/content/walk.go:422` |
 | JBIG2 page pixels | 1<<26 | `internal/jbig2/segment_decode.go:397`, checked at `:1173` (page width at `:1057`) |
 | JBIG2 retained bitmap bytes | 16 MiB | `internal/jbig2/segment_decode.go:398` |
@@ -187,17 +190,18 @@ when the budget lands.
 | Budget reservations for the streaming writer's page and PNG transcode rows | 2.2 |
 | Budget reservations for archival-raster bands | 3.6 |
 | Limit tests of 9A.4 for the other entry points | each stage that calls byblos adds its own (2.1 did `InspectDocument`) |
-| Measured cost of the limiter, by jp2k-go's method, replacing the note below | 2.1 exit, still open |
+| Contended cost of the limiter, by jp2k-go's method (throughput and p99 at 1, 2 and 4 CPUs, a binding budget) | 2.1 exit, still open; the uncontended cost is below |
 | Banded `ExtractPageRaster` and ceiling refusal before allocation (the 1<<26 px design point decides banding, not refusal) | 3.5 |
 | Making the remaining caps (PNG, `EncodedImage`, `Downsample`, render, q-stack, content walk) configurable through `Limits` and returning `*LimitError` | follow-up to 2.1 |
 
 ## Cost of the limiter
 
-Not measured yet. `InspectDocument` adds one reservation for the object table
-and one per content-stream decode, each a mutex acquisition, and nothing else
-on the hot path. The 2.1 exit measures it with the method of jp2k-go's memory-limits guide (throughput and p99 at 1,
-2 and 4 CPUs, a budget that never binds against none, forced GCs) and this
-section then holds the numbers.
+`InspectDocument` takes one reservation per document, for the object table and
+one decode together, and releases it when the call returns. Uncontended, with a
+budget that never binds, a reservation and its release cost 12 ns at 1, 2 and 4
+CPUs (`BenchmarkReserve`, `internal/limits`). The contended case, where
+documents queue on a binding budget, is not measured yet; the 2.1 exit measures
+it with the method of jp2k-go's memory-limits guide.
 
 ## Handling the errors
 

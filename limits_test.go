@@ -255,11 +255,14 @@ func peakHeap(f func()) uint64 {
 }
 
 // repeated is n bytes of content-stream filler, deflated.
-func repeated(t testing.TB, n int) []byte {
+func repeated(t testing.TB, n int) []byte { return repeatedOf(t, n, "q Q\n") }
+
+// repeatedOf is repeated with the operators of unit.
+func repeatedOf(t testing.TB, n int, unit string) []byte {
 	t.Helper()
 	var out bytes.Buffer
 	zw := zlib.NewWriter(&out)
-	chunk := bytes.Repeat([]byte("q Q\n"), 1<<18)
+	chunk := bytes.Repeat([]byte(unit), 1<<18)
 	for left := n; left > 0; left -= len(chunk) {
 		if _, err := zw.Write(chunk[:min(left, len(chunk))]); err != nil {
 			t.Fatal(err)
@@ -285,21 +288,59 @@ func TestDecodeReservationCoversPeak(t *testing.T) {
 	t.Logf("peak %d MiB, reservation %d MiB", peak>>20, limits.DecodeBytes(64<<20)>>20)
 }
 
-// A document whose object table and one decode cannot both fit is refused
-// outright: waiting for its own reservation would end only with ctx.
+// A document whose object table alone is over the budget is refused outright:
+// waiting for its own reservation would end only with ctx.
 func TestOwnReservationDoesNotDeadlock(t *testing.T) {
 	prev := SetMemoryLimit(300 << 20)
 	defer SetMemoryLimit(prev)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
-	_, err := InspectDocument(ctx, bytes.NewReader(paddedPDF(170_000)), Limits{})
+	_, err := InspectDocument(ctx, bytes.NewReader(paddedPDF(210_000)), Limits{MaxObjects: 300_000})
 	var le *LimitError
 	if !errors.As(err, &le) || le.Name != "memory-budget" || errors.Is(err, ErrMemoryLimit) {
 		t.Errorf("err = %v; want a permanent memory-budget *LimitError", err)
 	}
 	if d := time.Since(start); d > time.Second {
 		t.Errorf("took %v; the refusal needs no wait", d)
+	}
+}
+
+// The decode slot shrinks to what the budget leaves after the object table, so
+// an ordinary document is not refused for room it will not use: kleio's 300 MiB
+// takes 40 000 objects, and a small file fits a budget under the default
+// slot (GOMEMLIMIT=400MiB halves to 200 MiB).
+func TestDecodeSlotFitsTheBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		budget int64
+		pdf    []byte
+	}{
+		{"40k objects in 300 MiB", 300 << 20, paddedPDF(40_000)},
+		{"150k objects in 300 MiB", 300 << 20, paddedPDF(150_000)},
+		{"small file in 200 MiB", 200 << 20, paddedPDF(10)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := SetMemoryLimit(tc.budget)
+			defer SetMemoryLimit(prev)
+			if _, err := InspectDocument(context.Background(), bytes.NewReader(tc.pdf), Limits{}); err != nil {
+				t.Errorf("err = %v; want nil", err)
+			}
+		})
+	}
+}
+
+// A trailer that understates /Size cannot park an object table the reservation
+// never covered: the count is held to the /Size that was reserved for.
+func TestUnderReportedSizeIsRefusedUnderTheBudget(t *testing.T) {
+	prev := SetMemoryLimit(300 << 20)
+	defer SetMemoryLimit(prev)
+	pdf := paddedPDF(150_000)
+	pdf = bytes.Replace(pdf, []byte("/Size 150001"), []byte("/Size 10"), 1)
+	_, err := InspectDocument(context.Background(), bytes.NewReader(pdf), Limits{})
+	var le *LimitError
+	if !errors.As(err, &le) || le.Name != "objects" {
+		t.Errorf("err = %v; want *LimitError objects", err)
 	}
 }
 
@@ -395,6 +436,24 @@ func TestBudgetHoldsPeak(t *testing.T) {
 		t.Errorf("peak %d > budget %d", peak, budget)
 	}
 	t.Logf("peak %d MiB, budget %d MiB", peak>>20, budget>>20)
+}
+
+// The content walk's records are part of the peak: a 60 MiB stream of
+// path-painting operators (60 KB deflated) once retained 2.5 GB of Paints
+// under a 300 MiB budget.
+func TestBudgetHoldsPeakOnPaintHeavyContent(t *testing.T) {
+	pdf := bombPDF(flateStream(repeatedOf(t, 60<<20, "0 0 m 1 1 l S\n")), "4 0 R")
+	prev := SetMemoryLimit(300 << 20)
+	defer SetMemoryLimit(prev)
+	peak := peakHeap(func() {
+		if _, err := InspectDocument(context.Background(), bytes.NewReader(pdf), Limits{}); err != nil {
+			t.Error(err)
+		}
+	})
+	if peak > 300<<20 {
+		t.Errorf("peak %d MiB > budget 300 MiB", peak>>20)
+	}
+	t.Logf("peak %d MiB", peak>>20)
 }
 
 // TestNoGoroutinesStarted is 9A.4 item 6: byblos starts no goroutines of its

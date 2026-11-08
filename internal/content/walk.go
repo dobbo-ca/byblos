@@ -395,6 +395,13 @@ const (
 	// count into TextChars/TextOps/InkedTextOps; only the per-string record
 	// stops growing.
 	maxTextShows = 1 << 16
+	// maxPaints bounds Scan.Paints the same way. A Paint is about 200 bytes
+	// and `0 0 m 1 1 l S` is 14, so 60 MiB of decoded content (60 KB of flate)
+	// retained 2.5 GB. Past the cap the path-painting operators still run;
+	// only the record of them stops growing, so a later opaque fill past the
+	// cap no longer hides an image from classification. A real page is
+	// thousands; a dense vector map is a few hundred thousand.
+	maxPaints = 1 << 18
 	// maxGStateDepth bounds the q graphics-state stack. Every other budget
 	// here bounded a slice of parsed CONTENT; this one bounds a slice of
 	// SAVED STATE, and nothing did before byb-9ml: `q` is two bytes and
@@ -417,7 +424,7 @@ const (
 	// 4096 is 37x the maximum and refuses none of them.
 	//
 	// This one counter is what bounds BOTH shapes, because the walk aborts:
-	// the uncapped Scan.Paints, Scan.Images, Scan.InlineImages and
+	// the uncapped Scan.Images, Scan.InlineImages and
 	// Scan.Unresolved slices can only grow while a walk is running.
 	maxFormInvocations = 4096
 )
@@ -874,6 +881,9 @@ func recordPaint(s *Scan, path *pathBox, gs gstate, op string) {
 		// it, when half the ink actually falls outside.
 		r := float64(gs.lineWidth * deviceScale(gs.ctm) / 2)
 		box = Box{LLX: box.LLX - r, LLY: box.LLY - r, URX: box.URX + r, URY: box.URY + r}
+	}
+	if len(s.Paints) >= maxPaints {
+		return
 	}
 	s.order++
 	s.Paints = append(s.Paints, Paint{

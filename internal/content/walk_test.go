@@ -1597,3 +1597,16 @@ func TestWalkAllowsFlatFormRepetition(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// Scan.Paints stops growing at maxPaints; the walk itself carries on and
+// reports no error, as for TextShows.
+func TestWalkCapsRecordedPaints(t *testing.T) {
+	src := []byte(strings.Repeat("0 0 m 1 1 l S\n", maxPaints+100))
+	s, err := Walk(context.Background(), src, 0, nil)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if len(s.Paints) != maxPaints {
+		t.Errorf("len(Paints) = %d; want %d", len(s.Paints), maxPaints)
+	}
+}

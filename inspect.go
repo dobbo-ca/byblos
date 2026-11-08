@@ -237,7 +237,7 @@ func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
 
 // InspectDocument is InspectContext under lim, and also reports the
 // document-level facts of DocumentInfo. The object table (from the trailer
-// /Size) and each decoded content stream are reserved from the package memory
+// /Size) and one stream decode are reserved from the package memory
 // budget (SetMemoryLimit) before they are allocated. A breached cap returns a
 // *LimitError; a budget held by others returns ErrMemoryLimit. The cancellation
 // latency is InspectContext's.
