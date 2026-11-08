@@ -321,6 +321,7 @@ type doc struct {
 	nextID    int                          // synthetic ids for direct (non-indirect) image objects
 	fontRefs  map[string]types.IndirectRef // embedded fonts, keyed by TrueTypeFont.BaseFont
 	fontCache map[int]fontCacheEntry       // RenderFont results, keyed like images
+	numArrays map[int][]float64            // numberArray results for indirect arrays, keyed by object number
 
 	lim       limits.Limits
 	pageBytes int64          // decoded non-image stream bytes of the current page
@@ -1573,11 +1574,32 @@ func (d *doc) filterName(dict types.Dict) string {
 // element is one. All-or-nothing on purpose: a partly-read array is a remap a
 // caller cannot apply, and returning it with holes in it invites applying it
 // anyway.
+//
+// An indirect array is converted once and every caller shares the result, which
+// must not be modified: pdfcpu parses the array once, but d.images and the
+// font records outlive the walk, and K images naming one M-entry array would
+// otherwise hold K*8*M bytes no account sees. A direct array belongs to one
+// dictionary the parse already counted.
 func (d *doc) numberArray(dict types.Dict, key string) []float64 {
 	arr := d.arrayEntry(dict, key)
 	if len(arr) == 0 {
 		return nil
 	}
+	if ref, ok := dict[key].(types.IndirectRef); ok {
+		if out, ok := d.numArrays[ref.ObjectNumber.Value()]; ok {
+			return out
+		}
+		out := d.readNumbers(arr)
+		if d.numArrays == nil {
+			d.numArrays = map[int][]float64{}
+		}
+		d.numArrays[ref.ObjectNumber.Value()] = out
+		return out
+	}
+	return d.readNumbers(arr)
+}
+
+func (d *doc) readNumbers(arr types.Array) []float64 {
 	out := make([]float64, len(arr))
 	for i, o := range arr {
 		v, ok := d.number(o)

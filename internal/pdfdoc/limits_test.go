@@ -1023,3 +1023,54 @@ func TestSelfDrawingFormDecodesOnce(t *testing.T) {
 		t.Errorf("TotalAlloc delta = %d MiB; want one decode of the %d MiB form, not one per level", delta>>20, decoded>>20)
 	}
 }
+
+// Many images pointing at one indirect /Decode array share one parsed copy of
+// it. Each image's ImageInfo kept its own, and d.images lives until the
+// document is released, so K images x M entries held 8*K*M bytes the parse did
+// not count: 1000 images over 100 000 entries held 770 MiB at a 300 MiB budget.
+func TestSharedDecodeArrayIsCopiedOnce(t *testing.T) {
+	const k, m = 200, 20000
+	var out bytes.Buffer
+	offs := map[int]int{}
+	obj := func(nr int, b string) { offs[nr] = out.Len(); fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", nr, b) }
+	out.WriteString("%PDF-1.7\n")
+	var xo, pc strings.Builder
+	for i := 0; i < k; i++ {
+		fmt.Fprintf(&xo, "/I%d %d 0 R ", i, 7+i)
+		fmt.Fprintf(&pc, "/I%d Do\n", i)
+	}
+	obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Resources 4 0 R /Contents 5 0 R >>")
+	obj(4, "<< /XObject << "+xo.String()+">> >>")
+	obj(5, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", pc.Len(), pc.String()))
+	obj(6, "["+strings.Repeat("0 ", m)+"]")
+	for i := 0; i < k; i++ {
+		obj(7+i, "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Decode 6 0 R /Length 1 >>\nstream\nX\nendstream")
+	}
+	n := 7 + k
+	start := out.Len()
+	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", n)
+	for i := 1; i < n; i++ {
+		fmt.Fprintf(&out, "%010d 00000 n \n", offs[i])
+	}
+	fmt.Fprintf(&out, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", n, start)
+
+	d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(out.Bytes()), limits.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	p, err := d.Page(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := limitsTotalAlloc()
+	if _, err = content.Walk(context.Background(), p.Content, p.Scope, d); err != nil {
+		t.Fatal(err)
+	}
+	// Unshared, 200 copies of 160 KB are 32 MB; shared, one is.
+	if delta := limitsTotalAlloc() - before; delta > 8<<20 {
+		t.Errorf("TotalAlloc delta = %d KiB; want one copy of the 160 KB /Decode array, not one per image", delta>>10)
+	}
+}
