@@ -68,6 +68,11 @@ type Limits struct {
 	// stream twice counts it twice). Default: MaxStreamBytes, so what the parse
 	// retains stays inside the one decode slot the reservation holds.
 	MaxTotalDecodeBytes int64
+	// MaxParsedBytes caps the estimated heap of the array elements and
+	// dictionary entries pdfcpu parses over one parse. Decoded bytes do not
+	// bound it: 2 bytes of "[]" parse into about 40 of heap. Default: the
+	// object table the reservation holds plus MaxTotalDecodeBytes.
+	MaxParsedBytes int64
 }
 
 const DefaultFontProgramBytes = 16 << 20

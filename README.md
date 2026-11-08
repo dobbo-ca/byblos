@@ -60,12 +60,12 @@ rasterized at all. Pages that are neither are detected and reported
 ## Building against byblos
 
 byblos parses PDFs with [pergamon-go](https://github.com/dobbo-ca/pergamon-go),
-a fork of pdfcpu that adds cumulative per-parse limits. A `replace` in byblos's
+a fork of pdfcpu that adds cumulative per-parse limits (object stream entries, decoded bytes, parsed-object heap). A `replace` in byblos's
 `go.mod` does not apply to a program that imports it, so that program's own
 `go.mod` needs the same line, or it builds against upstream pdfcpu and fails to
 compile:
 
-    replace github.com/pdfcpu/pdfcpu => github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.1
+    replace github.com/pdfcpu/pdfcpu => github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.2
 
 ## License
 

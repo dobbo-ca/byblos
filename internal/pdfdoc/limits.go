@@ -173,6 +173,15 @@ func intAfter(b []byte) (int64, bool) {
 	return v, err == nil
 }
 
+// parsedBytes is the cap on the heap of parsed objects: lim's, else the object
+// table the reservation holds plus the decode slot.
+func parsedBytes(lim limits.Limits, table int64) int64 {
+	if lim.MaxParsedBytes > 0 {
+		return lim.MaxParsedBytes
+	}
+	return table + lim.TotalDecodeBytes()
+}
+
 // decode decodes sd under the stream caps. page counts the
 // bytes toward the current page's running total.
 func (d *doc) decode(sd *types.StreamDict, page bool) error {

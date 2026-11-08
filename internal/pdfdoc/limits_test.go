@@ -634,3 +634,119 @@ func TestObjectStreamLimitsAreConfigurable(t *testing.T) {
 		}
 	}
 }
+
+// bigObjectPDF is one page whose /Contents is object 5, an array of n empty
+// arrays: 2 bytes of input become about 40 of heap, so the decoded-byte limits
+// never see it. packed puts the object in a Flate object stream, else it is
+// written in place.
+func bigObjectPDF(n int, packed bool) []byte {
+	body := "[" + strings.Repeat("[]", n) + "]"
+	var out bytes.Buffer
+	offs := map[int]int{}
+	obj := func(nr int, b string) { offs[nr] = out.Len(); fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", nr, b) }
+	out.WriteString("%PDF-1.5\n")
+	obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Contents 5 0 R >>")
+	if !packed {
+		obj(5, body)
+		xo := out.Len()
+		out.WriteString("xref\n0 6\n0000000000 65535 f \n")
+		for i := 1; i < 6; i++ {
+			if o, ok := offs[i]; ok {
+				fmt.Fprintf(&out, "%010d 00000 n \n", o)
+			} else {
+				out.WriteString("0000000000 00000 f \n")
+			}
+		}
+		fmt.Fprintf(&out, "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xo)
+		return out.Bytes()
+	}
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	zw.Write([]byte("5 0 " + body))
+	zw.Close()
+	obj(4, fmt.Sprintf("<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", z.Len(), z.Bytes()))
+	x := out.Len()
+	var rows bytes.Buffer
+	for i := 0; i < 7; i++ {
+		typ, a := 1, offs[i]
+		switch i {
+		case 0:
+			typ, a = 0, 0
+		case 5:
+			typ, a = 2, 4
+		case 6:
+			a = x
+		}
+		rows.Write([]byte{byte(typ), byte(a >> 24), byte(a >> 16), byte(a >> 8), byte(a), 0, 0})
+	}
+	fmt.Fprintf(&out, "6 0 obj\n<< /Type /XRef /Size 7 /W [1 4 2] /Root 1 0 R /Length %d >>\nstream\n%s\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n", rows.Len(), rows.Bytes(), x)
+	return out.Bytes()
+}
+
+// One 6 MB object (3 000 000 empty arrays) is refused as parsed-bytes under a
+// 32 MiB budget, in place or packed, before the parse holds more than the
+// limit: unrefused it took 167 MiB of live heap.
+func TestOneHugeObjectIsRefused(t *testing.T) {
+	for _, packed := range []bool{false, true} {
+		t.Run(fmt.Sprint("packed=", packed), func(t *testing.T) {
+			defer limits.SetMemoryLimit(limits.SetMemoryLimit(32 << 20))
+			pdf := bigObjectPDF(3_000_000, packed)
+			before := limitsTotalAlloc()
+			d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), limits.Limits{})
+			if err == nil {
+				_, err = d.Page(1)
+				release()
+			}
+			delta := limitsTotalAlloc() - before
+			var le *limits.LimitError
+			if !errors.As(err, &le) || le.Name != "parsed-bytes" || !errors.Is(err, limits.ErrLimit) || errors.Is(err, limits.ErrMemoryLimit) {
+				t.Fatalf("err = %v; want a permanent *LimitError parsed-bytes", err)
+			}
+			if delta > 128<<20 {
+				t.Errorf("TotalAlloc delta = %d MiB; want the parse stopped near the limit", delta>>20)
+			}
+		})
+	}
+}
+
+// One 8 MB Flate stream named 16 times in /Contents is 128 MB of page content:
+// byblos decodes it outside pdfcpu's counters, so the page total is what must
+// hold, and under a budget it holds the decode slot, not the 128 MiB default.
+func TestRepeatedContentStreamIsRefusedUnderABudget(t *testing.T) {
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(32 << 20))
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	zw.Write(bytes.Repeat([]byte(" "), 8_000_000))
+	zw.Close()
+	var out bytes.Buffer
+	offs := map[int]int{}
+	obj := func(nr int, b string) { offs[nr] = out.Len(); fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", nr, b) }
+	out.WriteString("%PDF-1.7\n")
+	obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Contents ["+strings.Repeat("4 0 R ", 16)+"] >>")
+	obj(4, fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", z.Len(), z.Bytes()))
+	xo := out.Len()
+	out.WriteString("xref\n0 5\n0000000000 65535 f \n")
+	for i := 1; i < 5; i++ {
+		fmt.Fprintf(&out, "%010d 00000 n \n", offs[i])
+	}
+	fmt.Fprintf(&out, "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xo)
+
+	before := limitsTotalAlloc()
+	d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(out.Bytes()), limits.Limits{})
+	if err == nil {
+		_, err = d.Page(1)
+		release()
+	}
+	delta := limitsTotalAlloc() - before
+	var le *limits.LimitError
+	if !errors.As(err, &le) || le.Name != "page-stream-bytes" || !errors.Is(err, limits.ErrLimit) || errors.Is(err, limits.ErrMemoryLimit) {
+		t.Fatalf("err = %v; want a permanent *LimitError page-stream-bytes", err)
+	}
+	if delta > 96<<20 {
+		t.Errorf("TotalAlloc delta = %d MiB; want the second reference refused", delta>>20)
+	}
+}

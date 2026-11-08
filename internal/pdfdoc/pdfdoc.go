@@ -86,6 +86,7 @@ func defaultConfig() *model.Configuration {
 	conf.Limits.MaxObjectCount = int(limits.Limits{}.Objects())
 	conf.Limits.MaxObjectStreamTotalCount = int(limits.Limits{}.Objects())
 	conf.Limits.MaxTotalDecodeBytes = limits.Limits{}.StreamBytes()
+	conf.Limits.MaxParsedBytes = limits.ObjectTableBytes(limits.Limits{}.Objects()) + limits.Limits{}.StreamBytes()
 	return conf
 }
 
@@ -94,6 +95,9 @@ func defaultConfig() *model.Configuration {
 // decode cap, and nil for any other error.
 func pdfcpuLimit(lim limits.Limits, err error) error {
 	switch {
+	case errors.Is(err, model.ErrParsedLimitExceeded):
+		n := parsedBytes(lim, limits.ObjectTableBytes(lim.Objects()))
+		return &limits.LimitError{Name: "parsed-bytes", Got: n + 1, Max: n}
 	case errors.Is(err, model.ErrLimitExceeded) && errors.Is(err, filter.ErrDecodeLimitExceeded):
 		return &limits.LimitError{Name: "stream-bytes", Got: lim.TotalDecodeBytes() + 1, Max: lim.TotalDecodeBytes()}
 	case errors.Is(err, model.ErrLimitExceeded):
@@ -360,6 +364,9 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	if budget > 0 {
 		slot := max((budget-limits.ObjectTableBytes(size))/4, minStream)
 		streams, total = min(streams, slot), min(total, slot)
+		// The page's decoded streams are held while the next one decodes, so
+		// together they fit the slot, not the 128 MiB default.
+		lim.MaxPageStreamBytes = min(lim.PageStreamBytes(), max(streams, total))
 	}
 	lim.MaxStreamBytes, lim.MaxTotalDecodeBytes = streams, total
 	// One reservation for the document's life: the object table and the slot its
@@ -405,6 +412,7 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 	// the decoded bytes of the parse itself and refuses at the limit.
 	conf.Limits.MaxObjectStreamTotalCount = int(lim.ObjectStreamEntries())
 	conf.Limits.MaxTotalDecodeBytes = lim.TotalDecodeBytes()
+	conf.Limits.MaxParsedBytes = parsedBytes(lim, limits.ObjectTableBytes(size))
 	ctx, err := api.ReadContext(cctx, rs, conf)
 	if err != nil {
 		if le := pdfcpuLimit(lim, err); le != nil {
@@ -596,6 +604,9 @@ func (d *doc) Page(n int) (p *Page, err error) {
 	// seven disagreements were this, 3% of the sample lost outright.
 	c, recovered, err := d.pageContents(pd)
 	if err != nil {
+		if le := pdfcpuLimit(d.lim, err); le != nil {
+			return nil, le
+		}
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
 	}
 	p.Content, p.ContentRecovered = c, recovered
