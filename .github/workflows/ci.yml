@@ -122,3 +122,17 @@ jobs:
           command -v magick >/dev/null || command -v convert >/dev/null || { echo "MISSING oracle: magick/convert"; exit 1; }
           qpdf --version
       - run: go test ./... -v
+
+  # Spec 3.4: native linux/arm64 on every PR (free hosted runner on public repos),
+  # a required status. No purego run: the repo has no purego build tag. No kernel
+  # bench: it has no Kernel benchmarks yet.
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 ./...
