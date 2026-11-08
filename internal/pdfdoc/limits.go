@@ -102,15 +102,22 @@ func headersIn(b []byte, lo, hi int) (n int64) {
 	}
 }
 
-// packedIn sums the /N of the /ObjStm dictionaries whose /Type starts in [lo, hi).
+// packedIn sums the /N of the object stream dictionaries whose /First (a direct
+// integer; an outline's is a reference) starts in [lo, hi). It keys on /First,
+// not /Type, which pdfcpu also accepts by reference. A /N it cannot read as a
+// direct integer nearby (pdfcpu resolves a reference, and takes the value from
+// anywhere in the dictionary) counts as the per-stream maximum, so it refuses.
 func packedIn(b []byte, lo, hi int, limit int64) (n int64) {
 	for i := lo; ; {
-		j := bytes.Index(b[i:], []byte("/ObjStm"))
+		j := bytes.Index(b[i:], []byte("/First"))
 		if j < 0 || i+j >= hi {
 			return n
 		}
 		p := i + j
 		i = p + 1
+		if v, ok := directInt(b[p+len("/First"):]); !ok || v < 0 {
+			continue
+		}
 		// The dictionary: after the last "obj" before p, up to "stream" after it.
 		s, e := max(p-256, 0), min(p+256, len(b))
 		if k := bytes.LastIndex(b[s:p], []byte("obj")); k >= 0 {
@@ -119,20 +126,32 @@ func packedIn(b []byte, lo, hi int, limit int64) (n int64) {
 		if k := bytes.Index(b[p:e], []byte("stream")); k >= 0 {
 			e = p + k
 		}
-		for w := b[s:e]; ; {
+		v, found := limit+1, false
+		for w := b[s:e]; !found; {
 			k := bytes.Index(w, []byte("/N"))
 			if k < 0 {
 				break
 			}
 			w = w[k+2:]
 			if len(w) > 0 && (isSpace(w[0]) || w[0] >= '0' && w[0] <= '9') {
-				if v, ok := intAfter(w); ok {
-					n += min(v, limit+1)
-					break
+				if x, ok := directInt(w); ok {
+					v, found = min(x, limit+1), true
 				}
 			}
 		}
+		n += v
 	}
+}
+
+// directInt reads a non-negative integer at the start of b, but not the "n g R"
+// reference that has one.
+func directInt(b []byte) (int64, bool) {
+	v, ok := intAfter(b)
+	if !ok {
+		return 0, false
+	}
+	f := bytes.Fields(b[:min(len(b), 64)])
+	return v, !(len(f) > 2 && len(f[2]) > 0 && f[2][0] == 'R')
 }
 
 func isSpace(c byte) bool {

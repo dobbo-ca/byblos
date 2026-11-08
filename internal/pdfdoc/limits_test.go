@@ -414,7 +414,7 @@ func TestObjectBoundCountsEveryHeaderForm(t *testing.T) {
 
 // Objects packed in object streams have no header; their /N is counted.
 func TestObjectStreamsReserveForPackedObjects(t *testing.T) {
-	for _, dict := range []string{"/Type /ObjStm /N 5000 /First 10", "/N 5000 /First 10 /Type /ObjStm"} {
+	for _, dict := range []string{"/Type /ObjStm /N 5000 /First 10", "/N 5000 /First 10 /Type /ObjStm", "/Type 9 0 R /N 5000 /First 10"} {
 		pdf := "%PDF-1.5\n1 0 obj\n<< " + dict + " /Length 0 >>\nstream\n\nendstream\nendobj\n"
 		if got := objectBound(strings.NewReader(pdf), 200_000); got != 5001 {
 			t.Errorf("%s: bound = %d; want 5001", dict, got)
@@ -422,10 +422,33 @@ func TestObjectStreamsReserveForPackedObjects(t *testing.T) {
 	}
 }
 
+// An object stream whose /N is not a direct integer (pdfcpu resolves it), or
+// missing, counts as the per-stream maximum.
+func TestObjectStreamsUnreadableCountAsMaximum(t *testing.T) {
+	for _, dict := range []string{
+		"/Type /ObjStm /N 4 0 R /First 10",
+		"/Type /ObjStm /First 10",
+		"/Type /ObjStm /First 10 /Pad (" + strings.Repeat("x", 300) + ") /N 4",
+	} {
+		pdf := "%PDF-1.5\n1 0 obj\n<< " + dict + " /Length 0 >>\nstream\n\nendstream\nendobj\n"
+		if got := objectBound(strings.NewReader(pdf), 200_000); got <= 200_000 {
+			t.Errorf("%.40s: bound = %d; want over the cap", dict, got)
+		}
+	}
+}
+
+// Outline dictionaries have an indirect /First and no /N.
+func TestObjectBoundIgnoresIndirectFirst(t *testing.T) {
+	pdf := "%PDF-1.5\n1 0 obj\n<< /Type /Outlines /First 5 0 R /Last 6 0 R /Count 2 >>\nendobj\n"
+	if got := objectBound(strings.NewReader(pdf), 200_000); got != 1 {
+		t.Errorf("bound = %d; want 1", got)
+	}
+}
+
 // A match that straddles a chunk boundary counts once.
 func TestObjectBoundAcrossChunks(t *testing.T) {
 	for _, pad := range []int{64<<10 - 40, 64<<10 - 3, 64 << 10, 128<<10 - 300, 128<<10 + 7} {
-		pdf := strings.Repeat(" ", pad) + "7 0 obj\n<< /Type /ObjStm /N 4 >>\nstream\nendstream\nendobj\n"
+		pdf := strings.Repeat(" ", pad) + "7 0 obj\n<< /Type /ObjStm /N 4 /First 9 >>\nstream\nendstream\nendobj\n"
 		if got := objectBound(strings.NewReader(pdf), 200_000); got != 5 {
 			t.Errorf("pad %d: bound = %d; want 5", pad, got)
 		}
