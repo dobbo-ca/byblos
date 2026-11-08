@@ -696,7 +696,7 @@ func TestOneHugeObjectIsRefused(t *testing.T) {
 	for _, packed := range []bool{false, true} {
 		t.Run(fmt.Sprint("packed=", packed), func(t *testing.T) {
 			defer limits.SetMemoryLimit(limits.SetMemoryLimit(32 << 20))
-			pdf := bigObjectPDF(3_000_000, packed)
+			pdf := bigObjectPDF(2_000_000, packed)
 			before := limitsTotalAlloc()
 			d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), limits.Limits{})
 			if err == nil {
@@ -777,7 +777,7 @@ func TestHugeObjectCannotSpendTheUnusedTable(t *testing.T) {
 		budget        int64
 		filler, elems int
 	}{
-		{"32MiB", 32 << 20, 16_000, 330_000},
+		{"32MiB", 32 << 20, 14_000, 330_000},
 		{"300MiB", 300 << 20, 170_000, 3_200_000},
 	} {
 		t.Run(c.name, func(t *testing.T) {

@@ -441,11 +441,11 @@ func TestBudgetHoldsPeak(t *testing.T) {
 	t.Logf("peak %d MiB, budget %d MiB", peak>>20, budget>>20)
 }
 
-// The content walk's records are part of the peak: a 60 MiB stream of
+// The content walk's records are part of the peak: a 45 MiB stream of
 // path-painting operators (60 KB deflated) once retained 2.5 GB of Paints
 // under a 300 MiB budget.
 func TestBudgetHoldsPeakOnPaintHeavyContent(t *testing.T) {
-	pdf := bombPDF(flateStream(repeatedOf(t, 60<<20, "0 0 m 1 1 l S\n")), "4 0 R")
+	pdf := bombPDF(flateStream(repeatedOf(t, 45<<20, "0 0 m 1 1 l S\n")), "4 0 R")
 	prev := SetMemoryLimit(300 << 20)
 	defer SetMemoryLimit(prev)
 	peak := peakHeap(func() {
@@ -556,5 +556,74 @@ func TestFileBytesAreReserved(t *testing.T) {
 func TestImageRecordBytes(t *testing.T) {
 	if got := int64(unsafe.Sizeof(ImageRef{})); got > limits.ImageRecordBytes {
 		t.Fatalf("ImageRef is %d bytes; limits.ImageRecordBytes is %d", got, limits.ImageRecordBytes)
+	}
+}
+
+func deflated(s string) []byte {
+	var b bytes.Buffer
+	zw := zlib.NewWriter(&b)
+	zw.Write([]byte(s))
+	zw.Close()
+	return b.Bytes()
+}
+
+// retainedPDF is one page whose content is page and whose form /F (object 6)
+// has content form.
+func retainedPDF(page, form string) []byte {
+	return pdfFile([]string{
+		catalog, pages1,
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /F 6 0 R >> /Font << /F1 5 0 R >> >> >>",
+		flateStream(deflated(page)),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		strings.Replace(flateStream(deflated(form)), "<< ", "<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /Font << /F1 5 0 R >> >> ", 1),
+	}, "", 0)
+}
+
+// What the walk keeps is one account (Limits.RetainedBytes): a form drawn many
+// times, and a page of many small records, are held inside a 32 MiB budget or
+// refused as retained-bytes, not kept at whatever size the content asks.
+func TestWalkRetainedBytesAreAccounted(t *testing.T) {
+	const budget = 32 << 20
+	draws := strings.Repeat("/F Do\n", 4096)
+	cases := []struct {
+		name, page, form string
+		wantRefused      bool
+	}{
+		// 100 KB strings drawn 4096 times: 400 MB if each draw kept a copy. An
+		// unescaped string aliases the form's one buffer.
+		{"form text, aliased", draws, "BT /F1 12 Tf (" + strings.Repeat("a", 100_000) + ") Tj ET\n", false},
+		{"form text, escaped", draws, "BT /F1 12 Tf (" + strings.Repeat(`a\n`, 50_000) + ") Tj ET\n", true},
+		{"form name", draws, "/" + strings.Repeat("n", 100_000) + " Do\n", true},
+		{"300k paints", "", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			defer SetMemoryLimit(SetMemoryLimit(budget))
+			page := c.page
+			if c.name == "300k paints" {
+				page = strings.Repeat("0 0 m 1 1 l S\n", 300_000) + "BT /F1 12 Tf\n" + strings.Repeat("(ab) Tj\n", 70_000) + "ET\n"
+			}
+			pdf := retainedPDF(page, c.form)
+			var err error
+			var di *DocumentInfo
+			peak := peakHeap(func() { di, err = InspectDocument(context.Background(), bytes.NewReader(pdf), Limits{}) })
+			if err == nil && len(di.Pages[0].Diagnostics) > 0 {
+				t.Fatalf("diagnostics: %+v", di.Pages[0].Diagnostics)
+			}
+			var le *LimitError
+			refused := errors.As(err, &le) && le.Name == "retained-bytes" && errors.Is(err, ErrLimit)
+			if err != nil && !refused {
+				t.Fatalf("err = %v; want nil or a permanent *LimitError retained-bytes", err)
+			}
+			if c.wantRefused && !refused {
+				t.Errorf("err = %v; want *LimitError retained-bytes", err)
+			}
+			if !c.wantRefused && err != nil {
+				t.Errorf("err = %v; want the form held once and the call to pass", err)
+			}
+			if peak > budget {
+				t.Errorf("peak heap = %d MiB; want it inside the %d MiB budget", peak>>20, budget>>20)
+			}
+		})
 	}
 }

@@ -373,11 +373,16 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	// the parse holds up to the file's size; the walk keeps its image records
 	// for all pages. Both come off the budget before the decode slot.
 	fileBytes := sizeOf(rs)
-	var records int64
+	var records, retained int64
 	if budget > 0 {
 		avail := budget - limits.ObjectTableBytes(size) - fileBytes
 		records = max(avail/8, 0)
-		slot := max((avail-records)/4, minStream)
+		// A page's walk keeps its paints, text shows and strings while the
+		// page's streams are decoded: a fifth of the avail, more than that
+		// only for the record caps at their maximum (about 66 MiB).
+		retained = min(max(avail/5, 0), lim.RetainedBytes())
+		lim.MaxRetainedBytes = max(retained, 1)
+		slot := max((avail-records-retained)/4, minStream)
 		// Pages can share one content stream, so the records of all pages count
 		// together: the cap on each kind is half of what the reservation holds.
 		lim.MaxImages = min(lim.Images(), records/limits.ImageRecordBytes/2)
@@ -398,7 +403,7 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	// stream decodes (one at a time) run in. A decode that reserved for itself
 	// while the document held its table would wait on that table, alone or
 	// against other documents doing the same, until ctx ended.
-	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+fileBytes+records+limits.DecodeBytes(max(streams, total, lim.ObjectBytes())))
+	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+fileBytes+records+retained+limits.DecodeBytes(max(streams, total, lim.ObjectBytes())))
 	if err != nil {
 		return nil, nil, err
 	}

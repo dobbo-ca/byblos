@@ -85,6 +85,13 @@ type Limits struct {
 	// /Length that reads it. Default: none; under a budget the file's size,
 	// which the reservation holds.
 	MaxStreamTotalBytes int64
+	// MaxRetainedBytes caps what the content walk of one page keeps: every
+	// record it appends (paints, text shows, placements, at their Go size) and
+	// every string or slice it holds that is not part of the decoded stream.
+	// Default 128 MiB, which holds the record caps at their maximum (about
+	// 66 MiB of paints and text shows); under a budget a fifth of what the
+	// table and file leave, less if that is more than this.
+	MaxRetainedBytes int64
 }
 
 const DefaultFontProgramBytes = 16 << 20
@@ -104,6 +111,7 @@ func (l Limits) ImagePixels() int64     { return def(l.MaxImagePixels, 500_000_0
 func (l Limits) Images() int64          { return def(l.MaxImages, l.PageStreamBytes()/512) }
 func (l Limits) InlineImages() int64    { return def(l.MaxInlineImages, l.PageStreamBytes()/512) }
 func (l Limits) Unresolved() int64      { return def(l.MaxUnresolved, l.PageStreamBytes()/512) }
+func (l Limits) RetainedBytes() int64   { return def(l.MaxRetainedBytes, 128<<20) }
 func (l Limits) ObjectStreamEntries() int64 {
 	return min(def(l.MaxObjectStreamEntries, l.Objects()), l.Objects())
 }
