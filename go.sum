@@ -1,7 +1,7 @@
 github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJv2v7Vk=
 github.com/clipperhouse/uax29/v2 v2.7.0/go.mod h1:EFJ2TJMRUaplDxHKj1qAEhCtQPW2tJSwu5BF98AuoVM=
-github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.2 h1:xPe/1rp74c1CZDHwEXmNP/jGj+Kou/5+Y6n+3VAcwH0=
-github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.2/go.mod h1:zMjQF5nYZ6A0yaG2d4GAj1QrzM5U8BZYDFHpuRwPuxQ=
+github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.3 h1:qoe/QL1GuumldAYiuUVe7lCE4Wl9ou9yB6W2Ri8VlLc=
+github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.3/go.mod h1:zMjQF5nYZ6A0yaG2d4GAj1QrzM5U8BZYDFHpuRwPuxQ=
 github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
 github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
 github.com/hhrutter/tiff v1.0.7 h1:Oelnv46vb9gycPsotT0q1IoJ6Ywkzd77I1smgQvkP7g=

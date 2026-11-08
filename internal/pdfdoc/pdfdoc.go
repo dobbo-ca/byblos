@@ -86,7 +86,7 @@ func defaultConfig() *model.Configuration {
 	conf.Limits.MaxObjectCount = int(limits.Limits{}.Objects())
 	conf.Limits.MaxObjectStreamTotalCount = int(limits.Limits{}.Objects())
 	conf.Limits.MaxTotalDecodeBytes = limits.Limits{}.StreamBytes()
-	conf.Limits.MaxParsedBytes = limits.ObjectTableBytes(limits.Limits{}.Objects()) + limits.Limits{}.StreamBytes()
+	conf.Limits.MaxParsedBytes = parsedBytes(limits.Limits{}, limits.ObjectTableBytes(limits.Limits{}.Objects()))
 	return conf
 }
 

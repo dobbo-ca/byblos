@@ -9,9 +9,12 @@ import (
 	"image"
 	"image/jpeg"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
 )
@@ -706,6 +709,96 @@ func TestOneHugeObjectIsRefused(t *testing.T) {
 			}
 			if delta > 128<<20 {
 				t.Errorf("TotalAlloc delta = %d MiB; want the parse stopped near the limit", delta>>20)
+			}
+		})
+	}
+}
+
+// peakHeap runs f with the collector keeping garbage to a tenth of the live
+// heap, and returns the most heap in use that a 1 ms sample saw.
+func peakHeap(f func()) uint64 {
+	defer debug.SetGCPercent(debug.SetGCPercent(10))
+	runtime.GC()
+	var peak atomic.Uint64
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		var m runtime.MemStats
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+				runtime.ReadMemStats(&m)
+				peak.Store(max(peak.Load(), m.HeapAlloc))
+			}
+		}
+	}()
+	f()
+	close(stop)
+	<-done
+	return peak.Load()
+}
+
+// tablePDF declares filler null objects, which size the object table the
+// reservation holds but use almost none of it, and one object of n copies of
+// elem written in place.
+func tablePDF(filler, n int, elem string) []byte {
+	var out bytes.Buffer
+	offs := map[int]int{}
+	obj := func(nr int, b string) { offs[nr] = out.Len(); fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", nr, b) }
+	out.WriteString("%PDF-1.4\n")
+	obj(1, "<< /Type /Catalog /Pages 2 0 R /X 5 0 R >>")
+	obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>")
+	obj(4, "null")
+	obj(5, "["+strings.Repeat(elem, n)+"]")
+	size := 6 + filler
+	for i := 6; i < size; i++ {
+		obj(i, "null")
+	}
+	xo := out.Len()
+	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", size)
+	for i := 1; i < size; i++ {
+		fmt.Fprintf(&out, "%010d 00000 n \n", offs[i])
+	}
+	fmt.Fprintf(&out, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", size, xo)
+	return out.Bytes()
+}
+
+// The object table is reserved for the objects a document declares, but filler
+// objects use almost none of it. One object of 210 000 "<</a 1>>" elements
+// (about 80 MB live) must not take that unused allowance: it is refused as
+// parsed-bytes under a 32 MiB budget, as it is under 300 MiB with a larger table.
+func TestHugeObjectCannotSpendTheUnusedTable(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		budget        int64
+		filler, elems int
+	}{
+		{"32MiB", 32 << 20, 19_000, 210_000},
+		{"300MiB", 300 << 20, 199_000, 2_100_000},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			defer limits.SetMemoryLimit(limits.SetMemoryLimit(c.budget))
+			pdf := tablePDF(c.filler, c.elems, "<</a 1>>")
+			var gotErr error
+			peak := peakHeap(func() {
+				d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), limits.Limits{})
+				if err == nil {
+					release()
+					_ = d
+				}
+				gotErr = err
+			})
+			err := gotErr
+			var le *limits.LimitError
+			if !errors.As(err, &le) || le.Name != "parsed-bytes" || !errors.Is(err, limits.ErrLimit) {
+				t.Fatalf("err = %v; want a permanent *LimitError parsed-bytes", err)
+			}
+			t.Logf("peak heap %d MiB", peak>>20)
+			if peak > uint64(c.budget) {
+				t.Errorf("peak heap = %d MiB; want the parse stopped inside the %d MiB budget", peak>>20, c.budget>>20)
 			}
 		})
 	}

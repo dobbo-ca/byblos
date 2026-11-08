@@ -71,7 +71,8 @@ type Limits struct {
 	// MaxParsedBytes caps the estimated heap of the array elements and
 	// dictionary entries pdfcpu parses over one parse. Decoded bytes do not
 	// bound it: 2 bytes of "[]" parse into about 40 of heap. Default: the
-	// object table the reservation holds plus MaxTotalDecodeBytes.
+	// object table the reservation holds, less the quarter its empty objects
+	// already use, plus MaxTotalDecodeBytes.
 	MaxParsedBytes int64
 }
 
