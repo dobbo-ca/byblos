@@ -56,6 +56,15 @@ func objectsIn(rs io.ReadSeeker) int64 {
 	return max(size, objectBound(rs))
 }
 
+// sizeOf is the length of rs, or 0 when it cannot seek.
+func sizeOf(rs io.ReadSeeker) int64 {
+	n, err := rs.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // objectBound is an upper bound on the objects with a header that pdfcpu can
 // create from the file, from one pass through a fixed buffer: every "obj" token
 // (not "endobj"), with no regard to the number before it. pdfcpu reads a header

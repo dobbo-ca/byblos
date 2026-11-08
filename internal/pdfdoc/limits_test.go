@@ -776,8 +776,8 @@ func TestHugeObjectCannotSpendTheUnusedTable(t *testing.T) {
 		budget        int64
 		filler, elems int
 	}{
-		{"32MiB", 32 << 20, 19_000, 210_000},
-		{"300MiB", 300 << 20, 199_000, 2_100_000},
+		{"32MiB", 32 << 20, 16_000, 330_000},
+		{"300MiB", 300 << 20, 170_000, 3_200_000},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			defer limits.SetMemoryLimit(limits.SetMemoryLimit(c.budget))
@@ -806,14 +806,14 @@ func TestHugeObjectCannotSpendTheUnusedTable(t *testing.T) {
 	}
 }
 
-// One 8 MB Flate stream named 16 times in /Contents is 128 MB of page content:
+// One 4 MB Flate stream named 16 times in /Contents is 64 MB of page content:
 // byblos decodes it outside pdfcpu's counters, so the page total is what must
 // hold, and under a budget it holds the decode slot, not the 128 MiB default.
 func TestRepeatedContentStreamIsRefusedUnderABudget(t *testing.T) {
 	defer limits.SetMemoryLimit(limits.SetMemoryLimit(32 << 20))
 	var z bytes.Buffer
 	zw := zlib.NewWriter(&z)
-	zw.Write(bytes.Repeat([]byte(" "), 8_000_000))
+	zw.Write(bytes.Repeat([]byte(" "), 4_000_000))
 	zw.Close()
 	var out bytes.Buffer
 	offs := map[int]int{}
@@ -895,8 +895,8 @@ func TestHostileScalarsAreRefusedUnderABudget(t *testing.T) {
 		{"name", "object-bytes", []string{"/" + strings.Repeat("a", 12*mib)}},
 		{"many keys", "parsed-bytes", []string{"<<" + keys.String() + ">>"}},
 		{"strings each under the object cap", "parsed-bytes", []string{
-			"(" + strings.Repeat("A", 5*mib) + ")", "(" + strings.Repeat("A", 5*mib) + ")",
-			"(" + strings.Repeat("A", 5*mib) + ")", "(" + strings.Repeat("A", 5*mib) + ")",
+			"(" + strings.Repeat("A", 2*mib) + ")", "(" + strings.Repeat("A", 2*mib) + ")",
+			"(" + strings.Repeat("A", 2*mib) + ")", "(" + strings.Repeat("A", 2*mib) + ")",
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

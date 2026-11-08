@@ -262,6 +262,7 @@ func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Documen
 		NeedsRendering: cat.NeedsRendering,
 	}
 	images := 0
+	dl := d.Limits()
 	for n := 1; n <= d.PageCount(); n++ {
 		if err := checkContext(ctx); err != nil {
 			return nil, err
@@ -295,7 +296,7 @@ func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Documen
 		// The per-page caps do not bound what the pages keep together: pages
 		// can share one content stream. The same caps hold for the document.
 		images += len(pi.Images)
-		if err := limits.Check("images", int64(images), lim.Images()+lim.InlineImages()); err != nil {
+		if err := limits.Check("images", int64(images), dl.Images()+dl.InlineImages()); err != nil {
 			return nil, err
 		}
 		di.Pages = append(di.Pages, *pi)

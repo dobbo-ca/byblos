@@ -279,6 +279,9 @@ type Doc interface {
 	// swallow (a form XObject over a stream cap); nil otherwise. Inspect checks
 	// it after each page.
 	Err() error
+	// Limits is the caps the document was opened under, as OpenBudgeted lowered
+	// them.
+	Limits() limits.Limits
 	// Catalog reports the signature and dynamic-XFA flags; see catalog.go.
 	Catalog() CatalogInfo
 	// EncryptInfo reports whether this document carries an /Encrypt
@@ -364,8 +367,19 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	// unreserved.
 	lim.MaxObjects = min(size+size/8+64, lim.Objects())
 	streams, total := lim.StreamBytes(), lim.TotalDecodeBytes()
+	// pdfcpu keeps the raw bytes of every stream it reads, referenced or not, so
+	// the parse holds up to the file's size; the walk keeps its image records
+	// for all pages. Both come off the budget before the decode slot.
+	fileBytes := sizeOf(rs)
+	var records int64
 	if budget > 0 {
-		slot := max((budget-limits.ObjectTableBytes(size))/4, minStream)
+		avail := budget - limits.ObjectTableBytes(size) - fileBytes
+		records = max(avail/8, 0)
+		slot := max((avail-records)/4, minStream)
+		// Pages can share one content stream, so the records of all pages count
+		// together: the cap on each kind is half of what the reservation holds.
+		lim.MaxImages = min(lim.Images(), records/limits.ImageRecordBytes/2)
+		lim.MaxInlineImages = min(lim.InlineImages(), records/limits.ImageRecordBytes/2)
 		streams, total = min(streams, slot), min(total, slot)
 		// The page's decoded streams are held while the next one decodes, so
 		// together they fit the slot, not the 128 MiB default.
@@ -379,7 +393,7 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	// stream decodes (one at a time) run in. A decode that reserved for itself
 	// while the document held its table would wait on that table, alone or
 	// against other documents doing the same, until ctx ended.
-	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+limits.DecodeBytes(max(streams, total, lim.ObjectBytes())))
+	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+fileBytes+records+limits.DecodeBytes(max(streams, total, lim.ObjectBytes())))
 	if err != nil {
 		return nil, nil, err
 	}

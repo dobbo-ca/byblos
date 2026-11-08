@@ -28,6 +28,11 @@ allocation. The estimate covers:
   per-object cost before the parse (pdfcpu v0.15.0 held 1512 to 1526 bytes
   live per object on a synthetic file of small dictionaries, against a
   96-byte `XRefTableEntry`; larger objects cost more);
+- the file itself: pdfcpu keeps the raw bytes of every stream it reads,
+  referenced or not (a 200 MB unreferenced stream held 191 MiB live under a
+  32 MiB reservation), so the reservation holds the file's size;
+- the image records the content walk keeps for all pages together (144 bytes
+  each);
 - decoded non-image streams, up to the per-page total;
 - the streaming page writer's current page;
 - archival-raster bands and PNG transcode rows.
@@ -128,7 +133,8 @@ returns an error wrapping `ErrPassword`.
 | Image streams | `RawImage` checks width x height against 500 000 000 px (`image-pixels`) from the dictionary, refuses a header with a width or height of 0 or less (pdfcpu reads a limit of 0 as its 512 MiB default and a negative one as none), then sets pdfcpu's per-stream decode limit (`Configuration.Limits.MaxDecodeBytes`) to the image's declared decoded size, four components at the declared depth plus one predictor byte per row (`image-bytes`; at least 1 MiB when the last filter is DCT, JPX or JBIG2, whose Flate layer yields compressed bytes). pdfcpu's default for the same decode is 512 MiB. byblos has no decoder of its own for these streams. The decoded bytes are the caller's to reserve. |
 | Font program | 16 MiB (`font-program-bytes`); a font over the cap is skipped, as before. |
 | pdfcpu | Object streams are decoded under 64 MiB (`MaxDecodeBytes`); `MaxObjectCount` is the `/Size` cap. `defaultConfig()` carries these and the two cumulative limits at their defaults, so Optimize, Properties and the writer's validator are bounded too. pdfcpu's typed refusals (`ErrLimitExceeded` for the cumulative limits, `filter.ErrDecodeLimitExceeded` for a per-stream decode) come back as `*LimitError` (`objects`, `stream-bytes`); its untyped object-range error on a trailer that understates `/Size` comes back as `*LimitError{objects}`. The cumulative limits exist only in the dobbo-ca fork of pdfcpu (below). |
-| Decode slot | The table and one decode are reserved together, once, for the document's life: 4 x the stream cap, which is the measured peak of pdfcpu's doubling output buffer. The slot is held whether or not the file has a large stream, because a deflate stream's size cannot be known before it is inflated. Where the budget cannot hold 4 x 64 MiB after the table, the stream cap is lowered to a quarter of what the table leaves (at least 1 MiB) and the document still opens (`MaxTotalDecodeBytes` is lowered with it, and a value above the stream cap is reserved for in full). Under a budget the page total (`page-stream-bytes`) is lowered to that slot as well, since a page's decoded streams are held while the next one decodes and the slot is all the reservation covers: one 8 MB stream named 16 times in `/Contents` was 128 MB of content under a 32 MiB budget. Without a budget nothing is reserved and the 128 MiB default stands; a stream past the lowered cap is refused as `stream-bytes`. Under kleio's 300 MiB, 40 000 objects leave a cap of about 59 MiB; a table that alone exceeds the budget is `memory-budget`, permanent. |
+| Decode slot | The table, the file's size, the image records and one decode are reserved together, once, for the document's life: the decode is 4 x the stream cap, which is the measured peak of pdfcpu's doubling output buffer. The slot is held whether or not the file has a large stream, because a deflate stream's size cannot be known before it is inflated. After the table and the file, an eighth of what is left is the image records and a quarter of the rest the slot. Where the budget cannot hold 4 x 64 MiB, the stream cap is lowered to that quarter (at least 1 MiB) and the document still opens (`MaxTotalDecodeBytes` is lowered with it, and a value above the stream cap is reserved for in full). Under a budget the page total (`page-stream-bytes`) is lowered to that slot as well, since a page's decoded streams are held while the next one decodes and the slot is all the reservation covers: one 8 MB stream named 16 times in `/Contents` was 128 MB of content under a 32 MiB budget. Without a budget nothing is reserved and the 128 MiB default stands; a stream past the lowered cap is refused as `stream-bytes`. Under kleio's 300 MiB, 40 000 objects leave a cap of about 59 MiB; a table plus file that alone exceed the budget is `memory-budget`, permanent: a 20 MB file with a 20 MB unreferenced stream is refused under a 16 MiB budget before pdfcpu reads it. |
+| Image records | `InspectDocument` records every image of every page until it returns, 144 bytes each (`TestImageRecordBytes`). Under a budget the records are reserved: an eighth of what the table and file leave, and the images and inline images of all pages together are held to half of that count each, so pages sharing one content stream cannot reach the unlowered 524 288 (75 MB) under a 32 MiB budget; about 14 500 each there. Past it, `*LimitError{images}`. |
 
 The caps are checked in `Open`, so every entry point that parses a document
 enforces them with their defaults. Only `InspectDocument` takes a `Limits` and
@@ -216,8 +222,8 @@ when the budget lands.
 
 ## Cost of the limiter
 
-`InspectDocument` takes one reservation per document, for the object table and
-one decode together, and releases it when the call returns. Uncontended, with a
+`InspectDocument` takes one reservation per document, for the object table, the
+file, the image records and one decode together, and releases it when the call returns. Uncontended, with a
 budget that never binds, a reservation and its release cost 12 ns at 1, 2 and 4
 CPUs (`BenchmarkReserve`, `internal/limits`). Contended, with a budget
 that holds two reservations while every CPU asks for one, so callers queue

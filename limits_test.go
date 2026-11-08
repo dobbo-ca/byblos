@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
@@ -512,5 +513,48 @@ func TestImagesAcrossPagesAreCapped(t *testing.T) {
 	var le *LimitError
 	if !errors.As(err, &le) || le.Name != "images" {
 		t.Fatalf("err = %v; want *LimitError images", err)
+	}
+}
+
+// The caller's caps would let these three pages record 3 x 12 000 images; under
+// a 32 MiB budget the records are reserved and the cap on all pages together is
+// what the reservation holds (about 29 000), not the unlowered 524 288.
+func TestImagesAcrossPagesAreCappedByTheBudget(t *testing.T) {
+	defer SetMemoryLimit(SetMemoryLimit(32 << 20))
+	pdf := pdfFile([]string{
+		catalog,
+		"<< /Type /Pages /Kids [3 0 R 3 0 R 3 0 R] /Count 3 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+		"<< /Length 96000 >>\nstream\n" + strings.Repeat("/Im0 Do\n", 12000) + "\nendstream",
+		"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\n0\nendstream",
+	}, "", 0)
+	_, err := InspectDocument(context.Background(), bytes.NewReader(pdf), Limits{})
+	var le *LimitError
+	if !errors.As(err, &le) || le.Name != "images" || !errors.Is(err, ErrLimit) {
+		t.Fatalf("err = %v; want a permanent *LimitError images", err)
+	}
+}
+
+// pdfcpu keeps the raw bytes of every stream, referenced or not, so a file
+// larger than the budget is refused before the parse, not parsed into memory.
+func TestFileBytesAreReserved(t *testing.T) {
+	defer SetMemoryLimit(SetMemoryLimit(16 << 20))
+	pdf := pdfFile([]string{
+		catalog,
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+		"<< /Length 20000000 >>\nstream\n" + strings.Repeat("x", 20_000_000) + "\nendstream",
+	}, "", 0)
+	_, err := InspectDocument(context.Background(), bytes.NewReader(pdf), Limits{})
+	var le *LimitError
+	if !errors.As(err, &le) || le.Name != "memory-budget" || errors.Is(err, ErrMemoryLimit) {
+		t.Fatalf("err = %v; want a permanent *LimitError memory-budget", err)
+	}
+}
+
+// The walk's image records are budgeted at limits.ImageRecordBytes each.
+func TestImageRecordBytes(t *testing.T) {
+	if got := int64(unsafe.Sizeof(ImageRef{})); got > limits.ImageRecordBytes {
+		t.Fatalf("ImageRef is %d bytes; limits.ImageRecordBytes is %d", got, limits.ImageRecordBytes)
 	}
 }
