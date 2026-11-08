@@ -11,6 +11,7 @@ package pdfdoc
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -25,7 +26,7 @@ func pageDict(t *testing.T, d Doc, n int) (types.Dict, *model.XRefTable) {
 	t.Helper()
 	dd := d.(*doc)
 	xt := dd.ctx.XRefTable
-	pd, _, _, err := xt.PageDict(n, false)
+	pd, _, _, err := xt.PageDict(context.Background(), n, false)
 	if err != nil {
 		t.Fatalf("PageDict(%d): %v", n, err)
 	}
@@ -376,7 +377,7 @@ func TestWrapContentValidates(t *testing.T) {
 
 			relaxed := model.NewDefaultConfiguration()
 			relaxed.ValidationMode = model.ValidationRelaxed
-			if err := api.Validate(bytes.NewReader(out), relaxed); err != nil {
+			if err := api.Validate(context.Background(), bytes.NewReader(out), relaxed, nil); err != nil {
 				t.Errorf("api.Validate(relaxed) = %v, want nil", err)
 			}
 		})

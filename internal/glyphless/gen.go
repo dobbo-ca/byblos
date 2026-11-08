@@ -216,8 +216,8 @@ func buildName() []byte {
 		s  string
 	}
 	recs := []rec{
-		{1, "Byblos Glyphless"},                      // Family
-		{2, "Regular"},                               // Subfamily
+		{1, "Byblos Glyphless"}, // Family
+		{2, "Regular"},          // Subfamily
 		{3, "Byblos Glyphless 1.0;byblos-glyphless"}, // Unique ID
 		{4, "Byblos Glyphless"},                      // Full name
 		{6, "BbyblosGlyphless"},                      // PostScript name: no spaces allowed

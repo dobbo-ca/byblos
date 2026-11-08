@@ -46,6 +46,7 @@ package pdfdoc_test
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"image"
 	"testing"
 
@@ -82,7 +83,7 @@ func ownerPasswordOnlyFixture(t *testing.T) []byte {
 	t.Helper()
 	conf := model.NewAESConfiguration("", "o", 128)
 	var out bytes.Buffer
-	if err := api.Encrypt(bytes.NewReader(plaintextFixture(t)), &out, conf); err != nil {
+	if err := api.Encrypt(context.Background(), bytes.NewReader(plaintextFixture(t)), &out, conf); err != nil {
 		t.Fatalf("api.Encrypt: %v", err)
 	}
 	return out.Bytes()
@@ -94,7 +95,7 @@ func ownerPasswordOnlyFixture(t *testing.T) []byte {
 // is the same second-read api.ReadContext the census tool uses.
 func hasEncryptDict(t *testing.T, data []byte) bool {
 	t.Helper()
-	ctx, err := api.ReadContext(bytes.NewReader(data), model.NewDefaultConfiguration())
+	ctx, err := api.ReadContext(context.Background(), bytes.NewReader(data), model.NewDefaultConfiguration())
 	if err != nil {
 		t.Fatalf("re-read output: %v", err)
 	}

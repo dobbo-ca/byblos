@@ -11,6 +11,7 @@ package pdfdoc
 // 4.1 are policy and live in the command.
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -95,7 +96,7 @@ func readBothForFonts(path string) (*model.Context, error) {
 	var bestN int
 	var firstErr error
 
-	if ctx, err := api.ReadContextFile(path); err == nil {
+	if ctx, err := api.ReadContextFile(context.Background(), path); err == nil {
 		if err := usableForFonts(ctx); err == nil {
 			best, bestN = ctx, countFontDicts(ctx)
 		} else {
@@ -109,7 +110,7 @@ func readBothForFonts(path string) (*model.Context, error) {
 
 	if f, err := os.Open(path); err == nil {
 		defer f.Close()
-		if ctx, err := api.ReadContext(f, defaultConfig()); err == nil {
+		if ctx, err := api.ReadContext(context.Background(), f, defaultConfig()); err == nil {
 			if err := usableForFonts(ctx); err != nil {
 				if firstErr == nil {
 					firstErr = err

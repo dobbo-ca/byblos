@@ -2,6 +2,7 @@ package pdfdoc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -138,7 +139,7 @@ func titledDoc(title string) []byte {
 // infoOf returns the built document's information dictionary entries.
 func infoOf(t *testing.T, out []byte) types.Dict {
 	t.Helper()
-	ctx, err := api.ReadContext(bytes.NewReader(out), defaultConfig())
+	ctx, err := api.ReadContext(context.Background(), bytes.NewReader(out), defaultConfig())
 	if err != nil {
 		t.Fatalf("re-reading: %v", err)
 	}
@@ -504,7 +505,7 @@ func TestBuildFromPagesPushesAnInheritedCropBoxDown(t *testing.T) {
 // migration that produced an object the writer then dropped is counted honestly.
 func countObjects(t *testing.T, out []byte, match func(types.Dict) bool) int {
 	t.Helper()
-	ctx, err := api.ReadContext(bytes.NewReader(out), defaultConfig())
+	ctx, err := api.ReadContext(context.Background(), bytes.NewReader(out), defaultConfig())
 	if err != nil {
 		t.Fatalf("re-reading the built document: %v", err)
 	}
@@ -640,7 +641,7 @@ func TestBuildFromPagesKeepsALinkBetweenTwoExportedPages(t *testing.T) {
 		t.Fatalf("the built document holds %d page dictionaries, want 2", got)
 	}
 
-	ctx, err := api.ReadContext(bytes.NewReader(out), defaultConfig())
+	ctx, err := api.ReadContext(context.Background(), bytes.NewReader(out), defaultConfig())
 	if err != nil {
 		t.Fatalf("re-reading: %v", err)
 	}
@@ -736,12 +737,12 @@ func TestBuildFromPagesRefusesAnEncryptedSource(t *testing.T) {
 	conf := defaultConfig()
 	conf.UserPW, conf.OwnerPW = "", "o"
 	var enc bytes.Buffer
-	if err := api.Encrypt(bytes.NewReader(corpusMust(t, "mixed")), &enc, conf); err != nil {
+	if err := api.Encrypt(context.Background(), bytes.NewReader(corpusMust(t, "mixed")), &enc, conf); err != nil {
 		t.Fatalf("building the encrypted fixture: %v", err)
 	}
 	// The fixture has to be encrypted AND openable without a password, or this
 	// proves nothing about the path under test.
-	ctx, err := api.ReadContext(bytes.NewReader(enc.Bytes()), defaultConfig())
+	ctx, err := api.ReadContext(context.Background(), bytes.NewReader(enc.Bytes()), defaultConfig())
 	if err != nil {
 		t.Fatalf("the fixture does not open without a password: %v", err)
 	}

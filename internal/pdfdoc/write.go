@@ -42,6 +42,7 @@ package pdfdoc
 // because that is not this seam's job -- see byb-b5 for the size policy.
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -290,7 +291,7 @@ func (d *doc) Write(w io.Writer) (err error) {
 // that one function.
 func Validate(r io.ReadSeeker) (err error) {
 	defer catchPanic("validate", &err)
-	if err := api.Validate(r, defaultConfig()); err != nil {
+	if err := api.Validate(context.Background(), r, defaultConfig(), nil); err != nil {
 		return fmt.Errorf("byblos/pdfdoc: validate: %w", err)
 	}
 	return nil

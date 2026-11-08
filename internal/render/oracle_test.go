@@ -747,20 +747,23 @@ func TestRenderFontRefusesIdentityV(t *testing.T) {
 	}
 }
 
-// hostileWCIDHugeFloatPDF's /W range-form cLast is 1e300: a float wildly out
-// of int range. Go's float64->int conversion of an out-of-range value is
-// implementation-defined, so clamping cLast to the CID space AFTER
-// converting it to int (rather than before, in float space) makes the
-// result arch-dependent -- verified with GOARCH=amd64: int(1e300) saturates
-// to +MaxInt64 on arm64 (clamp still applies) but wraps to -MaxInt64-1 on
-// amd64 (clamp never applies, the range silently contributes zero widths)
-// (byb-6z1 review finding 4).
+// hostileWCIDHugeFloatPDF's /W range-form cLast is 1.8e19: a decimal real
+// above MaxInt64, wildly out of int range. Go's float64->int conversion of an
+// out-of-range value is implementation-defined, so clamping cLast to the CID
+// space AFTER converting it to int (rather than before, in float space) makes
+// the result arch-dependent -- verified with GOARCH=amd64: the conversion
+// saturates to +MaxInt64 on arm64 (clamp still applies) but wraps to
+// -MaxInt64-1 on amd64 (clamp never applies, the range silently contributes
+// zero widths) (byb-6z1 review finding 4).
 func hostileWCIDHugeFloatPDF() []byte {
-	return cidWPDF("/W [0 1e300 500]")
+	// pdfcpu >= 0.16 rejects exponent notation and zeroes integers that
+	// overflow uint64, but a decimal real above MaxInt64 still parses as an
+	// out-of-int64 float.
+	return cidWPDF("/W [0 18000000000000000000.0 500]")
 }
 
 // TestRenderFontCIDWidthHugeFloatArchIndependent pins that a /W range with an
-// out-of-range float cLast (1e300) flattens the SAME way regardless of
+// out-of-range float cLast (1.8e19) flattens the SAME way regardless of
 // GOARCH: len(W) must be exactly 65536 (CIDs 0..65535, the whole CID space),
 // not 0 (amd64's wrapped-negative outcome under the pre-fix ordering).
 //

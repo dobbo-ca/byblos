@@ -10,6 +10,7 @@ package pdfdoc
 // contract every other pdfcpu-facing call in this package keeps.
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -26,7 +27,7 @@ import (
 // (byb-c53, deterministic.go).
 func Optimize(rs io.ReadSeeker, w io.Writer) (err error) {
 	defer catchPanic("optimize", &err)
-	ctx, err := api.ReadValidateAndOptimize(rs, defaultConfig())
+	ctx, err := api.ReadValidateAndOptimize(context.Background(), rs, defaultConfig(), nil)
 	if err != nil {
 		return fmt.Errorf("byblos/pdfdoc: optimize: %w", err)
 	}
