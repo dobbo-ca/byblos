@@ -793,8 +793,10 @@ func TestHugeObjectCannotSpendTheUnusedTable(t *testing.T) {
 			})
 			err := gotErr
 			var le *limits.LimitError
-			if !errors.As(err, &le) || le.Name != "parsed-bytes" || !errors.Is(err, limits.ErrLimit) {
-				t.Fatalf("err = %v; want a permanent *LimitError parsed-bytes", err)
+			// With the table this large the decode slot is small, so the object
+			// cap (object-bytes) can refuse it before the parsed total does.
+			if !errors.As(err, &le) || (le.Name != "parsed-bytes" && le.Name != "object-bytes") || !errors.Is(err, limits.ErrLimit) {
+				t.Fatalf("err = %v; want a permanent *LimitError parsed-bytes or object-bytes", err)
 			}
 			t.Logf("peak heap %d MiB", peak>>20)
 			if peak > uint64(c.budget) {
@@ -841,5 +843,86 @@ func TestRepeatedContentStreamIsRefusedUnderABudget(t *testing.T) {
 	}
 	if delta > 96<<20 {
 		t.Errorf("TotalAlloc delta = %d MiB; want the second reference refused", delta>>20)
+	}
+}
+
+// scalarsPDF is one catalog whose /X lists objects 5.. with the given bodies.
+func scalarsPDF(bodies ...string) []byte {
+	var out bytes.Buffer
+	offs := map[int]int{}
+	obj := func(nr int, b string) { offs[nr] = out.Len(); fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", nr, b) }
+	var refs strings.Builder
+	for i := range bodies {
+		fmt.Fprintf(&refs, "%d 0 R ", 5+i)
+	}
+	out.WriteString("%PDF-1.4\n")
+	obj(1, "<< /Type /Catalog /Pages 2 0 R /X ["+refs.String()+"] >>")
+	obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>")
+	obj(4, "null")
+	for i, b := range bodies {
+		obj(5+i, b)
+	}
+	size := 5 + len(bodies)
+	xo := out.Len()
+	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", size)
+	for i := 1; i < size; i++ {
+		fmt.Fprintf(&out, "%010d 00000 n \n", offs[i])
+	}
+	fmt.Fprintf(&out, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", size, xo)
+	return out.Bytes()
+}
+
+// A string, hex string or name is heap pdfcpu holds twice over while it reads
+// the object (the buffer, then the value), and neither the array element nor
+// dictionary entry charge saw its bytes: 60 MB of one string held 126 MiB live
+// under a 32 MiB budget, and four 65 MB strings (each under the per-object cap)
+// held 313 MB against a 256 MiB reservation. Each shape below, at a size a
+// 32 MiB budget cannot take, is a permanent *LimitError with the heap the parse
+// added kept inside the budget.
+func TestHostileScalarsAreRefusedUnderABudget(t *testing.T) {
+	const mib = 1 << 20
+	keys := new(strings.Builder)
+	for i := 0; i < 240_000; i++ {
+		fmt.Fprintf(keys, "/k%07d 1 ", i)
+	}
+	for _, c := range []struct {
+		name, limit string
+		bodies      []string
+	}{
+		{"string", "object-bytes", []string{"(" + strings.Repeat("A", 12*mib) + ")"}},
+		{"hex", "object-bytes", []string{"<" + strings.Repeat("41", 6*mib) + ">"}},
+		{"name", "object-bytes", []string{"/" + strings.Repeat("a", 12*mib)}},
+		{"many keys", "parsed-bytes", []string{"<<" + keys.String() + ">>"}},
+		{"strings each under the object cap", "parsed-bytes", []string{
+			"(" + strings.Repeat("A", 5*mib) + ")", "(" + strings.Repeat("A", 5*mib) + ")",
+			"(" + strings.Repeat("A", 5*mib) + ")", "(" + strings.Repeat("A", 5*mib) + ")",
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			defer limits.SetMemoryLimit(limits.SetMemoryLimit(32 << 20))
+			pdf := scalarsPDF(c.bodies...)
+			var base runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&base)
+			var gotErr error
+			peak := peakHeap(func() {
+				d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), limits.Limits{})
+				if err == nil {
+					release()
+					_ = d
+				}
+				gotErr = err
+			})
+			var le *limits.LimitError
+			if !errors.As(gotErr, &le) || le.Name != c.limit || !errors.Is(gotErr, limits.ErrLimit) || errors.Is(gotErr, limits.ErrMemoryLimit) {
+				t.Fatalf("err = %v; want a permanent *LimitError %s", gotErr, c.limit)
+			}
+			added := int64(peak) - int64(base.HeapAlloc)
+			t.Logf("heap added %d MiB", added>>20)
+			if added > 32*mib {
+				t.Errorf("heap added = %d MiB; want the parse stopped inside the 32 MiB budget", added>>20)
+			}
+		})
 	}
 }

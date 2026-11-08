@@ -86,6 +86,7 @@ func defaultConfig() *model.Configuration {
 	conf.Limits.MaxObjectCount = int(limits.Limits{}.Objects())
 	conf.Limits.MaxObjectStreamTotalCount = int(limits.Limits{}.Objects())
 	conf.Limits.MaxTotalDecodeBytes = limits.Limits{}.StreamBytes()
+	conf.Limits.MaxObjectBytes = limits.Limits{}.ObjectBytes()
 	conf.Limits.MaxParsedBytes = parsedBytes(limits.Limits{}, limits.ObjectTableBytes(limits.Limits{}.Objects()))
 	return conf
 }
@@ -95,6 +96,8 @@ func defaultConfig() *model.Configuration {
 // decode cap, and nil for any other error.
 func pdfcpuLimit(lim limits.Limits, err error) error {
 	switch {
+	case errors.Is(err, model.ErrObjectBytesExceeded):
+		return &limits.LimitError{Name: "object-bytes", Got: lim.ObjectBytes() + 1, Max: lim.ObjectBytes()}
 	case errors.Is(err, model.ErrParsedLimitExceeded):
 		n := parsedBytes(lim, limits.ObjectTableBytes(lim.Objects()))
 		return &limits.LimitError{Name: "parsed-bytes", Got: n + 1, Max: n}
@@ -367,13 +370,16 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 		// The page's decoded streams are held while the next one decodes, so
 		// together they fit the slot, not the 128 MiB default.
 		lim.MaxPageStreamBytes = min(lim.PageStreamBytes(), max(streams, total))
+		// The object buffer peaks at about 2.25x its size and a string parsed
+		// from it aliases it, so it fits the slot too.
+		lim.MaxObjectBytes = min(lim.ObjectBytes(), slot)
 	}
 	lim.MaxStreamBytes, lim.MaxTotalDecodeBytes = streams, total
 	// One reservation for the document's life: the object table and the slot its
 	// stream decodes (one at a time) run in. A decode that reserved for itself
 	// while the document held its table would wait on that table, alone or
 	// against other documents doing the same, until ctx ended.
-	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+limits.DecodeBytes(max(streams, total)))
+	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+limits.DecodeBytes(max(streams, total, lim.ObjectBytes())))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -407,6 +413,7 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 	// for a trailer that understates /Size.
 	conf.Limits.MaxDecodeBytes = lim.StreamBytes()
 	conf.Limits.MaxObjectCount = int(lim.Objects())
+	conf.Limits.MaxObjectBytes = lim.ObjectBytes()
 	// The cumulative limits of pergamon-go: pdfcpu reads an object stream's /N
 	// by its own rules, which no scan here tracks, so it counts the entries and
 	// the decoded bytes of the parse itself and refuses at the limit.

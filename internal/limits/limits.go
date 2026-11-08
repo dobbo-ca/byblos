@@ -68,8 +68,14 @@ type Limits struct {
 	// stream twice counts it twice). Default: MaxStreamBytes, so what the parse
 	// retains stays inside the one decode slot the reservation holds.
 	MaxTotalDecodeBytes int64
-	// MaxParsedBytes caps the estimated heap of the array elements and
-	// dictionary entries pdfcpu parses over one parse. Decoded bytes do not
+	// MaxObjectBytes caps one indirect object read into memory, stream
+	// payload excluded: its string, hex string and name bytes are in that
+	// buffer, which pdfcpu grows by copying (peak about 2.25x). Default:
+	// MaxStreamBytes, under a budget never more than the decode slot.
+	MaxObjectBytes int64
+	// MaxParsedBytes caps the estimated heap of the array elements,
+	// dictionary entries and string, hex string and name bytes (charged by
+	// length) pdfcpu parses over one parse. Decoded bytes do not
 	// bound it: 2 bytes of "[]" parse into about 40 of heap. Default: the
 	// object table the reservation holds, less the quarter its empty objects
 	// already use, plus MaxTotalDecodeBytes.
@@ -97,6 +103,7 @@ func (l Limits) ObjectStreamEntries() int64 {
 	return min(def(l.MaxObjectStreamEntries, l.Objects()), l.Objects())
 }
 func (l Limits) TotalDecodeBytes() int64 { return def(l.MaxTotalDecodeBytes, l.StreamBytes()) }
+func (l Limits) ObjectBytes() int64      { return def(l.MaxObjectBytes, l.StreamBytes()) }
 func (l Limits) FontProgramBytes() int64 { return def(l.MaxFontProgramBytes, DefaultFontProgramBytes) }
 
 // Check returns a *LimitError when got > max.

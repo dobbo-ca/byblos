@@ -17,4 +17,4 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 )
 
-replace github.com/pdfcpu/pdfcpu => github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.4
+replace github.com/pdfcpu/pdfcpu => github.com/dobbo-ca/pergamon-go v0.16.5-0.20261108195910-380e5785cbcf
