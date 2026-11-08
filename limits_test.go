@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -490,5 +491,25 @@ func TestInspectDocumentReportsCatalogFlags(t *testing.T) {
 				t.Errorf("got %+v; want signature=%v rendering=%v", di, c.signature, c.rendering)
 			}
 		})
+	}
+}
+
+// Pages that share one content stream each stay under the per-page image cap
+// and together hold far more than the document may.
+func TestImagesAcrossPagesAreCapped(t *testing.T) {
+	const pages = 3
+	kids := "[3 0 R 3 0 R 3 0 R]"
+	pdf := pdfFile([]string{
+		catalog,
+		fmt.Sprintf("<< /Type /Pages /Kids %s /Count %d >>", kids, pages),
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+		"<< /Length 560 >>\nstream\n" + strings.Repeat("/Im0 Do\n", 70) + "\nendstream",
+		"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\n0\nendstream",
+	}, "", 0)
+	lim := Limits{MaxImages: 100, MaxInlineImages: 100}
+	_, err := InspectDocument(context.Background(), bytes.NewReader(pdf), lim)
+	var le *LimitError
+	if !errors.As(err, &le) || le.Name != "images" {
+		t.Fatalf("err = %v; want *LimitError images", err)
 	}
 }

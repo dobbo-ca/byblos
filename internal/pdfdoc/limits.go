@@ -15,8 +15,7 @@ import (
 // dictionary) without parsing the file, so the object cap and the object-table
 // reservation come before pdfcpu allocates anything. Like a reader, it finds
 // the last startxref anywhere in the file (junk after %%EOF included) and
-// follows it. ok is false when there is no startxref or no /Size; pdfcpu then
-// reads or rebuilds the table under its own object-count cap.
+// follows it. ok is false when there is no startxref or no /Size there.
 func trailerSize(rs io.ReadSeeker) (size int64, ok bool) {
 	end, err := rs.Seek(0, io.SeekEnd)
 	if err != nil {
@@ -46,6 +45,53 @@ func trailerSize(rs io.ReadSeeker) (size int64, ok bool) {
 		return 0, false
 	}
 	return sizeIn(readAt(rs, t, 4096))
+}
+
+// objectsIn is trailerSize, or, where that reads no /Size, a count of the
+// object headers in the file. pdfcpu rebuilds the table of such a file by
+// scanning for them, and that scan ignores its object-count cap, so the count
+// is what the cap and the reservation have to rest on.
+func objectsIn(rs io.ReadSeeker) (int64, bool) {
+	if size, ok := trailerSize(rs); ok {
+		return size, true
+	}
+	n := headerCount(rs)
+	return n, n > 0
+}
+
+// headerCount counts "N G obj" headers (every "obj" that is not "endobj") in
+// one pass through a fixed buffer.
+func headerCount(rs io.ReadSeeker) (n int64) {
+	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+		return 0
+	}
+	const carry = len("endobj") - 1
+	buf := make([]byte, carry+64<<10)
+	kept := 0
+	for {
+		m, err := io.ReadFull(rs, buf[kept:])
+		b := buf[:kept+m]
+		n += endingAfter(b, "obj", kept) - endingAfter(b, "endobj", kept)
+		if err != nil {
+			return n
+		}
+		kept = copy(buf, b[len(b)-carry:])
+	}
+}
+
+// endingAfter counts occurrences of pat in b that end after offset kept, so a
+// match inside the bytes carried over from the previous chunk counts once.
+func endingAfter(b []byte, pat string, kept int) (n int64) {
+	for i := 0; ; {
+		j := bytes.Index(b[i:], []byte(pat))
+		if j < 0 {
+			return n
+		}
+		i += j + 1
+		if i-1+len(pat) > kept {
+			n++
+		}
+	}
 }
 
 // indexFrom returns the offset of the first occurrence of pat that starts in

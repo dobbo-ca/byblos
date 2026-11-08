@@ -299,3 +299,53 @@ func TestPaddedFilesPassLikeUnpaddedOnes(t *testing.T) {
 		})
 	}
 }
+
+// pdfcpu's rebuild of a table it cannot read ignores its object cap, so with no
+// usable /Size the file's object headers are counted and held to the cap.
+func TestRebuiltTableIsHeldToTheObjectCap(t *testing.T) {
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
+	bodies := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>",
+	}
+	for len(bodies) < 210_000 {
+		bodies = append(bodies, "<< >>")
+	}
+	pdf := limitsPDF(bodies)
+	// No xref, no trailer; and a startxref that lands on an object.
+	noXref := pdf[:bytes.Index(pdf, []byte("xref\n0 "))]
+	badOff := bytes.Replace(pdf, []byte("startxref\n"), []byte("startxref\n9 "), 1)
+	for name, f := range map[string][]byte{"no xref": noXref, "startxref on an object": badOff} {
+		_, release, err := OpenBudgeted(context.Background(), bytes.NewReader(f), limits.Limits{})
+		if err == nil {
+			release()
+		}
+		var le *limits.LimitError
+		if !errors.As(err, &le) || le.Name != "objects" {
+			t.Errorf("%s: err = %v; want *LimitError objects", name, err)
+		}
+	}
+}
+
+// A file a reader repairs may have lost its /Size; its big stream must still
+// fit the stream cap a 300 MiB budget allows.
+func TestRepairedFileKeepsItsStreamCap(t *testing.T) {
+	bodies := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>",
+	}
+	data := limitsZeros(t, 50<<20)
+	bodies = append(bodies, fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(data), data))
+	for len(bodies) < 1000 {
+		bodies = append(bodies, "<< >>")
+	}
+	pdf := limitsPDF(bodies)
+	i := bytes.LastIndex(pdf, []byte("startxref\n")) + len("startxref\n")
+	onObject := append(append([]byte{}, pdf[:i]...), "9\n%%EOF\n"...)
+	noNumber := append(append([]byte{}, pdf...), "junk startxref\n"...)
+	for name, f := range map[string][]byte{"startxref on an object": onObject, "startxref without a number": noNumber} {
+		t.Run(name, func(t *testing.T) { openBudgetedOK(t, f) })
+	}
+}

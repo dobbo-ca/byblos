@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
@@ -260,6 +261,7 @@ func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Documen
 		HasSignature:   cat.HasSignature,
 		NeedsRendering: cat.NeedsRendering,
 	}
+	images := 0
 	for n := 1; n <= d.PageCount(); n++ {
 		if err := checkContext(ctx); err != nil {
 			return nil, err
@@ -289,6 +291,12 @@ func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Documen
 				Severity: SeverityError,
 				Message:  err.Error(),
 			})
+		}
+		// The per-page caps do not bound what the pages keep together: pages
+		// can share one content stream. The same caps hold for the document.
+		images += len(pi.Images)
+		if err := limits.Check("images", int64(images), lim.Images()+lim.InlineImages()); err != nil {
+			return nil, err
 		}
 		di.Pages = append(di.Pages, *pi)
 	}
