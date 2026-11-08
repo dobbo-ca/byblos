@@ -45,9 +45,11 @@ import (
 	"fmt"
 	"hash/adler32"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/filter"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
@@ -77,7 +79,38 @@ var configOnce sync.Once
 // serialised.
 func defaultConfig() *model.Configuration {
 	configOnce.Do(func() { _ = model.NewDefaultConfiguration() })
-	return model.NewDefaultConfiguration()
+	conf := model.NewDefaultConfiguration()
+	// pdfcpu defaults to 512 MiB per decode and 10M objects; every entry point
+	// takes the package defaults. openDoc narrows them to the caller's Limits.
+	conf.Limits.MaxDecodeBytes = limits.Limits{}.StreamBytes()
+	conf.Limits.MaxObjectCount = int(limits.Limits{}.Objects())
+	conf.Limits.MaxObjectStreamTotalCount = int(limits.Limits{}.Objects())
+	conf.Limits.MaxTotalDecodeBytes = limits.Limits{}.StreamBytes()
+	conf.Limits.MaxObjectBytes = limits.Limits{}.ObjectBytes()
+	conf.Limits.MaxParsedBytes = parsedBytes(limits.Limits{}, limits.ObjectTableBytes(limits.Limits{}.Objects()))
+	return conf
+}
+
+// pdfcpuLimit is the *LimitError for a refusal by one of pdfcpu's cumulative
+// limits (object stream entries, decoded bytes per parse) or its per-stream
+// decode cap, and nil for any other error.
+func pdfcpuLimit(lim limits.Limits, err error) error {
+	switch {
+	case errors.Is(err, model.ErrObjectBytesExceeded):
+		return &limits.LimitError{Name: "object-bytes", Got: lim.ObjectBytes() + 1, Max: lim.ObjectBytes()}
+	case errors.Is(err, model.ErrStreamTotalLimitExceeded):
+		return &limits.LimitError{Name: "file-stream-bytes", Got: lim.MaxStreamTotalBytes + 1, Max: lim.MaxStreamTotalBytes}
+	case errors.Is(err, model.ErrParsedLimitExceeded):
+		n := parsedBytes(lim, limits.ObjectTableBytes(lim.Objects()))
+		return &limits.LimitError{Name: "parsed-bytes", Got: n + 1, Max: n}
+	case errors.Is(err, model.ErrLimitExceeded) && errors.Is(err, filter.ErrDecodeLimitExceeded):
+		return &limits.LimitError{Name: "stream-bytes", Got: lim.TotalDecodeBytes() + 1, Max: lim.TotalDecodeBytes()}
+	case errors.Is(err, model.ErrLimitExceeded):
+		return &limits.LimitError{Name: "objects", Got: lim.ObjectStreamEntries() + 1, Max: lim.ObjectStreamEntries()}
+	case errors.Is(err, filter.ErrDecodeLimitExceeded):
+		return &limits.LimitError{Name: "stream-bytes", Got: lim.StreamBytes() + 1, Max: lim.StreamBytes()}
+	}
+	return nil
 }
 
 // ErrUnsupportedCodec reports an image stream whose compression filter pdfcpu
@@ -244,6 +277,15 @@ type Doc interface {
 	// ImageInfo returns the dictionary facts for an image resolved by XObject,
 	// keyed by the ID that XObject returned.
 	ImageInfo(id int) (ImageInfo, bool)
+	// Err is the first limit breach a lookup that can only answer "no" had to
+	// swallow (a form XObject over a stream cap); nil otherwise. Inspect checks
+	// it after each page.
+	Err() error
+	// Limits is the caps the document was opened under, as OpenBudgeted lowered
+	// them.
+	Limits() limits.Limits
+	// Catalog reports the signature and dynamic-XFA flags; see catalog.go.
+	Catalog() CatalogInfo
 	// EncryptInfo reports whether this document carries an /Encrypt
 	// dictionary, and its /P, /V, /R when so. See encryptinfo.go.
 	EncryptInfo() EncryptInfo
@@ -279,6 +321,12 @@ type doc struct {
 	nextID    int                          // synthetic ids for direct (non-indirect) image objects
 	fontRefs  map[string]types.IndirectRef // embedded fonts, keyed by TrueTypeFont.BaseFont
 	fontCache map[int]fontCacheEntry       // RenderFont results, keyed like images
+	numArrays map[int][]float64            // numberArray results for indirect arrays, keyed by object number
+
+	lim       limits.Limits
+	pageBytes int64          // decoded non-image stream bytes of the current page
+	pageForms map[int][]byte // decoded forms already counted in pageBytes, shared by every Do of one form
+	limitErr  error          // first limit breach a bool-returning lookup had to swallow
 }
 
 type scope struct {
@@ -292,17 +340,131 @@ type scope struct {
 //
 // rs is read once, here. Nothing below re-reads it, so a file this function
 // accepts cannot later be rejected by a validator Byblos opted out of.
-func Open(rs io.ReadSeeker) (d Doc, err error) {
+func Open(rs io.ReadSeeker) (Doc, error) {
+	return openDoc(context.Background(), rs, limits.Limits{})
+}
+
+// OpenBudgeted is Open under lim, with the object table and one stream decode
+// reserved from the package memory budget (limits.SetMemoryLimit) before pdfcpu
+// parses. The returned release gives the reservation back; call it when done
+// with the document. The reservation comes from objectsIn: the larger of the
+// trailer /Size and the count of "obj" headers, found in one pass before pdfcpu
+// reads anything, because pdfcpu rebuilds the table by scanning whenever it
+// distrusts the trailer and that scan ignores its object-count cap. pdfcpu's
+// cap is held to that count (plus an eighth), and the objects packed in object
+// streams, which have no header, to the same count in total.
+//
+// The decode slot is 4 x the stream cap, but never more than the budget leaves
+// after the table: lim's stream cap is lowered to fit, so a budget that cannot
+// hold a 64 MiB decode still takes the document, and refuses only a stream
+// that would not fit.
+func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, func(), error) {
+	size := objectsIn(rs)
+	if err := limits.Check("objects", size, lim.Objects()); err != nil {
+		return nil, nil, err
+	}
+	budget := limits.MemoryLimit()
+	const minStream = 1 << 20
+	// A linearized file's last trailer can sit a few entries under the real
+	// count, so the cap has a margin; it is the most an understated /Size parses
+	// unreserved.
+	lim.MaxObjects = min(size+size/8+64, lim.Objects())
+	streams, total := lim.StreamBytes(), lim.TotalDecodeBytes()
+	// pdfcpu keeps the raw bytes of every stream it reads, referenced or not, so
+	// the parse holds up to the file's size; the walk keeps its image records
+	// for all pages. Both come off the budget before the decode slot.
+	fileBytes := sizeOf(rs)
+	var records, retained int64
+	if budget > 0 {
+		avail := budget - limits.ObjectTableBytes(size) - fileBytes
+		records = max(avail/8, 0)
+		// A page's walk keeps its paints, text shows and strings while the
+		// page's streams are decoded: a fifth of the avail, more than that
+		// only for the record caps at their maximum (about 66 MiB).
+		retained = min(max(avail/5, 0), lim.RetainedBytes())
+		lim.MaxRetainedBytes = max(retained, 1)
+		slot := max((avail-records-retained)/4, minStream)
+		// Pages can share one content stream, so the records of all pages count
+		// together: the cap on each kind is half of what the reservation holds.
+		lim.MaxImages = min(lim.Images(), records/limits.ImageRecordBytes/2)
+		lim.MaxInlineImages = min(lim.InlineImages(), records/limits.ImageRecordBytes/2)
+		streams, total = min(streams, slot), min(total, slot)
+		// The page's decoded streams are held while the next one decodes, so
+		// together they fit the slot, not the 128 MiB default.
+		lim.MaxPageStreamBytes = min(lim.PageStreamBytes(), max(streams, total))
+		// The object buffer peaks at about 2.25x its size and a string parsed
+		// from it aliases it, so it fits the slot too.
+		lim.MaxObjectBytes = min(lim.ObjectBytes(), slot)
+		// pdfcpu holds a stream once per xref entry that reads it, so the
+		// file's size is not a bound on its own: hold the reads to it.
+		lim.MaxStreamTotalBytes = fileBytes
+	}
+	lim.MaxStreamBytes, lim.MaxTotalDecodeBytes = streams, total
+	// One reservation for the document's life: the object table and the slot its
+	// stream decodes (one at a time) run in. A decode that reserved for itself
+	// while the document held its table would wait on that table, alone or
+	// against other documents doing the same, until ctx ended.
+	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+fileBytes+records+retained+limits.DecodeBytes(max(streams, total, lim.ObjectBytes())))
+	if err != nil {
+		return nil, nil, err
+	}
+	d, err := openSized(ctx, rs, lim, size)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return d, release, nil
+}
+
+// openDoc is Open with the caps of lim. The /Size cap is checked before the parse
+// on every path; only OpenBudgeted also reserves memory.
+func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
+	return openSized(cctx, rs, lim, objectsIn(rs))
+}
+
+// openSized is openDoc given the object count objectsIn found.
+func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size int64) (d Doc, err error) {
 	defer catchPanic("open", &err)
+	if err := limits.Check("objects", size, lim.Objects()); err != nil {
+		return nil, err
+	}
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: seek: %w", err)
 	}
-	ctx, err := api.ReadContext(context.Background(), rs, defaultConfig())
+	conf := defaultConfig()
+	// pdfcpu decodes object streams and image streams under
+	// Limits.MaxDecodeBytes, which defaults to 512 MiB; RawImage raises it per
+	// image to that image's declared size. The object-count cap is the backstop
+	// for a trailer that understates /Size.
+	conf.Limits.MaxDecodeBytes = lim.StreamBytes()
+	conf.Limits.MaxObjectCount = int(lim.Objects())
+	conf.Limits.MaxObjectBytes = lim.ObjectBytes()
+	// The cumulative limits of pergamon-go: pdfcpu reads an object stream's /N
+	// by its own rules, which no scan here tracks, so it counts the entries and
+	// the decoded bytes of the parse itself and refuses at the limit.
+	conf.Limits.MaxObjectStreamTotalCount = int(lim.ObjectStreamEntries())
+	conf.Limits.MaxTotalDecodeBytes = lim.TotalDecodeBytes()
+	conf.Limits.MaxParsedBytes = parsedBytes(lim, limits.ObjectTableBytes(size))
+	conf.Limits.MaxStreamTotalBytes = lim.MaxStreamTotalBytes
+	ctx, err := api.ReadContext(cctx, rs, conf)
 	if err != nil {
+		if le := pdfcpuLimit(lim, err); le != nil {
+			return nil, le
+		}
+		// A trailer that understates /Size is caught by pdfcpu's own count, untyped.
+		if strings.Contains(err.Error(), "xref subsection object range exceeds limit") {
+			return nil, &limits.LimitError{Name: "objects", Got: lim.Objects() + 1, Max: lim.Objects()}
+		}
 		return nil, fmt.Errorf("byblos/pdfdoc: read: %w", err)
 	}
 	if err := ctx.EnsurePageCount(); err != nil {
+		if le := pdfcpuLimit(lim, err); le != nil {
+			return nil, le
+		}
 		return nil, fmt.Errorf("byblos/pdfdoc: page count: %w", err)
+	}
+	if err := limits.Check("pages", int64(ctx.PageCount), lim.Pages()); err != nil {
+		return nil, err
 	}
 	if root, err := ctx.XRefTable.Pages(); err == nil && root != nil {
 		normalizePageTree(ctx.XRefTable, *root, map[int]bool{})
@@ -313,6 +475,7 @@ func Open(rs io.ReadSeeker) (d Doc, err error) {
 		streams: map[int]*types.StreamDict{},
 		refs:    map[int]types.IndirectRef{},
 		nextID:  -1,
+		lim:     lim,
 	}, nil
 }
 
@@ -410,6 +573,10 @@ func (d *doc) Page(n int) (p *Page, err error) {
 	// changed answer because of it.
 	pd, _, inh, err := xt.PageDict(context.Background(), n, false)
 	if err != nil {
+		// Object streams are decoded when first read, so the cumulative limits can end a page.
+		if le := pdfcpuLimit(d.lim, err); le != nil {
+			return nil, le
+		}
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}
 	if pd == nil || inh == nil {
@@ -440,6 +607,9 @@ func (d *doc) Page(n int) (p *Page, err error) {
 		mb = types.RectForDim(defaultPageWidthPt, defaultPageHeightPt)
 	}
 
+	// A form Do appends a scope each, so keeping them for the document grows
+	// with pages x draws. A Page's Scope is valid until the next Page call.
+	d.scopes = d.scopes[:0]
 	p = &Page{
 		Index:             n,
 		MediaBox:          rectOf(mb),
@@ -470,6 +640,9 @@ func (d *doc) Page(n int) (p *Page, err error) {
 	// seven disagreements were this, 3% of the sample lost outright.
 	c, recovered, err := d.pageContents(pd)
 	if err != nil {
+		if le := pdfcpuLimit(d.lim, err); le != nil {
+			return nil, le
+		}
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d content: %w", n, err)
 	}
 	p.Content, p.ContentRecovered = c, recovered
@@ -505,6 +678,8 @@ func (d *doc) Page(n int) (p *Page, err error) {
 // invisible to the suite and would change the content bytes of every clean
 // multi-element page in the corpus.
 func (d *doc) pageContents(pd types.Dict) (content []byte, recovered bool, err error) {
+	// A new page: the running total of decoded non-image streams starts over.
+	d.pageBytes, d.pageForms = 0, nil
 	if _, ok := pd.Find("Contents"); !ok {
 		return nil, false, nil
 	}
@@ -547,7 +722,11 @@ func (d *doc) pageContents(pd types.Dict) (content []byte, recovered bool, err e
 		if !ok {
 			continue
 		}
-		if err := s.Decode(); err != nil {
+		if err := d.decode(&s, true); err != nil {
+			// A cap or budget refusal is the document's, not damage in one element.
+			if isLimit(err) {
+				return nil, recovered, err
+			}
 			// A DAMAGED ELEMENT MUST NOT FAIL THE WHOLE PAGE. That is what v0.13
 			// did, in relaxed mode, and a version bump is not licence to lose a
 			// page byblos used to read: measured, refusing here dropped a healthy
@@ -573,7 +752,7 @@ func (d *doc) pageContents(pd types.Dict) (content []byte, recovered bool, err e
 				recovered = true
 				continue
 			}
-			if repaired, ok := decodeRecovering(s); ok {
+			if repaired, ok := d.decodeRecovering(s); ok {
 				buf.Write(repaired)
 			} else {
 				dropped++
@@ -632,7 +811,11 @@ func (d *doc) pageContents(pd types.Dict) (content []byte, recovered bool, err e
 //
 // ok is false when some layer cannot be decoded even after a repair, and its
 // element is then DROPPED rather than failing the page -- see pageContents.
-func decodeRecovering(s types.StreamDict) ([]byte, bool) {
+func (d *doc) decodeRecovering(s types.StreamDict) ([]byte, bool) {
+	max := min(d.lim.StreamBytes(), d.lim.PageStreamBytes()-d.pageBytes)
+	if max <= 0 {
+		return nil, false
+	}
 	data := s.Raw
 	for _, f := range s.FilterPipeline {
 		// One filter, over the bytes the previous one produced. DecodeParms travels
@@ -642,7 +825,7 @@ func decodeRecovering(s types.StreamDict) ([]byte, bool) {
 		step.Raw = data
 		step.FilterPipeline = []types.PDFFilter{f}
 		step.Content = nil
-		err := step.Decode()
+		err := step.DecodeWithLimit(max)
 		if err == nil {
 			data = step.Content
 			continue
@@ -667,7 +850,7 @@ func decodeRecovering(s types.StreamDict) ([]byte, bool) {
 		}
 		step.Raw = repaired
 		step.Content = nil
-		if err := step.Decode(); err != nil {
+		if err := step.DecodeWithLimit(max); err != nil {
 			return nil, false
 		}
 		data = step.Content
@@ -759,11 +942,8 @@ func repairTrailer(zstream []byte) ([]byte, bool) {
 
 // addScope appends a resource scope and returns its handle.
 //
-// Known simplification: scopes are never reused, so calling Page twice or
-// resolving the same form twice appends duplicate entries. They are equivalent,
-// so this is a small waste rather than a bug, and a document has at most a few
-// thousand of them. Memoize per page index and per (scope, name) if a real
-// archive ever shows it matters.
+// Scopes live for one page: Page resets them. Resolving the same form
+// twice on a page appends duplicate entries, bounded by the walk's form cap.
 func (d *doc) addScope(res types.Dict, parent int) int {
 	d.scopes = append(d.scopes, scope{res: res, parent: parent})
 	return len(d.scopes) - 1
@@ -818,8 +998,24 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 		return content.XObject{Image: true, ID: id}, true
 
 	case "Form":
-		if err := sd.Decode(); err != nil {
-			return content.XObject{}, false
+		// A form invoked many times on a page is decoded once and counts once;
+		// every Do shares that buffer, so a form that draws itself holds one
+		// decode, not one per nesting level.
+		if c, ok := d.pageForms[id]; ok && id >= 0 {
+			sd.Content = c
+		} else {
+			if err := d.decode(sd, true); err != nil {
+				if isLimit(err) && d.limitErr == nil {
+					d.limitErr = err
+				}
+				return content.XObject{}, false
+			}
+			if id >= 0 {
+				if d.pageForms == nil {
+					d.pageForms = map[int][]byte{}
+				}
+				d.pageForms[id] = sd.Content
+			}
 		}
 		m := content.Identity
 		if arr := d.arrayEntry(sd.Dict, "Matrix"); len(arr) == 6 {
@@ -952,18 +1148,6 @@ type RenderFont struct {
 // from a declared count).
 const maxCIDWidthEntries = 65536
 
-// maxFontProgramBytes bounds how large a single decoded /FontFile,
-// /FontFile2 or /FontFile3 stream may grow to. Without it, a compressed font
-// program is an ordinary flate bomb: a 131,407-byte PDF with a 130,466-byte
-// /FontFile2 stream decodes to 128 MiB and drags 512 MiB of TotalAlloc
-// behind it (byb-utl). 16<<20 is this module's stated per-unit memory
-// concession (see internal/jbig2's maxStreamBitmapBytes); a census of the
-// pinned sample's 124,790 font-bearing pages found the single largest
-// decoded font program at 1,043,560 bytes, so the bound is a 16x margin over
-// anything actually seen. Enforced during decode via DecodeWithLimit, not
-// after the bytes already exist.
-const maxFontProgramBytes = 16 << 20
-
 // RenderFont resolves the named /Font resource for rendering. A composite
 // /Subtype /Type0 font (byb-6z1) is resolved through its descendant CIDFont
 // when /Encoding is Identity-H, per render.Font's own contract (text.go)
@@ -1073,15 +1257,15 @@ func (d *doc) renderFont(sc int, name string) (rf RenderFont, err error) {
 		if err != nil || sd == nil {
 			continue
 		}
-		if err := sd.DecodeWithLimit(maxFontProgramBytes); err != nil {
+		if err := sd.DecodeWithLimit(d.lim.FontProgramBytes()); err != nil {
 			continue
 		}
-		if len(sd.Content) > maxFontProgramBytes {
+		if int64(len(sd.Content)) > d.lim.FontProgramBytes() {
 			// DecodeWithLimit only consults maxDecodeBytes inside a filter
 			// stage: an unfiltered stream (no /Filter, or a preserved image
 			// filter) returns sd.Raw untouched (types.StreamDict.
 			// DecodeLengthWithLimit), so a literal oversized program must be
-			// bounded here too -- see maxFontProgramBytes.
+			// bounded here too -- see limits.DefaultFontProgramBytes.
 			continue
 		}
 		rf.Program = sd.Content
@@ -1151,8 +1335,41 @@ func (d *doc) RawImage(id int) (data []byte, fileType string, err error) {
 	if !ok {
 		return nil, "", fmt.Errorf("byblos/pdfdoc: image %d has not been resolved on this document", id)
 	}
+	// The image's own header bounds its decode: pixels first, then pdfcpu's
+	// per-stream decode limit set to the declared decoded size (experiment 4:
+	// pdfcpu applies Conf.Limits.MaxDecodeBytes, 512 MiB by default, to image
+	// streams and byblos has no decoder of its own for them).
+	info := d.images[id]
+	// A forged header must not reach pdfcpu: it reads a limit of 0 as its 512 MiB
+	// default and a negative one as no limit.
+	if info.Width <= 0 || info.Height <= 0 {
+		return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: invalid dimensions %d x %d", id, info.Width, info.Height)
+	}
+	if err := limits.Check("image-pixels", int64(info.Width)*int64(info.Height), d.lim.ImagePixels()); err != nil {
+		return nil, "", err
+	}
+	declared := imageDecodeBytes(info.Width, info.Height, info.BPC)
+	// The bound is on pixels. When the last filter is a codec, the layers in
+	// front of it (Flate around DCT) yield compressed bytes, which for a tiny
+	// image outweigh its pixels, so they get a floor.
+	if n := len(sd.FilterPipeline); n > 0 {
+		switch sd.FilterPipeline[n-1].Name {
+		case "DCTDecode", "JPXDecode", "JBIG2Decode":
+			declared = max(declared, 1<<20)
+		}
+	}
+	if declared <= 0 { // overflow
+		return nil, "", &limits.LimitError{Name: "image-bytes", Got: d.lim.StreamBytes() + 1, Max: d.lim.StreamBytes()}
+	}
+	lims := &d.ctx.Configuration.Limits
+	saved := lims.MaxDecodeBytes
+	lims.MaxDecodeBytes = declared
+	defer func() { lims.MaxDecodeBytes = saved }()
 	im, err := pdfcpu.ExtractImage(context.Background(), d.ctx, sd, false, d.images[id].Name, id, false)
 	if err != nil {
+		if errors.Is(err, filter.ErrDecodeLimitExceeded) {
+			return nil, "", &limits.LimitError{Name: "image-bytes", Got: declared + 1, Max: declared}
+		}
 		return nil, "", fmt.Errorf("byblos/pdfdoc: rendering image %d: %w", id, err)
 	}
 	// pdfcpu signals "I will not render this filter" by returning a nil reader
@@ -1217,7 +1434,10 @@ func (d *doc) RawImageGlobals(id int) (globals []byte, err error) {
 	if gsd == nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: image %d: /JBIG2Globals does not resolve to a stream", id)
 	}
-	if err := gsd.Decode(); err != nil {
+	if err := d.decode(gsd, false); err != nil {
+		if isLimit(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("byblos/pdfdoc: image %d: decoding /JBIG2Globals: %w", id, err)
 	}
 	return gsd.Content, nil
@@ -1354,11 +1574,32 @@ func (d *doc) filterName(dict types.Dict) string {
 // element is one. All-or-nothing on purpose: a partly-read array is a remap a
 // caller cannot apply, and returning it with holes in it invites applying it
 // anyway.
+//
+// An indirect array is converted once and every caller shares the result, which
+// must not be modified: pdfcpu parses the array once, but d.images and the
+// font records outlive the walk, and K images naming one M-entry array would
+// otherwise hold K*8*M bytes no account sees. A direct array belongs to one
+// dictionary the parse already counted.
 func (d *doc) numberArray(dict types.Dict, key string) []float64 {
 	arr := d.arrayEntry(dict, key)
 	if len(arr) == 0 {
 		return nil
 	}
+	if ref, ok := dict[key].(types.IndirectRef); ok {
+		if out, ok := d.numArrays[ref.ObjectNumber.Value()]; ok {
+			return out
+		}
+		out := d.readNumbers(arr)
+		if d.numArrays == nil {
+			d.numArrays = map[int][]float64{}
+		}
+		d.numArrays[ref.ObjectNumber.Value()] = out
+		return out
+	}
+	return d.readNumbers(arr)
+}
+
+func (d *doc) readNumbers(arr types.Array) []float64 {
 	out := make([]float64, len(arr))
 	for i, o := range arr {
 		v, ok := d.number(o)

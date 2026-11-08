@@ -2,6 +2,7 @@ package byblos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
@@ -193,6 +195,21 @@ type Diagnostic struct {
 	Message  string
 }
 
+// DocumentInfo is what Inspect learns about a whole document: its pages, and
+// the three facts about the file as a whole that decide whether it may be
+// processed at all.
+type DocumentInfo struct {
+	Pages []PageInfo
+	// Encrypted: the document carries /Encrypt and opened with the empty
+	// password (owner-password-only). A document that needs a user password
+	// does not open: the error wraps ErrPassword.
+	Encrypted bool
+	// HasSignature: /AcroForm /SigFlags bit 1 (SignaturesExist) is set.
+	HasSignature bool
+	// NeedsRendering: the catalog's /NeedsRendering is true (dynamic XFA).
+	NeedsRendering bool
+}
+
 // Inspect reports what every page of r contains. It does not render anything.
 //
 // It cannot be cancelled. Use InspectContext when the caller has a deadline.
@@ -200,7 +217,8 @@ func Inspect(r io.ReadSeeker) ([]PageInfo, error) {
 	return InspectContext(context.Background(), r)
 }
 
-// InspectContext is Inspect, cancellable at each page boundary (byb-xyn).
+// InspectContext is Inspect, cancellable at each page boundary (byb-xyn), under
+// the default Limits.
 //
 // CANCELLATION LATENCY: MOST OF THE CALL, despite the per-page check, and the
 // per-page check is not the reason. pdfdoc.Open runs before the loop and is a
@@ -211,19 +229,53 @@ func Inspect(r io.ReadSeeker) ([]PageInfo, error) {
 // worth having, but it does not bound the CALL: a caller must still budget for
 // a full pdfcpu parse. See context.go.
 func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
-	if err := checkContext(ctx); err != nil {
-		return nil, err
-	}
-	d, err := pdfdoc.Open(r)
+	di, err := InspectDocument(ctx, r, Limits{})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]PageInfo, 0, d.PageCount())
+	return di.Pages, nil
+}
+
+// InspectDocument is InspectContext under lim, and also reports the
+// document-level facts of DocumentInfo. The object table (from the trailer
+// /Size) and one stream decode are reserved from the package memory
+// budget (SetMemoryLimit) before they are allocated. A breached cap returns a
+// *LimitError; a budget held by others returns ErrMemoryLimit. The cancellation
+// latency is InspectContext's.
+func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*DocumentInfo, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	d, release, err := pdfdoc.OpenBudgeted(ctx, r, lim)
+	if err != nil {
+		if pdfdoc.IsWrongPassword(err) {
+			return nil, fmt.Errorf("%w: %w", ErrPassword, err)
+		}
+		return nil, err
+	}
+	defer release()
+	cat := d.Catalog()
+	di := &DocumentInfo{
+		Pages:          make([]PageInfo, 0, d.PageCount()),
+		Encrypted:      d.EncryptInfo().Encrypted,
+		HasSignature:   cat.HasSignature,
+		NeedsRendering: cat.NeedsRendering,
+	}
+	images := 0
+	dl := d.Limits()
 	for n := 1; n <= d.PageCount(); n++ {
 		if err := checkContext(ctx); err != nil {
 			return nil, err
 		}
 		pi, _, err := inspectPage(ctx, d, n)
+		// A cap or budget refusal is the document's, not a page byblos worked
+		// around: it fails the call, whichever layer noticed it.
+		if derr := d.Err(); derr != nil {
+			err = derr
+		}
+		if errors.Is(err, ErrLimit) || errors.Is(err, ErrMemoryLimit) {
+			return nil, err
+		}
 		if err != nil {
 			// Cancellation is not a defect in the document. Reporting it as a
 			// page diagnostic would hand back a document that was never read.
@@ -241,9 +293,15 @@ func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
 				Message:  err.Error(),
 			})
 		}
-		out = append(out, *pi)
+		// The per-page caps do not bound what the pages keep together: pages
+		// can share one content stream. The same caps hold for the document.
+		images += len(pi.Images)
+		if err := limits.Check("images", int64(images), dl.Images()+dl.InlineImages()); err != nil {
+			return nil, err
+		}
+		di.Pages = append(di.Pages, *pi)
 	}
-	return out, nil
+	return di, nil
 }
 
 // inspectPage returns the page's PageInfo alongside the raw walk, which

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"unsafe"
+
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // Matrix is a PDF transformation matrix [a b c d e f] in the row-vector
@@ -374,11 +377,46 @@ type Scan struct {
 	// order counts painting events, so that Paint.Index and Placement.Index can
 	// be compared. It is walk state, not part of what a walk reports.
 	order int
+	// retained is the bytes the walk has charged for what it keeps (keep).
+	retained int64
 	// forms counts Form XObject invocations across the WHOLE page, not per
 	// nesting level, which is why it lives here and not in walk's locals:
 	// doXObject recurses into a fresh walk and the count has to survive that.
 	// Walk state, like order.
 	forms int
+	lim   limits.Limits
+}
+
+// Element sizes the retained-bytes account charges, so a record is charged what
+// the compiler says it is, not what a comment once measured.
+const (
+	textShowBytes  = int64(unsafe.Sizeof(TextShow{}))
+	paintBytes     = int64(unsafe.Sizeof(Paint{}))
+	placementBytes = int64(unsafe.Sizeof(Placement{}))
+	boxBytes       = int64(unsafe.Sizeof(Box{}))
+	stringBytes    = int64(unsafe.Sizeof(""))
+)
+
+// keep charges n bytes the walk is about to retain against the page's one
+// account, Limits.RetainedBytes. Every record appended to Scan and every slice
+// or string it holds goes through here before it is kept; past the cap the walk
+// stops with a permanent *LimitError. A slice that aliases a buffer the page
+// already holds (a lexed string without escapes) costs only its record.
+func (s *Scan) keep(n int64) error {
+	s.retained += n
+	return limits.Check("retained-bytes", s.retained, s.lim.RetainedBytes())
+}
+
+// colorBytes is what a colour holds beyond its record: the space name and the
+// component array, which cs and sc build fresh on every walk of a form.
+func colorBytes(c Color) int64 { return int64(len(c.Space)) + 8*int64(len(c.Comps)) }
+
+// withClip is a record's size plus the clip box it points at, which can be its own.
+func withClip(n int64, clip *Box) int64 {
+	if clip != nil {
+		n += boxBytes
+	}
+	return n
 }
 
 const (
@@ -395,6 +433,13 @@ const (
 	// count into TextChars/TextOps/InkedTextOps; only the per-string record
 	// stops growing.
 	maxTextShows = 1 << 16
+	// maxPaints bounds Scan.Paints the same way. A Paint is about 200 bytes
+	// and `0 0 m 1 1 l S` is 14, so 60 MiB of decoded content (60 KB of flate)
+	// retained 2.5 GB. Past the cap the path-painting operators still run;
+	// only the record of them stops growing, so a later opaque fill past the
+	// cap no longer hides an image from classification. A real page is
+	// thousands; a dense vector map is a few hundred thousand.
+	maxPaints = 1 << 18
 	// maxGStateDepth bounds the q graphics-state stack. Every other budget
 	// here bounded a slice of parsed CONTENT; this one bounds a slice of
 	// SAVED STATE, and nothing did before byb-9ml: `q` is two bytes and
@@ -417,7 +462,7 @@ const (
 	// 4096 is 37x the maximum and refuses none of them.
 	//
 	// This one counter is what bounds BOTH shapes, because the walk aborts:
-	// the uncapped Scan.Paints, Scan.Images, Scan.InlineImages and
+	// the uncapped Scan.Images, Scan.InlineImages and
 	// Scan.Unresolved slices can only grow while a walk is running.
 	maxFormInvocations = 4096
 )
@@ -475,6 +520,11 @@ const (
 // which is unchanged.
 func Walk(ctx context.Context, src []byte, scope int, env Env) (*Scan, error) {
 	s := &Scan{}
+	// An Env that knows its document's limits (pdfdoc's does) sets the caps on
+	// the image lists; any other gets the defaults.
+	if l, ok := env.(interface{ Limits() limits.Limits }); ok {
+		s.lim = l.Limits()
+	}
 	// ISO 32000-1 section 8.4.1's initial graphics state, for the parts tracked
 	// here. The line width matters: a stroke that never sets one still spreads
 	// half a point either side of its path, not nothing.
@@ -612,6 +662,12 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 			box := gs.ctm.UnitSquareBox()
 			if gs.clip != nil {
 				box = intersectBox(*gs.clip, box)
+			}
+			if err := limits.Check("inline-images", int64(len(s.InlineImages))+1, s.lim.InlineImages()); err != nil {
+				return err
+			}
+			if err := s.keep(withClip(placementBytes, gs.clip)); err != nil {
+				return err
 			}
 			s.order++
 			s.InlineImages = append(s.InlineImages, Placement{
@@ -782,7 +838,9 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 			for i := len(ops) - 1; i >= 0; i-- {
 				if ops[i].Kind == KindString {
 					s.TextChars += len(ops[i].Text)
-					recordText(s, gs, ops[i].Text)
+					if err := recordText(s, gs, ops[i]); err != nil {
+						return err
+					}
 					break
 				}
 			}
@@ -795,7 +853,9 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 				switch o.Kind {
 				case KindString:
 					s.TextChars += len(o.Text)
-					recordText(s, gs, o.Text)
+					if err := recordText(s, gs, o); err != nil {
+						return err
+					}
 				case KindNumber:
 					// A TJ number is subtracted from the displacement, in
 					// thousandths of unscaled text space (9.4.3): it moves the
@@ -830,7 +890,9 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 				gs.clip = intersectClipPath(gs.clip, path)
 				pendingClip = false
 			}
-			recordPaint(s, &path, painted, op)
+			if err := recordPaint(s, &path, painted, op); err != nil {
+				return err
+			}
 		case "sh":
 			s.ShadingOps++
 		}
@@ -838,18 +900,28 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 	}
 }
 
-// recordText appends one shown string with the text state in force. Raw
-// aliases the lexer's freshly-decoded string buffer, never the source stream.
-func recordText(s *Scan, gs gstate, raw []byte) {
+// recordText appends one shown string with the text state in force. Raw is the
+// lexer's string: a slice of the stream being walked when the string has no
+// escapes (so every draw of one form shares the form's one buffer), else a
+// fresh copy, which is charged.
+func recordText(s *Scan, gs gstate, t Token) error {
 	if len(s.TextShows) >= maxTextShows {
-		return
+		return nil
+	}
+	n := textShowBytes + int64(len(gs.font)) // Tf copies the name per call
+	if !t.Alias {
+		n += int64(len(t.Text))
+	}
+	if err := s.keep(n); err != nil {
+		return err
 	}
 	s.order++
 	s.TextShows = append(s.TextShows, TextShow{
-		Raw: raw, Font: gs.font, FontID: gs.fontID, Size: gs.fontSize,
+		Raw: t.Text, Font: gs.font, FontID: gs.fontID, Size: gs.fontSize,
 		CharSpacing: gs.charSp, WordSpacing: gs.wordSp, Hscale: gs.hscale,
 		Rise: gs.rise, Mode: gs.tr, Trm: gs.tm.Mul(gs.ctm), Index: s.order,
 	})
+	return nil
 }
 
 // strokingOps are the painting operators that lay ink along the path, as well
@@ -860,12 +932,12 @@ var strokingOps = map[string]bool{
 
 // recordPaint appends the path as painted and clears it, which every painting
 // operator does (ISO 32000-1 section 8.5.3).
-func recordPaint(s *Scan, path *pathBox, gs gstate, op string) {
+func recordPaint(s *Scan, path *pathBox, gs gstate, op string) error {
 	defer path.reset()
 	if !path.set {
 		// A painting operator with no current path marks nothing, and giving it
 		// the empty box would put a rectangle at the origin into the record.
-		return
+		return nil
 	}
 	box := path.box
 	if strokingOps[op] {
@@ -875,11 +947,18 @@ func recordPaint(s *Scan, path *pathBox, gs gstate, op string) {
 		r := float64(gs.lineWidth * deviceScale(gs.ctm) / 2)
 		box = Box{LLX: box.LLX - r, LLY: box.LLY - r, URX: box.URX + r, URY: box.URY + r}
 	}
+	if len(s.Paints) >= maxPaints {
+		return nil
+	}
+	if err := s.keep(withClip(paintBytes, gs.clip) + colorBytes(gs.fill) + colorBytes(gs.stroke)); err != nil {
+		return err
+	}
 	s.order++
 	s.Paints = append(s.Paints, Paint{
 		Op: op, Box: box, Fill: gs.fill, Stroke: gs.stroke, Index: s.order,
 		Clip: gs.clip, CTM: gs.ctm,
 	})
+	return nil
 }
 
 // deviceScale is how much the CTM magnifies lengths. The square root of the
@@ -919,13 +998,25 @@ func doXObject(ctx context.Context, ops []Token, scope int, env Env, gs gstate, 
 	name := string(ops[len(ops)-1].Text)
 	xo, ok := env.XObject(scope, name)
 	if !ok {
+		if err := limits.Check("unresolved", int64(len(s.Unresolved))+1, s.lim.Unresolved()); err != nil {
+			return err
+		}
+		if err := s.keep(stringBytes + int64(len(name))); err != nil {
+			return err
+		}
 		s.Unresolved = append(s.Unresolved, name)
 		return nil
 	}
 	if xo.Image {
+		if err := limits.Check("images", int64(len(s.Images))+1, s.lim.Images()); err != nil {
+			return err
+		}
 		box := gs.ctm.UnitSquareBox()
 		if gs.clip != nil {
 			box = intersectBox(*gs.clip, box)
+		}
+		if err := s.keep(withClip(placementBytes, gs.clip) + int64(len(name))); err != nil {
+			return err
 		}
 		s.order++
 		s.Images = append(s.Images, Placement{

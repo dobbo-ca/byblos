@@ -34,12 +34,15 @@ const (
 
 // Token is one lexed item. Num is meaningful for KindNumber; Text holds the
 // name text (without the leading slash), the decoded string bytes, or the
-// keyword text. Text aliases the source buffer for keywords, and is freshly
-// allocated for names and strings.
+// keyword text. Text aliases the source buffer for keywords and for strings
+// without escapes (Alias), and is freshly allocated for names and other strings.
 type Token struct {
 	Kind Kind
 	Num  float64
 	Text []byte
+	// Alias marks a string whose Text is a slice of the source buffer, not a
+	// copy: it holds no bytes of its own.
+	Alias bool
 }
 
 // Lexer tokenizes a decoded content stream.
@@ -210,6 +213,12 @@ func (l *Lexer) name() (Token, error) {
 
 func (l *Lexer) literalString() (Token, error) {
 	start := l.pos
+	// No escape and no nesting: the string is the bytes between the parens.
+	if i := bytes.IndexAny(l.src[l.pos+1:], `\()`); i >= 0 && l.src[l.pos+1+i] == ')' {
+		a, b := l.pos+1, l.pos+1+i
+		l.pos = b + 1
+		return Token{Kind: KindString, Text: l.src[a:b:b], Alias: true}, nil
+	}
 	l.pos++ // consume '('
 	depth := 1
 	var out []byte

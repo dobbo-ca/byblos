@@ -2,11 +2,14 @@ package content
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // mapEnv is a fake resource tree: one map of name to XObject per scope.
@@ -1597,3 +1600,35 @@ func TestWalkAllowsFlatFormRepetition(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// Scan.Paints stops growing at maxPaints; the walk itself carries on and
+// reports no error, as for TextShows.
+func TestWalkCapsRecordedPaints(t *testing.T) {
+	src := []byte(strings.Repeat("0 0 m 1 1 l S\n", maxPaints+100))
+	s, err := Walk(context.Background(), src, 0, nil)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if len(s.Paints) != maxPaints {
+		t.Errorf("len(Paints) = %d; want %d", len(s.Paints), maxPaints)
+	}
+}
+
+// Scan.Images, InlineImages and Unresolved stop the walk with a *LimitError
+// instead of growing without bound or silently dropping images.
+func TestWalkCapsImageLists(t *testing.T) {
+	n := int(limits.Limits{}.Images()) + 1
+	for name, c := range map[string]struct{ src, cap string }{
+		"images":        {"/Im0 Do\n", "images"},
+		"unresolved":    {"/Nope Do\n", "unresolved"},
+		"inline-images": {"BI /W 1 /H 1 /BPC 8 /CS /G ID x EI\n", "inline-images"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Walk(context.Background(), []byte(strings.Repeat(c.src, n)), 0, imageEnv(1))
+			var le *limits.LimitError
+			if !errors.As(err, &le) || le.Name != c.cap {
+				t.Errorf("err = %v; want *LimitError %s", err, c.cap)
+			}
+		})
+	}
+}
