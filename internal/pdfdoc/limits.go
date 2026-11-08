@@ -30,15 +30,43 @@ func trailerSize(rs io.ReadSeeker) (size int64, ok bool) {
 	if !ok {
 		return 0, false
 	}
+	// Offsets count from the %PDF header, as a reader takes them.
+	if i := bytes.Index(readAt(rs, 0, 1024), []byte("%PDF-")); i > 0 {
+		off += int64(i)
+	}
 	// Cross-reference stream: /Size is in the dictionary at the startxref offset.
 	if h := readAt(rs, off, 4096); len(h) > 0 && h[0] >= '0' && h[0] <= '9' {
 		return sizeIn(h)
 	}
-	t := lastIndex(rs, []byte("trailer"), sx, end)
+	// Classic table: the trailer that follows the xref at the startxref offset.
+	// In a linearized file that is the first-page trailer, which holds the
+	// real total, not the last trailer in the file.
+	t := indexFrom(rs, []byte("trailer"), off, sx)
 	if t < 0 {
 		return 0, false
 	}
 	return sizeIn(readAt(rs, t, 4096))
+}
+
+// indexFrom returns the offset of the first occurrence of pat that starts in
+// [from, limit), or -1. It reads in fixed chunks through one buffer.
+func indexFrom(rs io.ReadSeeker, pat []byte, from, limit int64) int64 {
+	const chunk = 64 << 10
+	buf := make([]byte, chunk+len(pat)-1)
+	for from >= 0 && from < limit {
+		if _, err := rs.Seek(from, io.SeekStart); err != nil {
+			return -1
+		}
+		m, _ := io.ReadFull(rs, buf[:min(int64(len(buf)), limit-from+int64(len(pat))-1)])
+		if i := bytes.Index(buf[:m], pat); i >= 0 && from+int64(i) < limit {
+			return from + int64(i)
+		}
+		if m < len(pat) {
+			return -1
+		}
+		from += chunk
+	}
+	return -1
 }
 
 // readAt returns up to n bytes at off, or nil.
@@ -55,9 +83,15 @@ func readAt(rs io.ReadSeeker, off int64, n int) []byte {
 // limit, searching backwards in fixed chunks of a file of the given size, or -1.
 func lastIndex(rs io.ReadSeeker, pat []byte, limit, size int64) int64 {
 	const chunk = 64 << 10
+	buf := make([]byte, chunk+len(pat)-1)
 	for limit > 0 {
 		start := max(limit-chunk, 0)
-		b := readAt(rs, start, int(min(limit+int64(len(pat))-1, size)-start))
+		b := buf[:min(limit+int64(len(pat))-1, size)-start]
+		if _, err := rs.Seek(start, io.SeekStart); err != nil {
+			return -1
+		}
+		m, _ := io.ReadFull(rs, b)
+		b = b[:m]
 		if i := bytes.LastIndex(b, pat); i >= 0 {
 			return start + int64(i)
 		}

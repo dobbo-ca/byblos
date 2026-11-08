@@ -22,6 +22,13 @@ func TestTrailerSize(t *testing.T) {
 		return fmt.Sprintf("%s\n7 0 obj\n<< /Type /XRef /Size 777777 /W [1 2 1] /Length 0 >>\nstream\n\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n", head, len(head)+1)
 	}
 	incremental := classic + "xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 424243 /Prev 20 >>\nstartxref\n99\n%%EOF\n"
+	// Linearized: startxref points at the first-page xref at the top; the main
+	// trailer (small /Size) is last.
+	first := "%PDF-1.4\n1 0 obj\n<< >>\nendobj\n"
+	lin := first + "xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 77 /Prev 99 >>\nstartxref\n0\n%%EOF\n"
+	linearized := lin + "xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 2 >>\nstartxref\n" + fmt.Sprint(len(first)) + "\n%%EOF\n"
+	// Leading junk shifts every offset the file states.
+	junkXref := "%PDF-1.5\n7 0 obj\n<< /Type /XRef /Size 888 /W [1 2 1] /Length 0 >>\nstream\n\nendstream\nendobj\nstartxref\n9\n%%EOF\n"
 	for _, c := range []struct {
 		name string
 		pdf  string
@@ -32,6 +39,8 @@ func TestTrailerSize(t *testing.T) {
 		{"last trailer of an incremental update wins", incremental, 424243, true},
 		{"xref stream in the tail", xrefStream(10), 777777, true},
 		{"xref stream before the tail", xrefStream(200 << 10), 777777, true},
+		{"linearized classic: first-page trailer, not the last", linearized, 77, true},
+		{"xref stream after leading junk", strings.Repeat(" ", 20) + junkXref, 888, true},
 		{"no startxref", "%PDF-1.4\n garbage", 0, false},
 		{"empty", "", 0, false},
 	} {
