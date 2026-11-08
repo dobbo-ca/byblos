@@ -606,6 +606,9 @@ func (d *doc) Page(n int) (p *Page, err error) {
 		mb = types.RectForDim(defaultPageWidthPt, defaultPageHeightPt)
 	}
 
+	// A form Do appends a scope each, so keeping them for the document grows
+	// with pages x draws. A Page's Scope is valid until the next Page call.
+	d.scopes = d.scopes[:0]
 	p = &Page{
 		Index:             n,
 		MediaBox:          rectOf(mb),
@@ -938,11 +941,8 @@ func repairTrailer(zstream []byte) ([]byte, bool) {
 
 // addScope appends a resource scope and returns its handle.
 //
-// Known simplification: scopes are never reused, so calling Page twice or
-// resolving the same form twice appends duplicate entries. They are equivalent,
-// so this is a small waste rather than a bug, and a document has at most a few
-// thousand of them. Memoize per page index and per (scope, name) if a real
-// archive ever shows it matters.
+// Scopes live for one page: Page resets them. Resolving the same form
+// twice on a page appends duplicate entries, bounded by the walk's form cap.
 func (d *doc) addScope(res types.Dict, parent int) int {
 	d.scopes = append(d.scopes, scope{res: res, parent: parent})
 	return len(d.scopes) - 1

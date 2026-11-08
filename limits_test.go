@@ -594,6 +594,8 @@ func TestWalkRetainedBytesAreAccounted(t *testing.T) {
 		{"form text, aliased", draws, "BT /F1 12 Tf (" + strings.Repeat("a", 100_000) + ") Tj ET\n", false},
 		{"form text, escaped", draws, "BT /F1 12 Tf (" + strings.Repeat(`a\n`, 50_000) + ") Tj ET\n", true},
 		{"form name", draws, "/" + strings.Repeat("n", 100_000) + " Do\n", true},
+		// Tf copies its font name on every call, so the name is kept per draw.
+		{"form font name", draws, "BT /" + strings.Repeat("n", 100_000) + " 12 Tf (x) Tj ET\n", true},
 		{"300k paints", "", "", true},
 	}
 	for _, c := range cases {
@@ -625,5 +627,29 @@ func TestWalkRetainedBytesAreAccounted(t *testing.T) {
 				t.Errorf("peak heap = %d MiB; want it inside the %d MiB budget", peak>>20, budget>>20)
 			}
 		})
+	}
+}
+
+// A form Do appends a resource scope to the document; scopes must not outlive
+// their page, or pages x draws of one form grows the heap without bound.
+func TestFormScopesDoNotAccumulateAcrossPages(t *testing.T) {
+	const budget, pageCount = 32 << 20, 1000
+	defer SetMemoryLimit(SetMemoryLimit(budget))
+	bodies := []string{catalog, "", flateStream(deflated(strings.Repeat("/F Do\n", 4096))),
+		"<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Length 6 >>\nstream\n0 0 m\n\nendstream"}
+	var kids []string
+	for i := 0; i < pageCount; i++ {
+		kids = append(kids, fmt.Sprintf("%d 0 R", 5+i))
+		bodies = append(bodies, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 3 0 R /Resources << /XObject << /F 4 0 R >> >> >>")
+	}
+	bodies[1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), pageCount)
+	pdf := pdfFile(bodies, "", 0)
+	var err error
+	peak := peakHeap(func() { _, err = InspectDocument(context.Background(), bytes.NewReader(pdf), Limits{}) })
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if peak > budget {
+		t.Errorf("peak heap = %d MiB; want it inside the %d MiB budget", peak>>20, budget>>20)
 	}
 }

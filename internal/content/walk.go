@@ -904,7 +904,7 @@ func recordText(s *Scan, gs gstate, t Token) error {
 	if len(s.TextShows) >= maxTextShows {
 		return nil
 	}
-	n := textShowBytes
+	n := textShowBytes + int64(len(gs.font)) // Tf copies the name per call
 	if !t.Alias {
 		n += int64(len(t.Text))
 	}
