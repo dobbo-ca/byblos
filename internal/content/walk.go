@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // Matrix is a PDF transformation matrix [a b c d e f] in the row-vector
@@ -379,6 +381,7 @@ type Scan struct {
 	// doXObject recurses into a fresh walk and the count has to survive that.
 	// Walk state, like order.
 	forms int
+	lim   limits.Limits
 }
 
 const (
@@ -482,6 +485,11 @@ const (
 // which is unchanged.
 func Walk(ctx context.Context, src []byte, scope int, env Env) (*Scan, error) {
 	s := &Scan{}
+	// An Env that knows its document's limits (pdfdoc's does) sets the caps on
+	// the image lists; any other gets the defaults.
+	if l, ok := env.(interface{ Limits() limits.Limits }); ok {
+		s.lim = l.Limits()
+	}
 	// ISO 32000-1 section 8.4.1's initial graphics state, for the parts tracked
 	// here. The line width matters: a stroke that never sets one still spreads
 	// half a point either side of its path, not nothing.
@@ -619,6 +627,9 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 			box := gs.ctm.UnitSquareBox()
 			if gs.clip != nil {
 				box = intersectBox(*gs.clip, box)
+			}
+			if err := limits.Check("inline-images", int64(len(s.InlineImages))+1, s.lim.InlineImages()); err != nil {
+				return err
 			}
 			s.order++
 			s.InlineImages = append(s.InlineImages, Placement{
@@ -929,10 +940,16 @@ func doXObject(ctx context.Context, ops []Token, scope int, env Env, gs gstate, 
 	name := string(ops[len(ops)-1].Text)
 	xo, ok := env.XObject(scope, name)
 	if !ok {
+		if err := limits.Check("unresolved", int64(len(s.Unresolved))+1, s.lim.Unresolved()); err != nil {
+			return err
+		}
 		s.Unresolved = append(s.Unresolved, name)
 		return nil
 	}
 	if xo.Image {
+		if err := limits.Check("images", int64(len(s.Images))+1, s.lim.Images()); err != nil {
+			return err
+		}
 		box := gs.ctm.UnitSquareBox()
 		if gs.clip != nil {
 			box = intersectBox(*gs.clip, box)

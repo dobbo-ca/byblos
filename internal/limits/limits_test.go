@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -146,4 +147,28 @@ func BenchmarkReserve(b *testing.B) {
 		release, _ := Reserve(context.Background(), 1<<20)
 		release()
 	}
+}
+
+// BenchmarkReserveContended is BenchmarkReserve with a budget that holds two
+// reservations while every CPU asks for one, so callers queue. p99-ns is the
+// 99th percentile of the time from Reserve to its return, waiting included.
+func BenchmarkReserveContended(b *testing.B) {
+	prev := SetMemoryLimit(2 << 20)
+	defer SetMemoryLimit(prev)
+	var mu sync.Mutex
+	var lat []time.Duration
+	b.RunParallel(func(pb *testing.PB) {
+		var mine []time.Duration
+		for pb.Next() {
+			t := time.Now()
+			release, _ := Reserve(context.Background(), 1<<20)
+			mine = append(mine, time.Since(t))
+			release()
+		}
+		mu.Lock()
+		lat = append(lat, mine...)
+		mu.Unlock()
+	})
+	sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
+	b.ReportMetric(float64(lat[len(lat)*99/100]), "p99-ns")
 }

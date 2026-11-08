@@ -227,9 +227,8 @@ func TestDefaultConfigCarriesTheLimits(t *testing.T) {
 	}
 }
 
-// A valid file with more than 64 KiB after %%EOF hides startxref from
-// trailerSize. OpenBudgeted must still take a 3 MiB content stream under a
-// 300 MiB budget (poppler and pdfcpu read such files).
+// A file with no startxref has no readable /Size (pdfcpu rebuilds its table).
+// OpenBudgeted must still take a 3 MiB content stream under a 300 MiB budget.
 func TestOpenBudgetedWithoutASizeKeepsAUsableStreamCap(t *testing.T) {
 	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
 	data := limitsZeros(t, 3<<20)
@@ -239,7 +238,7 @@ func TestOpenBudgetedWithoutASizeKeepsAUsableStreamCap(t *testing.T) {
 		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>",
 		fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(data), data),
 	})
-	pdf = append(pdf, bytes.Repeat([]byte(" "), 70<<10)...)
+	pdf = pdf[:bytes.LastIndex(pdf, []byte("startxref"))]
 	d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), limits.Limits{})
 	if err != nil {
 		t.Fatal(err)
@@ -247,5 +246,46 @@ func TestOpenBudgetedWithoutASizeKeepsAUsableStreamCap(t *testing.T) {
 	defer release()
 	if _, err := d.Page(1); err != nil {
 		t.Errorf("Page(1): %v", err)
+	}
+}
+
+// openBudgetedOK opens pdf under a 300 MiB budget and reads page 1.
+func openBudgetedOK(t *testing.T, pdf []byte) {
+	t.Helper()
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
+	d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), limits.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := d.Page(1); err != nil {
+		t.Errorf("Page(1): %v", err)
+	}
+}
+
+// More than 64 KiB after %%EOF must not change what /Size the budget sees: a
+// valid 120k-object file and a 50 MiB content stream pass padded as unpadded.
+func TestPaddedFilesPassLikeUnpaddedOnes(t *testing.T) {
+	pad := bytes.Repeat([]byte(" "), 70<<10)
+	bodies := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>",
+	}
+	for len(bodies) < 120_000 {
+		bodies = append(bodies, "<< >>")
+	}
+	data := limitsZeros(t, 50<<20)
+	big := limitsPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(data), data),
+	})
+	for name, pdf := range map[string][]byte{"120k objects": limitsPDF(bodies), "50 MiB stream": big} {
+		t.Run(name, func(t *testing.T) {
+			openBudgetedOK(t, pdf)
+			openBudgetedOK(t, append(append([]byte{}, pdf...), pad...))
+		})
 	}
 }

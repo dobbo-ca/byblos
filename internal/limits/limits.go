@@ -53,6 +53,12 @@ type Limits struct {
 	MaxImagePixels int64
 	// MaxFontProgramBytes caps one decoded embedded font program. Default 16 MiB.
 	MaxFontProgramBytes int64
+	// MaxImages, MaxInlineImages and MaxUnresolved cap the entries one page's
+	// content walk records in Scan.Images, Scan.InlineImages and Scan.Unresolved
+	// (a Do or BI is 8 or more bytes of content, a record 100 to 200 bytes).
+	// Each defaults to MaxPageStreamBytes / 512 (262 144 at the default). Past
+	// it the call fails: dropping images would change classification.
+	MaxImages, MaxInlineImages, MaxUnresolved int64
 }
 
 const DefaultFontProgramBytes = 16 << 20
@@ -69,6 +75,9 @@ func (l Limits) Pages() int64            { return def(l.MaxPages, 10_000) }
 func (l Limits) StreamBytes() int64      { return def(l.MaxStreamBytes, 64<<20) }
 func (l Limits) PageStreamBytes() int64  { return def(l.MaxPageStreamBytes, 128<<20) }
 func (l Limits) ImagePixels() int64      { return def(l.MaxImagePixels, 500_000_000) }
+func (l Limits) Images() int64           { return def(l.MaxImages, l.PageStreamBytes()/512) }
+func (l Limits) InlineImages() int64     { return def(l.MaxInlineImages, l.PageStreamBytes()/512) }
+func (l Limits) Unresolved() int64       { return def(l.MaxUnresolved, l.PageStreamBytes()/512) }
 func (l Limits) FontProgramBytes() int64 { return def(l.MaxFontProgramBytes, DefaultFontProgramBytes) }
 
 // Check returns a *LimitError when got > max.
