@@ -65,7 +65,7 @@ a fork of pdfcpu that adds cumulative per-parse limits (object stream entries, d
 `go.mod` needs the same line, or it builds against upstream pdfcpu and fails to
 compile:
 
-    replace github.com/pdfcpu/pdfcpu => github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.3
+    replace github.com/pdfcpu/pdfcpu => github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.4
 
 ## License
 
