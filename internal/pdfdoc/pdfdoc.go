@@ -98,6 +98,8 @@ func pdfcpuLimit(lim limits.Limits, err error) error {
 	switch {
 	case errors.Is(err, model.ErrObjectBytesExceeded):
 		return &limits.LimitError{Name: "object-bytes", Got: lim.ObjectBytes() + 1, Max: lim.ObjectBytes()}
+	case errors.Is(err, model.ErrStreamTotalLimitExceeded):
+		return &limits.LimitError{Name: "file-stream-bytes", Got: lim.MaxStreamTotalBytes + 1, Max: lim.MaxStreamTotalBytes}
 	case errors.Is(err, model.ErrParsedLimitExceeded):
 		n := parsedBytes(lim, limits.ObjectTableBytes(lim.Objects()))
 		return &limits.LimitError{Name: "parsed-bytes", Got: n + 1, Max: n}
@@ -387,6 +389,9 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 		// The object buffer peaks at about 2.25x its size and a string parsed
 		// from it aliases it, so it fits the slot too.
 		lim.MaxObjectBytes = min(lim.ObjectBytes(), slot)
+		// pdfcpu holds a stream once per xref entry that reads it, so the
+		// file's size is not a bound on its own: hold the reads to it.
+		lim.MaxStreamTotalBytes = fileBytes
 	}
 	lim.MaxStreamBytes, lim.MaxTotalDecodeBytes = streams, total
 	// One reservation for the document's life: the object table and the slot its
@@ -434,6 +439,7 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 	conf.Limits.MaxObjectStreamTotalCount = int(lim.ObjectStreamEntries())
 	conf.Limits.MaxTotalDecodeBytes = lim.TotalDecodeBytes()
 	conf.Limits.MaxParsedBytes = parsedBytes(lim, limits.ObjectTableBytes(size))
+	conf.Limits.MaxStreamTotalBytes = lim.MaxStreamTotalBytes
 	ctx, err := api.ReadContext(cctx, rs, conf)
 	if err != nil {
 		if le := pdfcpuLimit(lim, err); le != nil {

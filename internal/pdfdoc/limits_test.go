@@ -926,3 +926,54 @@ func TestHostileScalarsAreRefusedUnderABudget(t *testing.T) {
 		})
 	}
 }
+
+// dupStreamPDF has k xref entries that all point at one unreferenced p-byte
+// stream. pdfcpu reads and holds it once per entry: 8 x 25 MB held 191 MB live
+// under a 32 MiB budget, though the reservation holds the file's size once.
+func dupStreamPDF(k, p int) []byte {
+	var out bytes.Buffer
+	offs := map[int]int{}
+	out.WriteString("%PDF-1.4\n")
+	for i, b := range []string{"<</Type/Catalog/Pages 2 0 R>>", "<</Type/Pages/Kids[3 0 R]/Count 1>>", "<</Type/Page/Parent 2 0 R/MediaBox[0 0 10 10]>>"} {
+		offs[i+1] = out.Len()
+		fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", i+1, b)
+	}
+	s := out.Len()
+	fmt.Fprintf(&out, "4 0 obj\n<</Length %d>>\nstream\n%s\nendstream\nendobj\n", p, strings.Repeat("A", p))
+	xo := out.Len()
+	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", 4+k)
+	for i := 1; i < 4+k; i++ {
+		o := s
+		if i < 4 {
+			o = offs[i]
+		}
+		fmt.Fprintf(&out, "%010d 00000 n \n", o)
+	}
+	fmt.Fprintf(&out, "trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n", 4+k, xo)
+	return out.Bytes()
+}
+
+func TestRepeatedStreamReadsAreRefusedUnderABudget(t *testing.T) {
+	const mib = 1 << 20
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(32 << 20))
+	pdf := dupStreamPDF(8, 8*mib)
+	var base runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&base)
+	var gotErr error
+	peak := peakHeap(func() {
+		d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), limits.Limits{})
+		if err == nil {
+			release()
+			_ = d
+		}
+		gotErr = err
+	})
+	var le *limits.LimitError
+	if !errors.As(gotErr, &le) || le.Name != "file-stream-bytes" || !errors.Is(gotErr, limits.ErrLimit) || errors.Is(gotErr, limits.ErrMemoryLimit) {
+		t.Fatalf("err = %v; want a permanent *LimitError file-stream-bytes", gotErr)
+	}
+	if added := int64(peak) - int64(base.HeapAlloc); added > 32*mib {
+		t.Errorf("heap added = %d MiB; want the parse stopped inside the 32 MiB budget", added>>20)
+	}
+}

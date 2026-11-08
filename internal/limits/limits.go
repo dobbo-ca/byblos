@@ -80,6 +80,11 @@ type Limits struct {
 	// object table the reservation holds, less the quarter its empty objects
 	// already use, plus MaxTotalDecodeBytes.
 	MaxParsedBytes int64
+	// MaxStreamTotalBytes caps the encoded stream bytes pdfcpu reads over one
+	// parse, counting a stream once for every xref entry or overlapping
+	// /Length that reads it. Default: none; under a budget the file's size,
+	// which the reservation holds.
+	MaxStreamTotalBytes int64
 }
 
 const DefaultFontProgramBytes = 16 << 20

@@ -30,7 +30,11 @@ allocation. The estimate covers:
   96-byte `XRefTableEntry`; larger objects cost more);
 - the file itself: pdfcpu keeps the raw bytes of every stream it reads,
   referenced or not (a 200 MB unreferenced stream held 191 MiB live under a
-  32 MiB reservation), so the reservation holds the file's size;
+  32 MiB reservation), so the reservation holds the file's size. pdfcpu holds
+  a stream once for every xref entry or overlapping `/Length` that reads it
+  (8 entries on one 25 MB stream held 191 MB live), so under a budget the
+  encoded stream bytes read over one parse are capped at the file's size
+  (`file-stream-bytes`, permanent);
 - the image records the content walk keeps for all pages together (144 bytes
   each);
 - decoded non-image streams, up to the per-page total;
