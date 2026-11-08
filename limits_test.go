@@ -332,16 +332,17 @@ func TestDecodeSlotFitsTheBudget(t *testing.T) {
 }
 
 // A trailer that understates /Size cannot park an object table the reservation
-// never covered: the count is held to the /Size that was reserved for.
-func TestUnderReportedSizeIsRefusedUnderTheBudget(t *testing.T) {
-	prev := SetMemoryLimit(300 << 20)
+// never covered: the reservation comes from the objects in the file, so 150k
+// objects under /Size 10 are refused by a budget that cannot hold their table.
+func TestUnderReportedSizeIsReservedForUnderTheBudget(t *testing.T) {
+	prev := SetMemoryLimit(200 << 20)
 	defer SetMemoryLimit(prev)
 	pdf := paddedPDF(150_000)
 	pdf = bytes.Replace(pdf, []byte("/Size 150001"), []byte("/Size 10"), 1)
 	_, err := InspectDocument(context.Background(), bytes.NewReader(pdf), Limits{})
 	var le *LimitError
-	if !errors.As(err, &le) || le.Name != "objects" {
-		t.Errorf("err = %v; want *LimitError objects", err)
+	if !errors.As(err, &le) || le.Name != "memory-budget" {
+		t.Errorf("err = %v; want *LimitError memory-budget", err)
 	}
 }
 

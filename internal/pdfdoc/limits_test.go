@@ -349,3 +349,86 @@ func TestRepairedFileKeepsItsStreamCap(t *testing.T) {
 		t.Run(name, func(t *testing.T) { openBudgetedOK(t, f) })
 	}
 }
+
+// plainObjects is a catalog, a page tree and a page followed by n-3 empty
+// objects, with no xref or trailer.
+func plainObjects(n int) *bytes.Buffer {
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	for i := 1; i <= n; i++ {
+		body := "<< >>"
+		switch i {
+		case 1:
+			body = "<< /Type /Catalog /Pages 2 0 R >>"
+		case 2:
+			body = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+		case 3:
+			body = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>"
+		}
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i, body)
+	}
+	return &b
+}
+
+func wantObjectsLimit(t *testing.T, name string, pdf []byte, lim limits.Limits) {
+	t.Helper()
+	_, release, err := OpenBudgeted(context.Background(), bytes.NewReader(pdf), lim)
+	if err == nil {
+		release()
+	}
+	var le *limits.LimitError
+	if !errors.As(err, &le) || le.Name != "objects" {
+		t.Errorf("%s: err = %v; want *LimitError objects", name, err)
+	}
+}
+
+// A trailer is only a claim: whatever /Size it makes (a corrupt xref stream
+// that says 10, a startxref that lands on an object with a /Size 10 nearby),
+// the objects in the file are what pdfcpu rebuilds and holds.
+func TestObjectBudgetDoesNotRestOnTheTrailer(t *testing.T) {
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
+	lim := limits.Limits{MaxObjects: 1000}
+	xs := plainObjects(5000)
+	fmt.Fprintf(xs, "5001 0 obj\n<< /Type /XRef /Size 10 /Root 1 0 R /W [1 4 2] /Filter /FlateDecode /Length 5 >>\nstream\nxxxxx\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n", xs.Len())
+	wantObjectsLimit(t, "corrupt xref stream", xs.Bytes(), lim)
+
+	sz := plainObjects(5000)
+	sz.WriteString("%/Size 10\nstartxref\n9\n%%EOF\n")
+	wantObjectsLimit(t, "startxref on an object", sz.Bytes(), lim)
+}
+
+// An incremental update that rewrites the same objects is not counted twice.
+func TestRewrittenObjectsCountOnce(t *testing.T) {
+	defer limits.SetMemoryLimit(limits.SetMemoryLimit(300 << 20))
+	b := plainObjects(1000)
+	for r := 0; r < 50; r++ {
+		for i := 4; i <= 1000; i++ {
+			fmt.Fprintf(b, "%d 0 obj\n<< >>\nendobj\n", i)
+		}
+	}
+	_, release, err := OpenBudgeted(context.Background(), bytes.NewReader(b.Bytes()), limits.Limits{MaxObjects: 1100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+}
+
+// Objects packed in object streams have no header; their /N is counted.
+func TestObjectStreamsReserveForPackedObjects(t *testing.T) {
+	for _, dict := range []string{"/Type /ObjStm /N 5000 /First 10", "/N 5000 /First 10 /Type /ObjStm"} {
+		pdf := "%PDF-1.5\n1 0 obj\n<< " + dict + " /Length 0 >>\nstream\n\nendstream\nendobj\n"
+		if got := objectBound(strings.NewReader(pdf), 200_000); got != 5001 {
+			t.Errorf("%s: bound = %d; want 5001", dict, got)
+		}
+	}
+}
+
+// A match that straddles a chunk boundary counts once.
+func TestObjectBoundAcrossChunks(t *testing.T) {
+	for _, pad := range []int{64<<10 - 40, 64<<10 - 3, 64 << 10, 128<<10 - 300, 128<<10 + 7} {
+		pdf := strings.Repeat(" ", pad) + "7 0 obj\n<< /Type /ObjStm /N 4 >>\nstream\nendstream\nendobj\n"
+		if got := objectBound(strings.NewReader(pdf), 200_000); got != 5 {
+			t.Errorf("pad %d: bound = %d; want 5", pad, got)
+		}
+	}
+}

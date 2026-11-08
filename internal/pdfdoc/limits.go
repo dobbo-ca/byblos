@@ -47,51 +47,128 @@ func trailerSize(rs io.ReadSeeker) (size int64, ok bool) {
 	return sizeIn(readAt(rs, t, 4096))
 }
 
-// objectsIn is trailerSize, or, where that reads no /Size, a count of the
-// object headers in the file. pdfcpu rebuilds the table of such a file by
-// scanning for them, and that scan ignores its object-count cap, so the count
-// is what the cap and the reservation have to rest on.
-func objectsIn(rs io.ReadSeeker) (int64, bool) {
-	if size, ok := trailerSize(rs); ok {
-		return size, true
-	}
-	n := headerCount(rs)
-	return n, n > 0
+// objectsIn is the object count the cap and the reservation rest on: the larger
+// of the trailer /Size and objectBound. The trailer is only a claim; pdfcpu
+// rebuilds the table by scanning when it cannot use it (a corrupt xref stream,
+// a startxref that lands on an object), and holds every object it finds.
+func objectsIn(rs io.ReadSeeker, limit int64) int64 {
+	size, _ := trailerSize(rs)
+	return max(size, objectBound(rs, limit))
 }
 
-// headerCount counts "N G obj" headers (every "obj" that is not "endobj") in
-// one pass through a fixed buffer.
-func headerCount(rs io.ReadSeeker) (n int64) {
+// objectBound is an upper bound on the objects pdfcpu can create from the
+// file, from one pass through a fixed buffer: the distinct object numbers in
+// "N G obj" headers (a bitset; a number above limit counts as over it, and a
+// rewritten object counts once) plus the /N of every /ObjStm dictionary, whose
+// packed objects have no header.
+func objectBound(rs io.ReadSeeker, limit int64) (n int64) {
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return 0
 	}
-	const carry = len("endobj") - 1
-	buf := make([]byte, carry+64<<10)
+	const ov = 256 // longest look-behind or look-ahead of a match
+	seen := make([]uint64, limit/64+1)
+	buf := make([]byte, 2*ov+64<<10)
 	kept := 0
-	for {
+	for first := true; ; first = false {
 		m, err := io.ReadFull(rs, buf[kept:])
 		b := buf[:kept+m]
-		n += endingAfter(b, "obj", kept) - endingAfter(b, "endobj", kept)
+		lo, hi := ov, len(b)-ov // matches starting here; the overlap is the next chunk's
+		if first {
+			lo = 0
+		}
+		if err != nil {
+			hi = len(b)
+		}
+		n += headersIn(b, lo, hi, seen, limit) + packedIn(b, lo, hi, limit)
 		if err != nil {
 			return n
 		}
-		kept = copy(buf, b[len(b)-carry:])
+		kept = copy(buf, b[len(b)-2*ov:])
 	}
 }
 
-// endingAfter counts occurrences of pat in b that end after offset kept, so a
-// match inside the bytes carried over from the previous chunk counts once.
-func endingAfter(b []byte, pat string, kept int) (n int64) {
-	for i := 0; ; {
-		j := bytes.Index(b[i:], []byte(pat))
-		if j < 0 {
+// headersIn counts the object numbers in "N G obj" headers starting in [lo, hi)
+// of b that seen does not hold yet, and records them.
+func headersIn(b []byte, lo, hi int, seen []uint64, limit int64) (n int64) {
+	for i := lo; ; {
+		j := bytes.Index(b[i:], []byte("obj"))
+		if j < 0 || i+j >= hi {
 			return n
 		}
-		i += j + 1
-		if i-1+len(pat) > kept {
+		p := i + j
+		i = p + 3
+		if p >= 3 && string(b[p-3:p]) == "end" {
+			continue
+		}
+		_, s, ok := numBefore(b, p)
+		if !ok {
+			continue
+		}
+		num, _, ok := numBefore(b, s)
+		switch {
+		case !ok:
+		case num > limit:
+			n += limit + 1
+		case seen[num/64]&(1<<(num%64)) == 0:
+			seen[num/64] |= 1 << (num % 64)
 			n++
 		}
 	}
+}
+
+// packedIn sums the /N of the /ObjStm dictionaries whose /Type starts in [lo, hi).
+func packedIn(b []byte, lo, hi int, limit int64) (n int64) {
+	for i := lo; ; {
+		j := bytes.Index(b[i:], []byte("/ObjStm"))
+		if j < 0 || i+j >= hi {
+			return n
+		}
+		p := i + j
+		i = p + 1
+		// The dictionary: after the last "obj" before p, up to "stream" after it.
+		s, e := max(p-256, 0), min(p+256, len(b))
+		if k := bytes.LastIndex(b[s:p], []byte("obj")); k >= 0 {
+			s += k + 3
+		}
+		if k := bytes.Index(b[p:e], []byte("stream")); k >= 0 {
+			e = p + k
+		}
+		for w := b[s:e]; ; {
+			k := bytes.Index(w, []byte("/N"))
+			if k < 0 {
+				break
+			}
+			w = w[k+2:]
+			if len(w) > 0 && (isSpace(w[0]) || w[0] >= '0' && w[0] <= '9') {
+				if v, ok := intAfter(w); ok {
+					n += min(v, limit+1)
+					break
+				}
+			}
+		}
+	}
+}
+
+func isSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == 0
+}
+
+// numBefore parses the unsigned integer that ends at p, past any white space,
+// and returns where it starts.
+func numBefore(b []byte, p int) (v int64, start int, ok bool) {
+	e := p
+	for e > 0 && isSpace(b[e-1]) {
+		e--
+	}
+	s := e
+	for s > 0 && e-s < 10 && b[s-1] >= '0' && b[s-1] <= '9' {
+		s--
+	}
+	if s == e {
+		return 0, 0, false
+	}
+	v, _ = strconv.ParseInt(string(b[s:e]), 10, 64)
+	return v, s, true
 }
 
 // indexFrom returns the offset of the first occurrence of pat that starts in

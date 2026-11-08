@@ -317,31 +317,24 @@ func Open(rs io.ReadSeeker) (Doc, error) {
 // OpenBudgeted is Open under lim, with the object table and one stream decode
 // reserved from the package memory budget (limits.SetMemoryLimit) before pdfcpu
 // parses. The returned release gives the reservation back; call it when done
-// with the document. The reservation comes from the trailer /Size, and pdfcpu's
-// object-count cap is held to that size (plus an eighth), so a trailer that lies low is
-// refused as an objects limit, not parsed unreserved. With no /Size to read (pdfcpu
-// rebuilds the table by scanning, which ignores its cap) the object headers in the
-// file are counted instead and that count is held to the same cap.
+// with the document. The reservation comes from objectsIn: the larger of the
+// trailer /Size and an upper bound on the objects pdfcpu can create (distinct
+// "N G obj" numbers plus the /N of every object stream), found in one pass
+// before pdfcpu reads anything, because pdfcpu rebuilds the table by scanning
+// whenever it distrusts the trailer and that scan ignores its object-count cap.
+// pdfcpu's cap is held to that count (plus an eighth).
 //
 // The decode slot is 4 x the stream cap, but never more than the budget leaves
 // after the table: lim's stream cap is lowered to fit, so a budget that cannot
 // hold a 64 MiB decode still takes the document, and refuses only a stream
 // that would not fit.
 func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, func(), error) {
-	size, ok := objectsIn(rs)
+	size := objectsIn(rs, lim.Objects())
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
 		return nil, nil, err
 	}
 	budget := limits.MemoryLimit()
 	const minStream = 1 << 20
-	if !ok || size <= 0 {
-		size = lim.Objects()
-		if budget > 0 {
-			// Half the budget to the table, so the decode slot keeps a
-			// stream cap worth having (budget/8) beside it.
-			size = min(size, max(budget/2/limits.PerObjectBytes, 1))
-		}
-	}
 	// A linearized file's last trailer can sit a few entries under the real
 	// count, so the cap has a margin; it is the most an understated /Size parses
 	// unreserved.
@@ -359,7 +352,7 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	if err != nil {
 		return nil, nil, err
 	}
-	d, err := openDoc(ctx, rs, lim)
+	d, err := openSized(ctx, rs, lim, size)
 	if err != nil {
 		release()
 		return nil, nil, err
@@ -369,9 +362,13 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 
 // openDoc is Open with the caps of lim. The /Size cap is checked before the parse
 // on every path; only OpenBudgeted also reserves memory.
-func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (d Doc, err error) {
+func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
+	return openSized(cctx, rs, lim, objectsIn(rs, lim.Objects()))
+}
+
+// openSized is openDoc given the object count objectsIn found.
+func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size int64) (d Doc, err error) {
 	defer catchPanic("open", &err)
-	size, _ := objectsIn(rs)
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
 		return nil, err
 	}
