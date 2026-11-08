@@ -596,6 +596,10 @@ func TestWalkRetainedBytesAreAccounted(t *testing.T) {
 		{"form name", draws, "/" + strings.Repeat("n", 100_000) + " Do\n", true},
 		// Tf copies its font name on every call, so the name is kept per draw.
 		{"form font name", draws, "BT /" + strings.Repeat("n", 100_000) + " 12 Tf (x) Tj ET\n", true},
+		// sc/cs build a fresh component slice and space name per walk of the form,
+		// and every Paint keeps its own: 8000 floats is 64 KB, 4096 draws 260 MB.
+		{"form colour comps", draws, strings.Repeat("0 ", 8000) + "sc 0 0 m 1 1 l f\n", true},
+		{"form colour space name", draws, "/" + strings.Repeat("n", 60_000) + " cs 0 0 m 1 1 l f\n", true},
 		{"300k paints", "", "", true},
 	}
 	for _, c := range cases {

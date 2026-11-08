@@ -407,6 +407,10 @@ func (s *Scan) keep(n int64) error {
 	return limits.Check("retained-bytes", s.retained, s.lim.RetainedBytes())
 }
 
+// colorBytes is what a colour holds beyond its record: the space name and the
+// component array, which cs and sc build fresh on every walk of a form.
+func colorBytes(c Color) int64 { return int64(len(c.Space)) + 8*int64(len(c.Comps)) }
+
 // withClip is a record's size plus the clip box it points at, which can be its own.
 func withClip(n int64, clip *Box) int64 {
 	if clip != nil {
@@ -946,7 +950,7 @@ func recordPaint(s *Scan, path *pathBox, gs gstate, op string) error {
 	if len(s.Paints) >= maxPaints {
 		return nil
 	}
-	if err := s.keep(withClip(paintBytes, gs.clip)); err != nil {
+	if err := s.keep(withClip(paintBytes, gs.clip) + colorBytes(gs.fill) + colorBytes(gs.stroke)); err != nil {
 		return err
 	}
 	s.order++
