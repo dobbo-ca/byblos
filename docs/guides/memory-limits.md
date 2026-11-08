@@ -91,7 +91,8 @@ and takes seconds.
 ### Concurrency
 
 byblos starts no goroutines of its own on the shipped paths. Its entry points
-are safe to call concurrently (`concurrency_test.go:24`). Because nothing
+are safe to call concurrently; only `Inspect` and `ExtractPageRaster` are tested
+for it (`concurrency_test.go:24`), the others are untested. Because nothing
 inside byblos limits how many calls run at once, the caller bounds that; the
 budget above bounds their memory together.
 
@@ -127,7 +128,7 @@ tell apart from a malformed file.
 | Content-walk text shows | 1<<16 | `internal/content/walk.go:397` |
 | Content-walk form invocations | 4096 | `internal/content/walk.go:422` |
 | Font program (`/FontFile*`) decoded | 16 MiB | `internal/pdfdoc/pdfdoc.go:965`, applied at `:1076-1079` |
-| JBIG2 page pixels | 1<<26 | `internal/jbig2/segment_decode.go:397`, checked at `:687` |
+| JBIG2 page pixels | 1<<26 | `internal/jbig2/segment_decode.go:397`, checked at `:1173` (page width at `:1057`) |
 | JBIG2 retained bitmap bytes | 16 MiB | `internal/jbig2/segment_decode.go:398` |
 | JBIG2 segments per stream | 1<<16 | `internal/jbig2/segment_decode.go:401` |
 | JBIG2 references per stream | 1<<18 | `internal/jbig2/segment_decode.go:402` |
@@ -143,8 +144,8 @@ that already meets the "refuse before allocating" rule end to end.
 The pdfcpu bound is the only one on an ordinary stream decode, and it is
 generous: a single stream may inflate to 512 MiB.
 
-`ctx` entry points exist today for the nine document-scale primitives and
-`RenderPageContext`: `InspectContext` (`inspect.go:213`),
+`ctx` entry points exist today for the nine document-scale primitives,
+`BuildFromPagesContext` and `RenderPageContext`: `InspectContext` (`inspect.go:213`),
 `ExtractPageRasterContext` (`extract.go:437`), `OptimizeContext`
 (`optimize.go:129`), `StampTextLayerContext` (`stamp.go:185`),
 `BuildPDFContext` (`build.go:70`), `BuildFromPagesContext`
@@ -163,7 +164,9 @@ when the budget lands.
 
 | What | Phase |
 |---|---|
-| `SetMemoryLimit`, `ErrMemoryLimit`, the budget reservations for the object table, decoded streams and the writer's page | 2.1 (inspect), red first on the bomb fixture |
+| `SetMemoryLimit`, `ErrMemoryLimit`, the budget reservations for the object table, decoded streams | 2.1 (inspect), red first on the bomb fixture |
+| Budget reservations for the streaming writer's page and PNG transcode rows | 2.2 |
+| Budget reservations for archival-raster bands | 3.6 |
 | `Limits`, `LimitError`, `ErrLimit` | 2.1 |
 | Trailer `/Size` cap (100 000), 64 MiB per non-image stream, 128 MiB per page total, image streams capped at their declared size, 10 000 pages | 2.1 |
 | Limit tests of 9A.4: `TestEstimateCoversAllocation`, `TestRefusesBeforeAllocating`, `TestBudgetHolds`, `TestDefaultsAreSafe`, cancellation, goroutines | 2.1, then each stage that calls byblos adds its own |
