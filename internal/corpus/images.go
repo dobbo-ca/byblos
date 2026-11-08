@@ -42,9 +42,9 @@ func Photo() image.Image {
 	for y := 0; y < ImageH; y++ {
 		for x := 0; x < ImageW; x++ {
 			fx, fy := float64(x), float64(y)
-			r := uint8(127 + 127*math.Sin(fx/23.0))
-			g := uint8(127 + 127*math.Sin(fy/31.0))
-			b := uint8(127 + 127*math.Sin((fx+fy)/17.0))
+			r := uint8(127 + float64(127*math.Sin(fx/23.0)))
+			g := uint8(127 + float64(127*math.Sin(fy/31.0)))
+			b := uint8(127 + float64(127*math.Sin((fx+fy)/17.0)))
 			img.SetRGBA(x, y, color.RGBA{r, g, b, 255})
 		}
 	}

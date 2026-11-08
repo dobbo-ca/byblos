@@ -213,9 +213,9 @@ func medianCutPalette(buckets []histBucket, n int) []rgb24 {
 		for _, i := range members {
 			bkt := buckets[i]
 			w := float64(bkt.n)
-			sr += w * float64(bkt.r)
-			sg += w * float64(bkt.g)
-			sb += w * float64(bkt.bl)
+			sr += float64(w * float64(bkt.r))
+			sg += float64(w * float64(bkt.g))
+			sb += float64(w * float64(bkt.bl))
 			total += bkt.n
 		}
 		if total == 0 {
@@ -234,7 +234,7 @@ func medianCutPalette(buckets []histBucket, n int) []rgb24 {
 			dr := float64(bkt.r) - mr
 			dg := float64(bkt.g) - mg
 			db := float64(bkt.bl) - mb
-			v += float64(bkt.n) * (dr*dr + dg*dg + db*db)
+			v += float64(float64(bkt.n) * (float64(dr*dr) + float64(dg*dg) + float64(db*db)))
 		}
 		return v
 	}
@@ -366,9 +366,9 @@ func lloydRefine(buckets []histBucket, palette []rgb24, iters int) []rgb24 {
 		for _, bkt := range buckets {
 			best := nearestPaletteIndex(pal, bkt.r, bkt.g, bkt.bl)
 			w := float64(bkt.n)
-			accums[best].sr += w * float64(bkt.r)
-			accums[best].sg += w * float64(bkt.g)
-			accums[best].sb += w * float64(bkt.bl)
+			accums[best].sr += float64(w * float64(bkt.r))
+			accums[best].sg += float64(w * float64(bkt.g))
+			accums[best].sb += float64(w * float64(bkt.bl))
 			accums[best].n += bkt.n
 		}
 		next := make([]rgb24, len(pal))

@@ -335,8 +335,8 @@ func edges(pts []point, w int, deg float64, est *Estimate) {
 	ry := make([]float64, len(pts))
 	for i, p := range pts {
 		x, y := float64(p.x), float64(p.y)
-		rx[i] = x*cos - y*sin
-		ry[i] = x*sin + y*cos
+		rx[i] = float64(x*cos) - float64(y*sin)
+		ry[i] = float64(x*sin) + float64(y*cos)
 		lo, hi = min(lo, ry[i]), max(hi, ry[i])
 	}
 	if hi-lo < edgeSlices {
@@ -356,7 +356,7 @@ func edges(pts []point, w int, deg float64, est *Estimate) {
 		}
 		sort.Float64s(s.xs)
 		k := int(edgeQuantile * float64(len(s.xs)))
-		mid := lo + (float64(j)+0.5)*span
+		mid := lo + float64((float64(j)+0.5)*span)
 		ly, lx = append(ly, mid), append(lx, s.xs[k])
 		ry2, rx2 = append(ry2, mid), append(rx2, s.xs[len(s.xs)-1-k])
 	}
@@ -414,12 +414,12 @@ func fitLine(y, x []float64) (slope, resid float64) {
 	// companion to the slope and keeps the whole fit robust.
 	inter := make([]float64, n)
 	for i := range n {
-		inter[i] = x[i] - slope*y[i]
+		inter[i] = x[i] - float64(slope*y[i])
 	}
 	c := median(inter)
 	dev := make([]float64, n)
 	for i := range n {
-		dev[i] = math.Abs(x[i] - (slope*y[i] + c))
+		dev[i] = math.Abs(x[i] - (float64(slope*y[i]) + c))
 	}
 	return slope, median(dev)
 }
@@ -553,7 +553,7 @@ func otsu(lum []uint8) uint8 {
 	total := len(lum)
 	var sum float64
 	for i, c := range hist {
-		sum += float64(i) * float64(c)
+		sum += float64(float64(i) * float64(c))
 	}
 	var sumB, wB float64
 	best, bestVar := uint8(128), -1.0
@@ -566,7 +566,7 @@ func otsu(lum []uint8) uint8 {
 		if wF == 0 {
 			break
 		}
-		sumB += float64(i) * float64(hist[i])
+		sumB += float64(float64(i) * float64(hist[i]))
 		mB, mF := sumB/wB, (sum-sumB)/wF
 		v := wB * wF * (mB - mF) * (mB - mF)
 		if v > bestVar {
@@ -591,7 +591,7 @@ func search(pts []point, w, h int) (deg, conf, alt float64, railed bool) {
 	bestI, bestScore := 0, -1.0
 	altI, altScore := 0, -1.0
 	for i := range n {
-		t := -searchDeg + float64(i)*coarseStep
+		t := -searchDeg + float64(float64(i)*coarseStep)
 		s, d := profileScore(pts, bins, w, t)
 		scores[i] = s
 		if s > bestScore {
@@ -605,17 +605,17 @@ func search(pts []point, w, h int) (deg, conf, alt float64, railed bool) {
 	// Stepped by an integer index rather than by adding fineStep to a float, so
 	// the last angle of the sweep is where the arithmetic says it is.
 	steps := int(fineSpan/fineStep) + 1
-	coarse := -searchDeg + float64(bestI)*coarseStep
+	coarse := -searchDeg + float64(float64(bestI)*coarseStep)
 	best := coarse
-	altCoarse := -searchDeg + float64(altI)*coarseStep
+	altCoarse := -searchDeg + float64(float64(altI)*coarseStep)
 	altBest := altCoarse
 	for i := -steps; i <= steps; i++ {
-		if t := coarse + float64(i)*fineStep; t >= -searchDeg && t <= searchDeg {
+		if t := coarse + float64(float64(i)*fineStep); t >= -searchDeg && t <= searchDeg {
 			if s, _ := profileScore(pts, bins, w, t); s > bestScore {
 				bestScore, best = s, t
 			}
 		}
-		if t := altCoarse + float64(i)*fineStep; t >= -searchDeg && t <= searchDeg {
+		if t := altCoarse + float64(float64(i)*fineStep); t >= -searchDeg && t <= searchDeg {
 			if _, d := profileScore(pts, bins, w, t); d > altScore {
 				altScore, altBest = d, t
 			}
@@ -693,15 +693,15 @@ func profileScore(pts []point, bins []int32, w int, t float64) (sq, diff float64
 	sin, cos := math.Sin(rad), math.Cos(rad)
 	off := float64(w) + 1
 	for _, p := range pts {
-		i := int(float64(p.y)*cos - float64(p.x)*sin + off)
+		i := int(float64(float64(p.y)*cos) - float64(float64(p.x)*sin) + off)
 		bins[i]++
 	}
 	prev := 0.0
 	for _, c := range bins {
 		v := float64(c)
-		sq += v * v
+		sq += float64(v * v)
 		d := v - prev
-		diff += d * d
+		diff += float64(d * d)
 		prev = v
 	}
 	return sq, diff

@@ -527,19 +527,19 @@ var identityMatrix = matrix{1, 0, 0, 1, 0, 0}
 // 8.3.4's concatenation formula: CTM_new = M x CTM_old, in that order).
 func (m matrix) concat(n matrix) matrix {
 	return matrix{
-		a: m.a*n.a + m.b*n.c,
-		b: m.a*n.b + m.b*n.d,
-		c: m.c*n.a + m.d*n.c,
-		d: m.c*n.b + m.d*n.d,
-		e: m.e*n.a + m.f*n.c + n.e,
-		f: m.e*n.b + m.f*n.d + n.f,
+		a: float64(m.a*n.a) + float64(m.b*n.c),
+		b: float64(m.a*n.b) + float64(m.b*n.d),
+		c: float64(m.c*n.a) + float64(m.d*n.c),
+		d: float64(m.c*n.b) + float64(m.d*n.d),
+		e: float64(m.e*n.a) + float64(m.f*n.c) + n.e,
+		f: float64(m.e*n.b) + float64(m.f*n.d) + n.f,
 	}
 }
 
 // invert returns m's inverse, or ok=false if m is singular (determinant 0 --
 // a degenerate scale-to-zero, which no matrix undoes).
 func (m matrix) invert() (matrix, bool) {
-	det := m.a*m.d - m.b*m.c
+	det := float64(m.a*m.d) - float64(m.b*m.c)
 	if det == 0 {
 		return matrix{}, false
 	}
@@ -549,8 +549,8 @@ func (m matrix) invert() (matrix, bool) {
 		c: -m.c / det,
 		d: m.a / det,
 	}
-	inv.e = -(m.e*inv.a + m.f*inv.c)
-	inv.f = -(m.e*inv.b + m.f*inv.d)
+	inv.e = -(float64(m.e*inv.a) + float64(m.f*inv.c))
+	inv.f = -(float64(m.e*inv.b) + float64(m.f*inv.d))
 	return inv, true
 }
 
