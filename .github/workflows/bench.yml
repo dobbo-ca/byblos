@@ -78,6 +78,8 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          # Private source must not reach the public repo's Actions cache.
+          cache: false
       # Private dobbo-ca Go modules (deflate-go, jpeg-go, jp2k-go, webp-go) are
       # fetched with a short-lived GitHub App token, minted per job. Skipped when
       # the variable is unset, and for fork and Dependabot PRs, which get no
@@ -92,23 +94,24 @@ jobs:
           owner: dobbo-ca
           repositories: deflate-go,jpeg-go,jp2k-go,webp-go
           permission-contents: read
-      - if: ${{ steps.app.outputs.token != '' }}
+      # Token only in THIS step's env (not $GITHUB_ENV): later steps run PR code.
+      # insteadOf is a plain prefix match, so keep the four repo names prefix-free
+      # of other dobbo-ca repos. Later steps build from the warm module cache.
+      - name: download private modules
+        if: ${{ steps.app.outcome == 'success' }}
         env:
-          TOKEN: ${{ steps.app.outputs.token }}
-        # $GITHUB_ENV is a file in the runner temp dir; it carries the four-entry
-        # insteadOf (never a dobbo-ca/ prefix) to the later go steps.
-        run: |
-          {
-            echo "GIT_CONFIG_COUNT=4"
-            echo "GIT_CONFIG_KEY_0=url.https://x-access-token:${TOKEN}@github.com/dobbo-ca/deflate-go.insteadOf"
-            echo "GIT_CONFIG_VALUE_0=https://github.com/dobbo-ca/deflate-go"
-            echo "GIT_CONFIG_KEY_1=url.https://x-access-token:${TOKEN}@github.com/dobbo-ca/jpeg-go.insteadOf"
-            echo "GIT_CONFIG_VALUE_1=https://github.com/dobbo-ca/jpeg-go"
-            echo "GIT_CONFIG_KEY_2=url.https://x-access-token:${TOKEN}@github.com/dobbo-ca/jp2k-go.insteadOf"
-            echo "GIT_CONFIG_VALUE_2=https://github.com/dobbo-ca/jp2k-go"
-            echo "GIT_CONFIG_KEY_3=url.https://x-access-token:${TOKEN}@github.com/dobbo-ca/webp-go.insteadOf"
-            echo "GIT_CONFIG_VALUE_3=https://github.com/dobbo-ca/webp-go"
-          } >> "$GITHUB_ENV"
+          GIT_CONFIG_COUNT: 4
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/deflate-go.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/dobbo-ca/deflate-go
+          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jpeg-go.insteadOf
+          GIT_CONFIG_VALUE_1: https://github.com/dobbo-ca/jpeg-go
+          GIT_CONFIG_KEY_2: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jp2k-go.insteadOf
+          GIT_CONFIG_VALUE_2: https://github.com/dobbo-ca/jp2k-go
+          GIT_CONFIG_KEY_3: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/webp-go.insteadOf
+          GIT_CONFIG_VALUE_3: https://github.com/dobbo-ca/webp-go
+        run: go mod download
+      - if: ${{ steps.app.outcome == 'skipped' }}
+        run: echo "::notice::private-module token not minted (no CI_READ_APP_ID, fork or Dependabot)"
 
       - name: restore the bench set
         id: benchset
@@ -241,13 +244,30 @@ jobs:
       # head. This makes latency scoreable: the baseline cannot carry absolute
       # durations (design spec 5.3), but a fresh base run measured here can be
       # compared to head on the same machine. Implemented by byb-99d.
+      - name: check out the base commit
+        run: git checkout "$(jq -r '.fingerprint.commit' internal/bench/baseline.json)"
+      # The base go.sum can name other versions, so download again. Token only
+      # in THIS step's env (not $GITHUB_ENV): later steps run candidate code.
+      # insteadOf is a plain prefix match, so keep the four repo names prefix-free
+      # of other dobbo-ca repos. Later steps build from the warm module cache.
+      - name: download private modules
+        if: ${{ steps.app.outcome == 'success' }}
+        env:
+          GIT_CONFIG_COUNT: 4
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/deflate-go.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/dobbo-ca/deflate-go
+          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jpeg-go.insteadOf
+          GIT_CONFIG_VALUE_1: https://github.com/dobbo-ca/jpeg-go
+          GIT_CONFIG_KEY_2: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jp2k-go.insteadOf
+          GIT_CONFIG_VALUE_2: https://github.com/dobbo-ca/jp2k-go
+          GIT_CONFIG_KEY_3: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/webp-go.insteadOf
+          GIT_CONFIG_VALUE_3: https://github.com/dobbo-ca/webp-go
+        run: go mod download
       - name: measure fresh base for touched capabilities
         env:
           CAPS: ${{ steps.touched.outputs.caps }}
         run: |
           set -euo pipefail
-          commit=$(jq -r '.fingerprint.commit' internal/bench/baseline.json)
-          git checkout "$commit"
           go run ./cmd/byblos-bench run -set ./bench-v1 -out base.json -time "$CAPS"
           git checkout -
 
