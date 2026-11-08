@@ -87,6 +87,11 @@ const PerObjectBytes = 1536
 // ObjectTableBytes is the reservation for a document declaring size objects.
 func ObjectTableBytes(size int64) int64 { return size * PerObjectBytes }
 
+// DecodeBytes is the reservation for one stream decode capped at max. pdfcpu
+// grows its output buffer by doubling and then copies it, measured at a peak of
+// about 3.7x the cap (TestDecodeReservationCoversPeak), so 4x.
+func DecodeBytes(max int64) int64 { return max * 4 }
+
 type waiter struct {
 	n       int64
 	ch      chan struct{}

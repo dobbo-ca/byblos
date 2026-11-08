@@ -11,6 +11,9 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,6 +222,87 @@ func liveHeap() uint64 {
 	return m.HeapAlloc
 }
 
+// peakHeap runs f and returns the most live heap it held over the heap before
+// it, sampled every 200us.
+func peakHeap(f func()) uint64 {
+	read := func() uint64 {
+		s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+		metrics.Read(s)
+		return s[0].Value.Uint64()
+	}
+	runtime.GC()
+	base := read()
+	var peak atomic.Uint64
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if v := read(); v > peak.Load() {
+				peak.Store(v)
+			}
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+	f()
+	close(done)
+	<-stopped
+	return max(peak.Load(), base) - base
+}
+
+// repeated is n bytes of content-stream filler, deflated.
+func repeated(t testing.TB, n int) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	zw := zlib.NewWriter(&out)
+	chunk := bytes.Repeat([]byte("q Q\n"), 1<<18)
+	for left := n; left > 0; left -= len(chunk) {
+		if _, err := zw.Write(chunk[:min(left, len(chunk))]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	zw.Close()
+	return out.Bytes()
+}
+
+// A decode at the stream cap holds at most what DecodeBytes reserves for it.
+func TestDecodeReservationCoversPeak(t *testing.T) {
+	pdf := bombPDF(flateStream(repeated(t, 160<<20)), "4 0 R") // refused at the 64 MiB cap
+	peak := peakHeap(func() {
+		_, err := InspectDocument(context.Background(), bytes.NewReader(pdf), Limits{})
+		var le *LimitError
+		if !errors.As(err, &le) || le.Name != "stream-bytes" {
+			t.Errorf("err = %v; want *LimitError stream-bytes", err)
+		}
+	})
+	if est := uint64(limits.DecodeBytes(64 << 20)); peak > est {
+		t.Errorf("peak %d > reservation %d", peak, est)
+	}
+	t.Logf("peak %d MiB, reservation %d MiB", peak>>20, limits.DecodeBytes(64<<20)>>20)
+}
+
+// A document whose object table and one decode cannot both fit is refused
+// outright: waiting for its own reservation would end only with ctx.
+func TestOwnReservationDoesNotDeadlock(t *testing.T) {
+	prev := SetMemoryLimit(300 << 20)
+	defer SetMemoryLimit(prev)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := InspectDocument(ctx, bytes.NewReader(paddedPDF(170_000)), Limits{})
+	var le *LimitError
+	if !errors.As(err, &le) || le.Name != "memory-budget" || errors.Is(err, ErrMemoryLimit) {
+		t.Errorf("err = %v; want a permanent memory-budget *LimitError", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("took %v; the refusal needs no wait", d)
+	}
+}
+
 // TestEstimateCoversAllocation is 9A.4 item 1: the object-table reservation
 // covers what pdfcpu's parse holds and is not more than 1.25x it.
 func TestEstimateCoversAllocation(t *testing.T) {
@@ -259,9 +343,9 @@ func TestBudgetHolds(t *testing.T) {
 		t.Errorf("estimate over the whole budget: err = %v; want a permanent memory-budget *LimitError", err)
 	}
 
-	// Room for the table and one decode (the 64 MiB stream cap is reserved
+	// Room for the table and one decode (the stream cap's reservation is taken
 	// whole before each decode), all of it held by someone else.
-	total := need + 65<<20
+	total := need + limits.DecodeBytes(64<<20)
 	SetMemoryLimit(total)
 	hold, err := limits.Reserve(context.Background(), total)
 	if err != nil {
@@ -285,6 +369,32 @@ func TestBudgetHolds(t *testing.T) {
 	if got := SetMemoryLimit(0); got != total {
 		t.Errorf("SetMemoryLimit returned %d; want the previous %d", got, total)
 	}
+}
+
+// 9A.4 item 3: several documents decoding at once under one budget never hold
+// more live heap than it.
+func TestBudgetHoldsPeak(t *testing.T) {
+	pdf := bombPDF(flateStream(repeated(t, 20<<20)), "4 0 R")
+	budget := limits.ObjectTableBytes(5) + limits.DecodeBytes(64<<20)
+	prev := SetMemoryLimit(budget)
+	defer SetMemoryLimit(prev)
+	peak := peakHeap(func() {
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := InspectDocument(context.Background(), bytes.NewReader(pdf), Limits{}); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+	})
+	if peak > uint64(budget) {
+		t.Errorf("peak %d > budget %d", peak, budget)
+	}
+	t.Logf("peak %d MiB, budget %d MiB", peak>>20, budget>>20)
 }
 
 // TestNoGoroutinesStarted is 9A.4 item 6: byblos starts no goroutines of its

@@ -45,6 +45,7 @@ import (
 	"fmt"
 	"hash/adler32"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/dobbo-ca/byblos/internal/content"
@@ -78,7 +79,12 @@ var configOnce sync.Once
 // serialised.
 func defaultConfig() *model.Configuration {
 	configOnce.Do(func() { _ = model.NewDefaultConfiguration() })
-	return model.NewDefaultConfiguration()
+	conf := model.NewDefaultConfiguration()
+	// pdfcpu defaults to 512 MiB per decode and 10M objects; every entry point
+	// takes the package defaults. openDoc narrows them to the caller's Limits.
+	conf.Limits.MaxDecodeBytes = limits.Limits{}.StreamBytes()
+	conf.Limits.MaxObjectCount = int(limits.Limits{}.Objects())
+	return conf
 }
 
 // ErrUnsupportedCodec reports an image stream whose compression filter pdfcpu
@@ -288,10 +294,9 @@ type doc struct {
 	fontCache map[int]fontCacheEntry       // RenderFont results, keyed like images
 
 	lim       limits.Limits
-	cctx      context.Context // the caller's ctx, for budget waits
-	pageBytes int64           // decoded non-image stream bytes of the current page
-	pageForms map[int]bool    // forms already counted in pageBytes (one form, many Do)
-	limitErr  error           // first limit breach a bool-returning lookup had to swallow
+	pageBytes int64        // decoded non-image stream bytes of the current page
+	pageForms map[int]bool // forms already counted in pageBytes (one form, many Do)
+	limitErr  error        // first limit breach a bool-returning lookup had to swallow
 }
 
 type scope struct {
@@ -319,7 +324,11 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
 		return nil, nil, err
 	}
-	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size))
+	// One reservation for the document's life: the object table and the slot its
+	// stream decodes (one at a time) run in. A decode that reserved for itself
+	// while the document held its table would wait on that table, alone or
+	// against other documents doing the same, until ctx ended.
+	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+limits.DecodeBytes(lim.StreamBytes()))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -351,6 +360,10 @@ func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (d Doc, 
 	conf.Limits.MaxObjectCount = int(lim.Objects())
 	ctx, err := api.ReadContext(cctx, rs, conf)
 	if err != nil {
+		// A trailer that understates /Size is caught by pdfcpu's own count, untyped.
+		if strings.Contains(err.Error(), "xref subsection object range exceeds limit") {
+			return nil, &limits.LimitError{Name: "objects", Got: lim.Objects() + 1, Max: lim.Objects()}
+		}
 		return nil, fmt.Errorf("byblos/pdfdoc: read: %w", err)
 	}
 	if err := ctx.EnsurePageCount(); err != nil {
@@ -369,7 +382,6 @@ func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (d Doc, 
 		refs:    map[int]types.IndirectRef{},
 		nextID:  -1,
 		lim:     lim,
-		cctx:    cctx,
 	}, nil
 }
 
@@ -700,11 +712,6 @@ func (d *doc) decodeRecovering(s types.StreamDict) ([]byte, bool) {
 	if max <= 0 {
 		return nil, false
 	}
-	release, err := limits.Reserve(d.cctx, max)
-	if err != nil {
-		return nil, false
-	}
-	defer release()
 	data := s.Raw
 	for _, f := range s.FilterPipeline {
 		// One filter, over the bytes the previous one produced. DecodeParms travels
@@ -1227,10 +1234,27 @@ func (d *doc) RawImage(id int) (data []byte, fileType string, err error) {
 	// pdfcpu applies Conf.Limits.MaxDecodeBytes, 512 MiB by default, to image
 	// streams and byblos has no decoder of its own for them).
 	info := d.images[id]
+	// A forged header must not reach pdfcpu: it reads a limit of 0 as its 512 MiB
+	// default and a negative one as no limit.
+	if info.Width <= 0 || info.Height <= 0 {
+		return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: invalid dimensions %d x %d", id, info.Width, info.Height)
+	}
 	if err := limits.Check("image-pixels", int64(info.Width)*int64(info.Height), d.lim.ImagePixels()); err != nil {
 		return nil, "", err
 	}
 	declared := imageDecodeBytes(info.Width, info.Height, info.BPC)
+	// The bound is on pixels. When the last filter is a codec, the layers in
+	// front of it (Flate around DCT) yield compressed bytes, which for a tiny
+	// image outweigh its pixels, so they get a floor.
+	if n := len(sd.FilterPipeline); n > 0 {
+		switch sd.FilterPipeline[n-1].Name {
+		case "DCTDecode", "JPXDecode", "JBIG2Decode":
+			declared = max(declared, 1<<20)
+		}
+	}
+	if declared <= 0 { // overflow
+		return nil, "", &limits.LimitError{Name: "image-bytes", Got: d.lim.StreamBytes() + 1, Max: d.lim.StreamBytes()}
+	}
 	lims := &d.ctx.Configuration.Limits
 	saved := lims.MaxDecodeBytes
 	lims.MaxDecodeBytes = declared

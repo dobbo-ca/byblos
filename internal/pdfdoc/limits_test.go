@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"runtime"
 	"strings"
 	"testing"
@@ -148,4 +150,79 @@ func limitsTotalAlloc() uint64 {
 	runtime.GC()
 	runtime.ReadMemStats(&m)
 	return m.TotalAlloc
+}
+
+// A tiny image whose JPEG is larger than its declared pixels, Flate-wrapped as
+// ocrmypdf -O1 writes it, is valid.
+func TestRawImageFlateWrappedDCTOfATinyImage(t *testing.T) {
+	img := image.NewGray(image.Rect(0, 0, 8, 8))
+	for i := range img.Pix {
+		img.Pix[i] = uint8(i * 37)
+	}
+	var jb bytes.Buffer
+	if err := jpeg.Encode(&jb, img, &jpeg.Options{Quality: 95}); err != nil {
+		t.Fatal(err)
+	}
+	var zb bytes.Buffer
+	zw := zlib.NewWriter(&zb)
+	zw.Write(jb.Bytes())
+	zw.Close()
+	if jb.Len() <= 264 {
+		t.Fatalf("fixture JPEG is %d bytes; the test needs more than the 264 declared", jb.Len())
+	}
+	pdf := imagePDF(8, 8, zb.Bytes(), "/Filter [/FlateDecode /DCTDecode]")
+	if err := rawImage(t, pdf, limits.Limits{}); err != nil {
+		t.Errorf("8 x 8 Flate+DCT: %v", err)
+	}
+}
+
+// pdfcpu reads a decode limit of 0 as its 512 MiB default and a negative one as
+// none, so a header that declares no positive size must not reach it.
+func TestRawImageForgedDimensionsAreRefusedBeforeDecoding(t *testing.T) {
+	bomb := limitsZeros(t, 300<<20)
+	for _, c := range []struct {
+		name string
+		w, h int
+	}{
+		{"negative width", -1, 100_000_000},
+		{"zero width", 0, 0},
+		{"negative both", -1, -1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			before := limitsTotalAlloc()
+			err := rawImage(t, imagePDF(c.w, c.h, bomb, "/Filter /FlateDecode"), limits.Limits{})
+			delta := limitsTotalAlloc() - before
+			if err == nil {
+				t.Error("err = nil; want a refusal")
+			}
+			if delta > 64<<20 {
+				t.Errorf("TotalAlloc delta = %d; the bomb was inflated", delta)
+			}
+		})
+	}
+}
+
+// A trailer that understates /Size is caught by pdfcpu's own object count, and
+// surfaces as the typed limit.
+func TestUnderReportedSizeIsAnObjectsLimit(t *testing.T) {
+	bodies := []string{"<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [] /Count 0 >>"}
+	for i := 0; i < 2000; i++ {
+		bodies = append(bodies, "<< >>")
+	}
+	pdf := limitsPDF(bodies)
+	pdf = bytes.Replace(pdf, []byte(fmt.Sprintf("/Size %d", len(bodies)+1)), []byte("/Size 10"), 1)
+	_, err := openDoc(context.Background(), bytes.NewReader(pdf), limits.Limits{MaxObjects: 1000})
+	var le *limits.LimitError
+	if !errors.As(err, &le) || le.Name != "objects" {
+		t.Errorf("err = %v; want *LimitError objects", err)
+	}
+}
+
+// Parse entry points other than Open (Optimize, Properties, the writer's
+// validator) take the package defaults, not pdfcpu's 512 MiB and 10M objects.
+func TestDefaultConfigCarriesTheLimits(t *testing.T) {
+	c := defaultConfig()
+	if c.Limits.MaxDecodeBytes != (limits.Limits{}).StreamBytes() || int64(c.Limits.MaxObjectCount) != (limits.Limits{}).Objects() {
+		t.Errorf("MaxDecodeBytes %d, MaxObjectCount %d", c.Limits.MaxDecodeBytes, c.Limits.MaxObjectCount)
+	}
 }

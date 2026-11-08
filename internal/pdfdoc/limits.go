@@ -71,7 +71,7 @@ func intAfter(b []byte) (int64, bool) {
 	return v, err == nil
 }
 
-// decode decodes sd under the stream caps and the budget. page counts the
+// decode decodes sd under the stream caps. page counts the
 // bytes toward the current page's running total.
 func (d *doc) decode(sd *types.StreamDict, page bool) error {
 	max, name, capMax := d.lim.StreamBytes(), "stream-bytes", d.lim.StreamBytes()
@@ -83,12 +83,7 @@ func (d *doc) decode(sd *types.StreamDict, page bool) error {
 	if max <= 0 {
 		return &limits.LimitError{Name: name, Got: d.pageBytes + 1, Max: capMax}
 	}
-	release, err := limits.Reserve(d.cctx, max)
-	if err != nil {
-		return err
-	}
-	defer release()
-	err = sd.DecodeWithLimit(max)
+	err := sd.DecodeWithLimit(max)
 	// An unfiltered stream is returned as is, whatever its size, so the length
 	// is checked as well as the filter's own refusal.
 	if errors.Is(err, filter.ErrDecodeLimitExceeded) || (err == nil && int64(len(sd.Content)) > max) {
