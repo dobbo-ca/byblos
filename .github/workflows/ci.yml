@@ -27,11 +27,46 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CGO_ENABLED: 0
+      GOPRIVATE: github.com/dobbo-ca/deflate-go,github.com/dobbo-ca/jpeg-go,github.com/dobbo-ca/jp2k-go,github.com/dobbo-ca/webp-go
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          # Private source must not reach the public repo's Actions cache.
+          cache: false
+      # Private dobbo-ca Go modules (deflate-go, jpeg-go, jp2k-go, webp-go) are
+      # fetched with a short-lived GitHub App token, minted per job. Skipped when
+      # the variable is unset, and for fork and Dependabot PRs, which get no
+      # secrets (the action would fail on an empty key). Nothing in go.mod needs
+      # a private copy today, so a skipped mint leaves the job green.
+      - id: app
+        if: ${{ vars.CI_READ_APP_ID != '' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.CI_READ_APP_ID }}
+          private-key: ${{ secrets.CI_READ_APP_KEY }}
+          owner: dobbo-ca
+          repositories: deflate-go,jpeg-go,jp2k-go,webp-go
+          permission-contents: read
+      # Token only in THIS step's env (not $GITHUB_ENV): later steps run PR code.
+      # insteadOf is a plain prefix match, so keep the four repo names prefix-free
+      # of other dobbo-ca repos. Later steps build from the warm module cache.
+      - name: download private modules
+        if: ${{ steps.app.outcome == 'success' }}
+        env:
+          GIT_CONFIG_COUNT: 4
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/deflate-go.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/dobbo-ca/deflate-go
+          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jpeg-go.insteadOf
+          GIT_CONFIG_VALUE_1: https://github.com/dobbo-ca/jpeg-go
+          GIT_CONFIG_KEY_2: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jp2k-go.insteadOf
+          GIT_CONFIG_VALUE_2: https://github.com/dobbo-ca/jp2k-go
+          GIT_CONFIG_KEY_3: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/webp-go.insteadOf
+          GIT_CONFIG_VALUE_3: https://github.com/dobbo-ca/webp-go
+        run: go mod download
+      - if: ${{ steps.app.outcome == 'skipped' }}
+        run: echo "::notice::private-module token not minted (no CI_READ_APP_ID, fork or Dependabot)"
       - name: assert no PDF oracle on PATH
         run: |
           fail=0
@@ -101,11 +136,46 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CGO_ENABLED: 0
+      GOPRIVATE: github.com/dobbo-ca/deflate-go,github.com/dobbo-ca/jpeg-go,github.com/dobbo-ca/jp2k-go,github.com/dobbo-ca/webp-go
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          # Private source must not reach the public repo's Actions cache.
+          cache: false
+      # Private dobbo-ca Go modules (deflate-go, jpeg-go, jp2k-go, webp-go) are
+      # fetched with a short-lived GitHub App token, minted per job. Skipped when
+      # the variable is unset, and for fork and Dependabot PRs, which get no
+      # secrets (the action would fail on an empty key). Nothing in go.mod needs
+      # a private copy today, so a skipped mint leaves the job green.
+      - id: app
+        if: ${{ vars.CI_READ_APP_ID != '' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.CI_READ_APP_ID }}
+          private-key: ${{ secrets.CI_READ_APP_KEY }}
+          owner: dobbo-ca
+          repositories: deflate-go,jpeg-go,jp2k-go,webp-go
+          permission-contents: read
+      # Token only in THIS step's env (not $GITHUB_ENV): later steps run PR code.
+      # insteadOf is a plain prefix match, so keep the four repo names prefix-free
+      # of other dobbo-ca repos. Later steps build from the warm module cache.
+      - name: download private modules
+        if: ${{ steps.app.outcome == 'success' }}
+        env:
+          GIT_CONFIG_COUNT: 4
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/deflate-go.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/dobbo-ca/deflate-go
+          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jpeg-go.insteadOf
+          GIT_CONFIG_VALUE_1: https://github.com/dobbo-ca/jpeg-go
+          GIT_CONFIG_KEY_2: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jp2k-go.insteadOf
+          GIT_CONFIG_VALUE_2: https://github.com/dobbo-ca/jp2k-go
+          GIT_CONFIG_KEY_3: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/webp-go.insteadOf
+          GIT_CONFIG_VALUE_3: https://github.com/dobbo-ca/webp-go
+        run: go mod download
+      - if: ${{ steps.app.outcome == 'skipped' }}
+        run: echo "::notice::private-module token not minted (no CI_READ_APP_ID, fork or Dependabot)"
       - name: install test oracles
         run: |
           sudo apt-get update
@@ -130,9 +200,44 @@ jobs:
     runs-on: ubuntu-24.04-arm
     env:
       CGO_ENABLED: 0
+      GOPRIVATE: github.com/dobbo-ca/deflate-go,github.com/dobbo-ca/jpeg-go,github.com/dobbo-ca/jp2k-go,github.com/dobbo-ca/webp-go
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          # Private source must not reach the public repo's Actions cache.
+          cache: false
+      # Private dobbo-ca Go modules (deflate-go, jpeg-go, jp2k-go, webp-go) are
+      # fetched with a short-lived GitHub App token, minted per job. Skipped when
+      # the variable is unset, and for fork and Dependabot PRs, which get no
+      # secrets (the action would fail on an empty key). Nothing in go.mod needs
+      # a private copy today, so a skipped mint leaves the job green.
+      - id: app
+        if: ${{ vars.CI_READ_APP_ID != '' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.CI_READ_APP_ID }}
+          private-key: ${{ secrets.CI_READ_APP_KEY }}
+          owner: dobbo-ca
+          repositories: deflate-go,jpeg-go,jp2k-go,webp-go
+          permission-contents: read
+      # Token only in THIS step's env (not $GITHUB_ENV): later steps run PR code.
+      # insteadOf is a plain prefix match, so keep the four repo names prefix-free
+      # of other dobbo-ca repos. Later steps build from the warm module cache.
+      - name: download private modules
+        if: ${{ steps.app.outcome == 'success' }}
+        env:
+          GIT_CONFIG_COUNT: 4
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/deflate-go.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/dobbo-ca/deflate-go
+          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jpeg-go.insteadOf
+          GIT_CONFIG_VALUE_1: https://github.com/dobbo-ca/jpeg-go
+          GIT_CONFIG_KEY_2: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jp2k-go.insteadOf
+          GIT_CONFIG_VALUE_2: https://github.com/dobbo-ca/jp2k-go
+          GIT_CONFIG_KEY_3: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/webp-go.insteadOf
+          GIT_CONFIG_VALUE_3: https://github.com/dobbo-ca/webp-go
+        run: go mod download
+      - if: ${{ steps.app.outcome == 'skipped' }}
+        run: echo "::notice::private-module token not minted (no CI_READ_APP_ID, fork or Dependabot)"
       - run: go test -count=1 ./...
