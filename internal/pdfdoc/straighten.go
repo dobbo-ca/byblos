@@ -4,6 +4,7 @@ package pdfdoc
 // byb-16j.2), design spec sections 2-4.
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -92,7 +93,7 @@ func applyStraighten(ctx *model.Context, pages []PageSource) error {
 // this runs (buildpages.go), so a nil box here would be this package's own
 // bug rather than a caller's malformed input.
 func pageCentre(xt *model.XRefTable, n int) (cx, cy float64, err error) {
-	_, _, inh, err := xt.PageDict(n, false)
+	_, _, inh, err := xt.PageDict(context.Background(), n, false)
 	if err != nil {
 		return 0, 0, fmt.Errorf("page %d dict: %w", n, err)
 	}

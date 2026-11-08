@@ -1,6 +1,7 @@
 package pdfdoc
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -44,7 +45,7 @@ func (d *doc) Annots(n int) (out []Annot, err error) {
 	// consolidation was only ever buying a content parse whose result is
 	// thrown away — and with it a rejection, and pdfcpu's skipTJ panic, on a
 	// page whose annotations read perfectly well.
-	pd, _, _, err := d.ctx.XRefTable.PageDict(n, false)
+	pd, _, _, err := d.ctx.XRefTable.PageDict(context.Background(), n, false)
 	if err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}

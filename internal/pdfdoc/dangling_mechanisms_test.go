@@ -2,6 +2,7 @@ package pdfdoc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
 
@@ -145,7 +146,7 @@ func buildRaw(t *testing.T, src []byte) []byte {
 // public surface reaches.
 func reopenXt(t *testing.T, out []byte) *model.XRefTable {
 	t.Helper()
-	ctx, err := api.ReadContext(bytes.NewReader(out), defaultConfig())
+	ctx, err := api.ReadContext(context.Background(), bytes.NewReader(out), defaultConfig())
 	if err != nil {
 		t.Fatalf("re-reading the built document: %v", err)
 	}

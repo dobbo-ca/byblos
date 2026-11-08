@@ -40,6 +40,7 @@ package pdfdoc
 import (
 	"bytes"
 	"compress/flate"
+	"context"
 	"errors"
 	"fmt"
 	"hash/adler32"
@@ -296,7 +297,7 @@ func Open(rs io.ReadSeeker) (d Doc, err error) {
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: seek: %w", err)
 	}
-	ctx, err := api.ReadContext(rs, defaultConfig())
+	ctx, err := api.ReadContext(context.Background(), rs, defaultConfig())
 	if err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: read: %w", err)
 	}
@@ -407,7 +408,7 @@ func (d *doc) Page(n int) (p *Page, err error) {
 	// /Resources inheritable, not additive: a page that declares one gets its
 	// own, and poppler agrees. Measured over the same 4,840 documents, no file
 	// changed answer because of it.
-	pd, _, inh, err := xt.PageDict(n, false)
+	pd, _, inh, err := xt.PageDict(context.Background(), n, false)
 	if err != nil {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}
@@ -1150,7 +1151,7 @@ func (d *doc) RawImage(id int) (data []byte, fileType string, err error) {
 	if !ok {
 		return nil, "", fmt.Errorf("byblos/pdfdoc: image %d has not been resolved on this document", id)
 	}
-	im, err := pdfcpu.ExtractImage(d.ctx, sd, false, d.images[id].Name, id, false)
+	im, err := pdfcpu.ExtractImage(context.Background(), d.ctx, sd, false, d.images[id].Name, id, false)
 	if err != nil {
 		return nil, "", fmt.Errorf("byblos/pdfdoc: rendering image %d: %w", id, err)
 	}

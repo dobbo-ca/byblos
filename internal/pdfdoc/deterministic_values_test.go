@@ -10,6 +10,7 @@ package pdfdoc_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"strings"
@@ -29,7 +30,7 @@ const pinnedDateWant = "D:20000101000000+00'00'"
 // reRead parses data with pdfcpu, independently of the writer under test.
 func reRead(t *testing.T, data []byte) *model.Context {
 	t.Helper()
-	ctx, err := api.ReadContext(bytes.NewReader(data), model.NewDefaultConfiguration())
+	ctx, err := api.ReadContext(context.Background(), bytes.NewReader(data), model.NewDefaultConfiguration())
 	if err != nil {
 		t.Fatalf("re-read output: %v", err)
 	}

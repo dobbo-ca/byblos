@@ -14,6 +14,7 @@ package pdfdoc
 // a document Open accepts is not guaranteed to survive here.
 
 import (
+	"context"
 	"io"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -34,13 +35,13 @@ import (
 func WriteProperties(rs io.ReadSeeker, w io.Writer, properties map[string]string) error {
 	conf := defaultConfig()
 	conf.Cmd = model.ADDPROPERTIES
-	ctx, err := api.ReadValidateAndOptimize(rs, conf)
+	ctx, err := api.ReadValidateAndOptimize(context.Background(), rs, conf, nil)
 	if err != nil {
 		return err
 	}
 	creation, mod := infoDates(ctx)
 	id := ctx.ID
-	if err := pdfcpu.PropertiesAdd(ctx, properties); err != nil {
+	if err := pdfcpu.PropertiesAdd(context.Background(), ctx, properties); err != nil {
 		return err
 	}
 	// PropertiesAdd runs pdfcpu's ensureInfoDictAndFileID, which stamps
@@ -69,5 +70,5 @@ func restoreDate(d types.Dict, key, raw string) {
 // ReadProperties returns rs's Info-dictionary properties. A key WriteProperties
 // never wrote is simply absent from the result, not an error.
 func ReadProperties(rs io.ReadSeeker) (map[string]string, error) {
-	return api.Properties(rs, defaultConfig())
+	return api.Properties(context.Background(), rs, defaultConfig())
 }

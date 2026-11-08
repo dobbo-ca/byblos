@@ -15,6 +15,7 @@ package pdfdoc
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -129,7 +130,7 @@ func (d *doc) AddFontResource(n int, f TrueTypeFont) (name string, err error) {
 	// only indirectly through a Do, would silently lose entries other
 	// content still needs. false returns the inherited dict as pdfcpu found
 	// it, unpruned.
-	pd, _, inh, err := xt.PageDict(n, false)
+	pd, _, inh, err := xt.PageDict(context.Background(), n, false)
 	if err != nil {
 		return "", fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}
@@ -187,7 +188,7 @@ func (d *doc) AppendContent(n int, ops []byte) (err error) {
 	defer catchPanic(fmt.Sprintf("append content on page %d", n), &err)
 	xt := d.ctx.XRefTable
 
-	pd, _, _, err := xt.PageDict(n, false)
+	pd, _, _, err := xt.PageDict(context.Background(), n, false)
 	if err != nil {
 		return fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}
@@ -291,7 +292,7 @@ func (d *doc) WrapContent(n int, before, after []byte) (err error) {
 	defer catchPanic(fmt.Sprintf("wrap content on page %d", n), &err)
 	xt := d.ctx.XRefTable
 
-	pd, _, _, err := xt.PageDict(n, false)
+	pd, _, _, err := xt.PageDict(context.Background(), n, false)
 	if err != nil {
 		return fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}
@@ -409,7 +410,7 @@ func (d *doc) contentDepth(n int) (depth int, err error) {
 	defer catchPanic(fmt.Sprintf("content depth on page %d", n), &err)
 	xt := d.ctx.XRefTable
 
-	pd, _, _, err := xt.PageDict(n, false)
+	pd, _, _, err := xt.PageDict(context.Background(), n, false)
 	if err != nil {
 		return 0, fmt.Errorf("byblos/pdfdoc: page %d dict: %w", n, err)
 	}

@@ -22,6 +22,7 @@ package pdfdoc
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/corpus"
@@ -158,13 +159,13 @@ func TestStampedFontAndContentValidateCleanly(t *testing.T) {
 
 	strict := model.NewDefaultConfiguration()
 	strict.ValidationMode = model.ValidationStrict
-	if err := api.Validate(bytes.NewReader(out), strict); err != nil {
+	if err := api.Validate(context.Background(), bytes.NewReader(out), strict, nil); err != nil {
 		t.Errorf("api.Validate(strict) = %v, want nil", err)
 	}
 
 	relaxed := model.NewDefaultConfiguration()
 	relaxed.ValidationMode = model.ValidationRelaxed
-	if err := api.Validate(bytes.NewReader(out), relaxed); err != nil {
+	if err := api.Validate(context.Background(), bytes.NewReader(out), relaxed, nil); err != nil {
 		t.Errorf("api.Validate(relaxed) = %v, want nil", err)
 	}
 }

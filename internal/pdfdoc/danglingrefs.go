@@ -10,6 +10,7 @@ package pdfdoc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"sort"
 
@@ -34,7 +35,7 @@ func (d DanglingRef) String() string {
 // why the writer this package uses cannot rely on either to catch the bug
 // byb-yul.6 is about.
 func DanglingRefs(out []byte) ([]DanglingRef, error) {
-	ctx, err := api.ReadContext(bytes.NewReader(out), defaultConfig())
+	ctx, err := api.ReadContext(context.Background(), bytes.NewReader(out), defaultConfig())
 	if err != nil {
 		return nil, err
 	}

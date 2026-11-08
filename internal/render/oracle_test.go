@@ -756,7 +756,11 @@ func TestRenderFontRefusesIdentityV(t *testing.T) {
 // amd64 (clamp never applies, the range silently contributes zero widths)
 // (byb-6z1 review finding 4).
 func hostileWCIDHugeFloatPDF() []byte {
-	return cidWPDF("/W [0 1e300 500]")
+	// pdfcpu >= 0.16 no longer parses exponent notation (not valid PDF) and
+	// turns a number outside its int range into 0, so 1e300 can no longer
+	// reach cidWidths. 1e15 is a value the parser still passes
+	// through; it still exercises the clamp (> 65535).
+	return cidWPDF("/W [0 1000000000000000.0 500]")
 }
 
 // TestRenderFontCIDWidthHugeFloatArchIndependent pins that a /W range with an

@@ -47,6 +47,7 @@ package pdfdoc
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
@@ -73,7 +74,7 @@ func writeDeterministic(ctx *model.Context, w io.Writer) error {
 		_, err := w.Write(b)
 		return err
 	}
-	return api.WriteContext(ctx, w)
+	return api.WriteContext(context.Background(), ctx, w)
 }
 
 // infoDates returns ctx's Info-dictionary CreationDate and ModDate as raw
