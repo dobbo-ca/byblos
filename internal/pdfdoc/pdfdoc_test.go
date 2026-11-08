@@ -16,6 +16,7 @@ import (
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/corpus"
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // corpusDoc, not doc: `doc` is already the unexported struct type in
@@ -921,7 +922,7 @@ func deflateN(t *testing.T, n int) []byte {
 
 // fontBombPDF builds a one-page document whose /FontFile2 decodes to
 // decodedBytes -- a flate bomb sized by the caller, so the test can sit both
-// under and over maxFontProgramBytes.
+// under and over limits.DefaultFontProgramBytes.
 func fontBombPDF(t *testing.T, decodedBytes int) []byte {
 	t.Helper()
 	bomb := deflateN(t, decodedBytes)
@@ -939,13 +940,13 @@ func fontBombPDF(t *testing.T, decodedBytes int) []byte {
 
 // TestRenderFontBoundsDecodedProgramSize pins byb-utl: a /FontFile2 whose
 // declared /Length1 and whose actual flate-bomb decode both claim far more
-// than maxFontProgramBytes must not make renderFont allocate anywhere near
+// than limits.DefaultFontProgramBytes must not make renderFont allocate anywhere near
 // that much. TotalAlloc's ceiling here is generous (8x the budget) so the
 // assertion is not flaky against GC/runtime overhead; reverting the guard
 // (renderFont's sd.DecodeWithLimit back to sd.Decode) pushes the real delta
 // to 512 MiB and this fails hard, not marginally.
 func TestRenderFontBoundsDecodedProgramSize(t *testing.T) {
-	const decoded = 128 << 20 // 128 MiB, far past maxFontProgramBytes (16 MiB)
+	const decoded = 128 << 20 // 128 MiB, far past limits.DefaultFontProgramBytes (16 MiB)
 	pdf := fontBombPDF(t, decoded)
 
 	d, err := Open(bytes.NewReader(pdf))
@@ -966,10 +967,10 @@ func TestRenderFontBoundsDecodedProgramSize(t *testing.T) {
 	if !ok {
 		t.Fatal("RenderFont ok=false; a bad font program must degrade, not fail resolution")
 	}
-	if len(rf.Program) > maxFontProgramBytes {
-		t.Errorf("len(Program) = %d; want <= maxFontProgramBytes (%d)", len(rf.Program), maxFontProgramBytes)
+	if len(rf.Program) > limits.DefaultFontProgramBytes {
+		t.Errorf("len(Program) = %d; want <= limits.DefaultFontProgramBytes (%d)", len(rf.Program), limits.DefaultFontProgramBytes)
 	}
-	const ceiling = 8 * maxFontProgramBytes // generous: real unguarded delta is 512 MiB
+	const ceiling = 8 * limits.DefaultFontProgramBytes // generous: real unguarded delta is 512 MiB
 	if delta := int64(m1.TotalAlloc - m0.TotalAlloc); delta > ceiling {
 		t.Errorf("TotalAlloc delta = %d bytes (%.2f MiB); want <= %d bytes (%.2f MiB)",
 			delta, float64(delta)/(1<<20), ceiling, float64(ceiling)/(1<<20))
@@ -1013,7 +1014,7 @@ func aliasedFontPDF(t *testing.T, n, decodedBytes int) []byte {
 // flaky; reverting the cache (RenderFont calling d.renderFont directly)
 // pushes the real delta to roughly 50x one decode and this fails hard.
 func TestRenderFontCachesByFontObject(t *testing.T) {
-	const decoded = 8 << 20 // 8 MiB: under maxFontProgramBytes, so every call succeeds
+	const decoded = 8 << 20 // 8 MiB: under limits.DefaultFontProgramBytes, so every call succeeds
 	const names = 50        // census MAX Tf names/page
 	pdf := aliasedFontPDF(t, names, decoded)
 
@@ -1071,10 +1072,10 @@ func unfilteredFontPDF(t *testing.T, n int) []byte {
 // stages (types.StreamDict.decodeLength), so a stream with NO /Filter
 // returns sd.Raw untouched, maxDecodeBytes never consulted
 // (DecodeLengthWithLimit's "nothing to decode" short-circuit). A literal,
-// uncompressed /FontFile2 bigger than maxFontProgramBytes must still be
+// uncompressed /FontFile2 bigger than limits.DefaultFontProgramBytes must still be
 // refused, not admitted 1:1.
 func TestRenderFontBoundsUnfilteredProgramSize(t *testing.T) {
-	pdf := unfilteredFontPDF(t, maxFontProgramBytes+1)
+	pdf := unfilteredFontPDF(t, limits.DefaultFontProgramBytes+1)
 
 	d, err := Open(bytes.NewReader(pdf))
 	if err != nil {
@@ -1089,7 +1090,7 @@ func TestRenderFontBoundsUnfilteredProgramSize(t *testing.T) {
 	if !ok {
 		t.Fatal("RenderFont ok=false; an oversized program must degrade, not fail resolution")
 	}
-	if len(rf.Program) > maxFontProgramBytes {
-		t.Errorf("len(Program) = %d; want <= maxFontProgramBytes (%d), an unfiltered stream must be bounded too", len(rf.Program), maxFontProgramBytes)
+	if len(rf.Program) > limits.DefaultFontProgramBytes {
+		t.Errorf("len(Program) = %d; want <= limits.DefaultFontProgramBytes (%d), an unfiltered stream must be bounded too", len(rf.Program), limits.DefaultFontProgramBytes)
 	}
 }

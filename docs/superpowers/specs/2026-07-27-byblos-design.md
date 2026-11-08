@@ -481,6 +481,34 @@ type Diagnostic struct {
 func Inspect(r io.ReadSeeker) ([]PageInfo, error)
 func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error)
 
+// DocumentInfo adds the document-level facts: Encrypted (opened with the empty
+// password), HasSignature (/AcroForm /SigFlags bit 1) and NeedsRendering
+// (dynamic XFA). InspectDocument is InspectContext under a Limits.
+type DocumentInfo struct {
+    Pages          []PageInfo
+    Encrypted      bool
+    HasSignature   bool
+    NeedsRendering bool
+}
+
+func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*DocumentInfo, error)
+
+// --- resource limits (docs/guides/memory-limits.md) ---
+
+// Limits bounds one call; its zero value is the safe default.
+type Limits = limits.Limits
+
+// LimitError names the cap an input breached and wraps ErrLimit.
+type LimitError = limits.LimitError
+
+var ErrLimit = limits.ErrLimit
+var ErrMemoryLimit = limits.ErrMemoryLimit
+
+// ErrPassword reports a document that needs a non-empty user password.
+var ErrPassword = errors.New("byblos: document needs a password")
+
+func SetMemoryLimit(n int64) int64
+
 // --- extraction (no renderer) ---
 
 // ErrNotSingleRaster reports a page that is not one visible image: tiled
