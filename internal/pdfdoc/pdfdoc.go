@@ -323,9 +323,9 @@ type doc struct {
 	fontCache map[int]fontCacheEntry       // RenderFont results, keyed like images
 
 	lim       limits.Limits
-	pageBytes int64        // decoded non-image stream bytes of the current page
-	pageForms map[int]bool // forms already counted in pageBytes (one form, many Do)
-	limitErr  error        // first limit breach a bool-returning lookup had to swallow
+	pageBytes int64          // decoded non-image stream bytes of the current page
+	pageForms map[int][]byte // decoded forms already counted in pageBytes, shared by every Do of one form
+	limitErr  error          // first limit breach a bool-returning lookup had to swallow
 }
 
 type scope struct {
@@ -992,19 +992,24 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 		return content.XObject{Image: true, ID: id}, true
 
 	case "Form":
-		// A form invoked many times on a page counts once toward the page total.
-		counted := id >= 0 && d.pageForms[id]
-		if err := d.decode(sd, !counted); err != nil {
-			if isLimit(err) && d.limitErr == nil {
-				d.limitErr = err
+		// A form invoked many times on a page is decoded once and counts once;
+		// every Do shares that buffer, so a form that draws itself holds one
+		// decode, not one per nesting level.
+		if c, ok := d.pageForms[id]; ok && id >= 0 {
+			sd.Content = c
+		} else {
+			if err := d.decode(sd, true); err != nil {
+				if isLimit(err) && d.limitErr == nil {
+					d.limitErr = err
+				}
+				return content.XObject{}, false
 			}
-			return content.XObject{}, false
-		}
-		if id >= 0 && !counted {
-			if d.pageForms == nil {
-				d.pageForms = map[int]bool{}
+			if id >= 0 {
+				if d.pageForms == nil {
+					d.pageForms = map[int][]byte{}
+				}
+				d.pageForms[id] = sd.Content
 			}
-			d.pageForms[id] = true
 		}
 		m := content.Identity
 		if arr := d.arrayEntry(sd.Dict, "Matrix"); len(arr) == 6 {

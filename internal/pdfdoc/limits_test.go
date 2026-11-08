@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
@@ -975,5 +976,50 @@ func TestRepeatedStreamReadsAreRefusedUnderABudget(t *testing.T) {
 	}
 	if added := int64(peak) - int64(base.HeapAlloc); added > 32*mib {
 		t.Errorf("heap added = %d MiB; want the parse stopped inside the 32 MiB budget", added>>20)
+	}
+}
+
+// A form whose own /Resources map its name back to itself is entered at every
+// nesting level up to the depth cap. Each entry must share the one decoded
+// buffer: a decode per level held about eight slots at once against the four
+// OpenBudgeted reserves.
+func TestSelfDrawingFormDecodesOnce(t *testing.T) {
+	const decoded = 4 << 20
+	data := append([]byte("q /F Do Q\n"), bytes.Repeat([]byte("%"+strings.Repeat("x", 62)+"\n"), decoded/64)...)
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	zw.Write(data)
+	zw.Close()
+	var out bytes.Buffer
+	offs := map[int]int{}
+	obj := func(nr int, b string) { offs[nr] = out.Len(); fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", nr, b) }
+	out.WriteString("%PDF-1.7\n")
+	obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+	obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Resources << /XObject << /F 4 0 R >> >> /Contents 5 0 R >>")
+	obj(4, fmt.Sprintf("<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << /XObject << /F 4 0 R >> >> /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", z.Len(), z.Bytes()))
+	obj(5, "<< /Length 6 >>\nstream\n/F Do\n\nendstream")
+	xo := out.Len()
+	out.WriteString("xref\n0 6\n0000000000 65535 f \n")
+	for i := 1; i < 6; i++ {
+		fmt.Fprintf(&out, "%010d 00000 n \n", offs[i])
+	}
+	fmt.Fprintf(&out, "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xo)
+
+	before := limitsTotalAlloc()
+	d, release, err := OpenBudgeted(context.Background(), bytes.NewReader(out.Bytes()), limits.Limits{})
+	if err == nil {
+		var p *Page
+		if p, err = d.Page(1); err == nil {
+			_, err = content.Walk(context.Background(), p.Content, p.Scope, d)
+		}
+		release()
+	}
+	delta := limitsTotalAlloc() - before
+	if err != nil {
+		t.Logf("err = %v", err)
+	}
+	if delta > 6*decoded*4 {
+		t.Errorf("TotalAlloc delta = %d MiB; want one decode of the %d MiB form, not one per level", delta>>20, decoded>>20)
 	}
 }
