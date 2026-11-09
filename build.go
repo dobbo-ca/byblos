@@ -40,7 +40,9 @@ type DecodeParms = pdfdoc.DecodeParms
 // Placement within the box is fit-centered (contain): the image is scaled
 // uniformly to fit inside the box and centred there. When the box's aspect
 // ratio does not match the image's, PageRaster.CoversPage will report false
-// for that page — correct and expected, not a defect.
+// for that page — correct and expected, not a defect. A box derived from DPI
+// (WidthPt and HeightPt zero) is filled instead: with DPIY != DPI the page has
+// the pixels' own declared aspect, and img2pdf paints it edge to edge.
 type BuildPage struct {
 	Image             EncodedImage
 	WidthPt, HeightPt float64
@@ -99,7 +101,7 @@ func BuildPDFLimits(ctx context.Context, w io.Writer, pages []BuildPage, lim Lim
 		if err != nil {
 			return fmt.Errorf("byblos: BuildPDF: page %d: %w", i+1, err)
 		}
-		built[i] = pdfbuild.Page{Image: p.Image, WidthPt: pw, HeightPt: ph, Rotate: p.Rotate}
+		built[i] = pdfbuild.Page{Image: p.Image, WidthPt: pw, HeightPt: ph, Rotate: p.Rotate, Fill: p.WidthPt == 0 && p.HeightPt == 0}
 	}
 	if err := pdfbuild.Write(w, built, lim); err != nil {
 		return fmt.Errorf("byblos: BuildPDF: %w", err)
@@ -190,7 +192,7 @@ func (bw *BuildWriter) AddPage(ctx context.Context, p BuildPage) error {
 	if err != nil {
 		return fmt.Errorf("byblos: BuildWriter: page %d: %w", bw.b.Pages()+1, err)
 	}
-	if err := bw.b.AddPage(pdfbuild.Page{Image: p.Image, WidthPt: pw, HeightPt: ph, Rotate: p.Rotate}); err != nil {
+	if err := bw.b.AddPage(pdfbuild.Page{Image: p.Image, WidthPt: pw, HeightPt: ph, Rotate: p.Rotate, Fill: p.WidthPt == 0 && p.HeightPt == 0}); err != nil {
 		return fmt.Errorf("byblos: BuildWriter: %w", err)
 	}
 	return nil

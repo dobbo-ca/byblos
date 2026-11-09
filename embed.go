@@ -376,21 +376,44 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 		return Orientation{}, nil
 	}
 	var o float64
-	f, dup := tiffField(b.tiff, 0x0112)
-	if dup {
+	f, dup, bad := tiffField(b.tiff, 0x0112, false)
+	x7, xmpDup, _ := tiffField(b.tiff, 700, true)
+	x1, ok1, conflict := xmpOrientation(b.xmp)
+	var x2 int
+	var ok2 bool
+	if x7 != nil {
+		var c2 bool
+		x2, ok2, c2 = xmpOrientation(x7.val)
+		conflict = conflict || c2
+	}
+	if dup || bad || xmpDup || conflict {
 		return Orientation{Ambiguous: true}, nil
+	}
+	if ok2 {
+		// Pillow never reads the XMP in IFD0 tag 700, but a reader of the whole file does.
+		base := 1
+		if f != nil {
+			if n, ok := f.num(); ok {
+				base = int(n)
+			}
+		} else if ok1 {
+			base = x1
+		}
+		if x2 != base {
+			return Orientation{Ambiguous: true}, nil
+		}
 	}
 	if f != nil {
 		var ok bool
 		if o, ok = f.num(); !ok {
 			return Orientation{}, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
 		}
-	} else if x, ok := xmpOrientation(b.xmp); ok {
-		o = float64(x)
+	} else if ok1 {
+		o = float64(x1)
 	} else {
 		return Orientation{}, nil
 	}
-	if x, ok := xmpOrientation(b.xmp); ok && float64(x) != o && f != nil {
+	if ok1 && float64(x1) != o && f != nil {
 		return Orientation{Ambiguous: true}, nil
 	}
 	switch o {
@@ -670,12 +693,13 @@ func fromHex(s []byte) ([]byte, error) {
 }
 
 // xmpOrientation is the digit Pillow takes from an XMP packet: the first
-// tiff:Orientation=" or tiff:Orientation> that a digit follows.
-func xmpOrientation(x []byte) (int, bool) {
+// tiff:Orientation=" or tiff:Orientation> that a digit follows. conflict reports
+// a later one with a different digit.
+func xmpOrientation(x []byte) (v int, ok, conflict bool) {
 	for p := []byte("tiff:Orientation"); ; {
 		i := bytes.Index(x, p)
 		if i < 0 {
-			return 0, false
+			return v, ok, conflict
 		}
 		x = x[i+len(p):]
 		r := bytes.TrimPrefix(x, []byte(`="`))
@@ -683,7 +707,11 @@ func xmpOrientation(x []byte) (int, bool) {
 			r = bytes.TrimPrefix(x, []byte(">"))
 		}
 		if len(r) < len(x) && len(r) > 0 && r[0] >= '0' && r[0] <= '9' {
-			return int(r[0] - '0'), true
+			if d := int(r[0] - '0'); !ok {
+				v, ok = d, true
+			} else if d != v {
+				conflict = true
+			}
 		}
 	}
 }
@@ -704,7 +732,7 @@ func loadFails(t []byte) bool {
 // whether there is a block at all.
 func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 	d, _ := exifBlock(data, Limits{})
-	f, _ = tiffField(d.tiff, tag)
+	f, _, _ = tiffField(d.tiff, tag, false)
 	return f, d.exif
 }
 
@@ -715,12 +743,15 @@ func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 // or with no values is skipped; an entry whose values lie outside the block
 // ends the reading of values, keeping the tags before it, but not the scan for
 // repeats of tag, which runs over every entry the block holds (an entry cut
-// short by the block end that starts with tag counts as a repeat). f is nil
-// when the tag is absent.
-func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
+// short by the block end that starts with tag counts as a repeat). bad reports
+// an entry of tag whose values lie outside the block or that follows such an
+// entry, so Pillow never sees it. f is nil when the tag is absent. With
+// lost, an entry after such an entry is still read if its own values lie in
+// range (for a reader of the whole file, which Pillow is not).
+func tiffField(t []byte, tag uint16, lost bool) (f *exifField, dup, bad bool) {
 	// The second pair is 0x002a or 0x2a00 (Pillow accepts either order); BigTIFF is not read.
 	if len(t) < 8 || t[0] != t[1] || (t[0] != 'I' && t[0] != 'M') || t[2]|t[3] != 0x2a || t[2]&t[3] != 0 {
-		return nil, false
+		return nil, false, false
 	}
 	var bo binary.ByteOrder = binary.BigEndian
 	if t[0] == 'I' {
@@ -728,7 +759,7 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 	}
 	ifd := uint64(bo.Uint32(t[4:]))
 	if ifd+2 > uint64(len(t)) {
-		return nil, false
+		return nil, false, false
 	}
 	n := bo.Uint16(t[ifd:])
 	seen, stop := false, false
@@ -742,7 +773,10 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 			break
 		}
 		if stop {
-			continue
+			bad = bad || match
+			if !lost {
+				continue
+			}
 		}
 		typ, count := bo.Uint16(t[e+2:]), bo.Uint32(t[e+4:])
 		if int(typ) >= len(exifSize) || exifSize[typ] == 0 || count == 0 {
@@ -752,7 +786,7 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 		if size := uint64(exifSize[typ]) * uint64(count); size > 4 {
 			off := uint64(bo.Uint32(val))
 			if off+size > uint64(len(t)) {
-				stop = true
+				stop, bad = true, bad || match
 				continue
 			}
 			val = t[off:]
@@ -761,7 +795,7 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 			f = &exifField{typ, val[:uint64(exifSize[typ])*uint64(count)], bo}
 		}
 	}
-	return f, dup
+	return f, dup, bad
 }
 
 // EmbedJP2 lifts a JP2 file under /JPXDecode, verbatim, after reading its

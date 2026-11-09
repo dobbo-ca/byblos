@@ -116,11 +116,14 @@ func TestOrientationTextOverBudgetParks(t *testing.T) {
 
 // tiffOrient is a little-endian TIFF whose IFD0 has one SHORT Orientation
 // entry per value.
-func tiffOrient(vals ...uint16) []byte {
+func tiffOrient(vals ...uint16) []byte { return tiffTag(0x0112, vals...) }
+
+// tiffTag is tiffOrient for any tag.
+func tiffTag(tag uint16, vals ...uint16) []byte {
 	b := []byte{'I', 'I', 42, 0, 8, 0, 0, 0}
 	b = binary.LittleEndian.AppendUint16(b, uint16(len(vals)))
 	for _, v := range vals {
-		b = binary.LittleEndian.AppendUint16(b, 0x0112)
+		b = binary.LittleEndian.AppendUint16(b, tag)
 		b = binary.LittleEndian.AppendUint16(b, 3)
 		b = binary.LittleEndian.AppendUint32(b, 1)
 		b = binary.LittleEndian.AppendUint16(b, v)
@@ -211,5 +214,85 @@ func TestOrientationRepeatedSourcesAreAmbiguous(t *testing.T) {
 	// one source each stays Pillow's.
 	if o, err := EXIFOrientation(jpegApp1(exifSeg(6), xmpPacket(6)), Limits{}); err != nil || o != (Orientation{Rotate: 90}) {
 		t.Errorf("single sources: got %+v, %v; want 90", o, err)
+	}
+}
+
+// Orientation metadata img2pdf reads one way and a reader of the whole file
+// another is ambiguous too: XMP Descriptions that disagree, an IFD0 entry with
+// values outside the block before a valid Orientation, a repeated XMP tag 700.
+func TestOrientationConflictsAreAmbiguous(t *testing.T) {
+	xmp2 := func(a, b byte) []byte {
+		return append(append([]byte(nil), xapPrefix...), `<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/'><tiff:Orientation>`+string(rune(a))+`</tiff:Orientation></rdf:Description><rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/'><tiff:Orientation>`+string(rune(b))+`</tiff:Orientation></rdf:Description></x:xmpmeta>`...)
+	}
+	outsideThenOrient := []byte{'I', 'I', 42, 0, 8, 0, 0, 0, 2, 0,
+		0x0f, 0x01, 2, 0, 100, 0, 0, 0, 0xf0, 0xff, 0, 0,
+		0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0}
+	for name, data := range map[string][]byte{
+		"jpeg-xmp-disagree":    jpegApp1(xmp2('1', '6')),
+		"png-xmp-disagree":     pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", xmp2('1', '6')[len(xapPrefix):])),
+		"jpeg-outside-then-6":  jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], outsideThenOrient...)),
+		"png-outside-then-6":   pngBeforeIDAT(t, pngRaw("eXIf", outsideThenOrient)),
+		"jpeg-tag700-repeated": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffTag(700, 1, 1)...)),
+		"png-tag700-repeated":  pngBeforeIDAT(t, pngRaw("eXIf", tiffTag(700, 1, 1))),
+	} {
+		o, err := EXIFOrientation(data, Limits{})
+		if err != nil || o != (Orientation{Ambiguous: true}) {
+			t.Errorf("%s: got %+v, %v; want rotation 0 and ambiguous", name, o, err)
+		}
+	}
+	// agreeing Descriptions and a single tag 700 stay Pillow's.
+	if o, err := EXIFOrientation(jpegApp1(xmp2('6', '6')), Limits{}); err != nil || o != (Orientation{Rotate: 90}) {
+		t.Errorf("agreeing XMP: got %+v, %v; want 90", o, err)
+	}
+	if o, err := EXIFOrientation(jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffTag(700, 1)...)), Limits{}); err != nil || o != (Orientation{}) {
+		t.Errorf("single tag 700: got %+v, %v; want 0", o, err)
+	}
+}
+
+// ifd0 is a little-endian TIFF whose IFD0 holds the given 12-byte entries,
+// then data (offsets in the entries count from the start of the TIFF).
+func ifd0(data []byte, entries ...[]byte) []byte {
+	b := binary.LittleEndian.AppendUint16([]byte{'I', 'I', 42, 0, 8, 0, 0, 0}, uint16(len(entries)))
+	for _, e := range entries {
+		b = append(b, e...)
+	}
+	return append(append(b, 0, 0, 0, 0), data...)
+}
+
+func ent(tag, typ uint16, count, val uint32) []byte {
+	e := binary.LittleEndian.AppendUint16(nil, tag)
+	e = binary.LittleEndian.AppendUint16(e, typ)
+	e = binary.LittleEndian.AppendUint32(e, count)
+	return binary.LittleEndian.AppendUint32(e, val)
+}
+
+// A tag 700 XMP is read by a reader of the whole file, not by Pillow: it
+// conflicts with the IFD0 Orientation, and a lost one changes nothing.
+func TestOrientationTag700XMPAndMalformedOrientation(t *testing.T) {
+	xmp := func(o string) []byte {
+		return []byte(`<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/'><tiff:Orientation>` + o + `</tiff:Orientation></rdf:Description></x:xmpmeta>`)
+	}
+	const dataOff = 8 + 2 + 3*12 + 4 // after a three-entry IFD0
+	orient6, outside := ent(0x112, 3, 1, 6), ent(0x10f, 2, 100, 0xfff0)
+	for _, c := range []struct {
+		name string
+		tiff []byte
+		want Orientation
+	}{
+		{"orient6-outside-tag700", ifd0(xmp("1"), orient6, outside, ent(700, 1, uint32(len(xmp("1"))), dataOff)), Orientation{Ambiguous: true}},
+		{"orient6-outside-tag700-agrees", ifd0(xmp("6"), orient6, outside, ent(700, 1, uint32(len(xmp("6"))), dataOff)), Orientation{Rotate: 90}},
+		{"orient6-tag700-agrees", ifd0(xmp("6"), orient6, ent(700, 1, uint32(len(xmp("6"))), 8+2+2*12+4)), Orientation{Rotate: 90}},
+		{"orient6-tag700-says3", ifd0(xmp("3"), orient6, ent(700, 1, uint32(len(xmp("3"))), 8+2+2*12+4)), Orientation{Ambiguous: true}},
+		{"no-orient-tag700-says6", ifd0(xmp("6"), ent(700, 1, uint32(len(xmp("6"))), 8+2+12+4)), Orientation{Ambiguous: true}},
+		{"orient-itself-outside", ifd0(nil, ent(0x112, 3, 3, 0xfff0)), Orientation{Ambiguous: true}},
+	} {
+		for kind, data := range map[string][]byte{
+			"jpeg": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], c.tiff...)),
+			"png":  pngBeforeIDAT(t, pngRaw("eXIf", c.tiff)),
+		} {
+			if o, err := EXIFOrientation(data, Limits{}); err != nil || o != c.want {
+				t.Errorf("%s/%s: got %+v, %v; want %+v", c.name, kind, o, err, c.want)
+			}
+		}
 	}
 }

@@ -36,6 +36,10 @@ type Page struct {
 	Image             pdfdoc.EncodedImage
 	WidthPt, HeightPt float64
 	Rotate            int // /Rotate: 0, 90, 180 or 270; 0 writes none
+	// Fill paints the image over the whole box instead of fit-centering it: the
+	// box was derived from the image's own resolution, so any aspect mismatch is
+	// the file's declared anisotropy (img2pdf draws it that way).
+	Fill bool
 }
 
 // Write emits a PDF whose page i paints pages[i].Image, fit-centered on its
@@ -109,6 +113,9 @@ func (b *Builder) emit(p Page) error {
 	scale := math.Min(p.WidthPt/float64(img.Width), p.HeightPt/float64(img.Height))
 	dw := float64(float64(img.Width) * scale)
 	dh := float64(float64(img.Height) * scale)
+	if p.Fill {
+		dw, dh = p.WidthPt, p.HeightPt
+	}
 	if !inRange(dw) || !inRange(dh) {
 		return fmt.Errorf("byblos/pdfbuild: page %d: scaled image size %gx%g is not representable", len(b.kids)+1, dw, dh)
 	}
