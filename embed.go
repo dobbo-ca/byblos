@@ -20,6 +20,7 @@ import (
 	"compress/zlib"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"image/color"
@@ -27,7 +28,7 @@ import (
 	"io"
 	"math"
 	"math/big"
-	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -381,7 +382,7 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	f, dup, bad := tiffField(b.tiff, 0x0112, false)
 	x7, _, _ := tiffField(b.tiff, 700, true)
 	x1, ok1 := xmpOrientation(b.xmp)
-	a1, aok1, _, conflict := xmpScan(b.xmp)
+	a1, c1, aok1, conflict := xmpScan(b.xmp)
 	var x2 int
 	var ok2 bool
 	n7 := 0
@@ -399,17 +400,17 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	if dup || bad || n7 > 1 || n7 == 1 && !carries2 || conflict {
 		return Orientation{Ambiguous: true}, nil
 	}
-	if ok2 {
+	if carries2 {
 		// Pillow never reads the XMP in IFD0 tag 700, but a reader of the whole file does.
 		base := 1
 		if f != nil {
 			if n, ok := f.num(); ok {
 				base = int(n)
 			}
-		} else if aok1 {
+		} else if c1 {
 			base = a1
 		}
-		if x2 != base {
+		if !ok2 || x2 != base {
 			return Orientation{Ambiguous: true}, nil
 		}
 	}
@@ -423,7 +424,7 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	} else {
 		return Orientation{}, nil
 	}
-	if aok1 && float64(a1) != o && f != nil {
+	if c1 && !(aok1 && float64(a1) == o) && f != nil {
 		return Orientation{Ambiguous: true}, nil
 	}
 	switch o {
@@ -717,35 +718,69 @@ func fromHex(s []byte) ([]byte, error) {
 	return out, nil
 }
 
-var (
-	xmpComment = regexp.MustCompile(`(?s)<!--.*?-->`)
-	xmpTiffNS  = regexp.MustCompile(`xmlns:([\w.-]+)\s*=\s*["']http://ns\.adobe\.com/tiff/1\.0/["']`)
+const (
+	xmpTiffNS     = "http://ns.adobe.com/tiff/1.0/"
+	xmpMaxTokens  = 1 << 17 // the packet is already capped; this bounds the work per packet
+	xmpMaxNesting = 64
 )
 
-// xmpScan reads the tiff Orientation of an XMP packet in any XML form (either
-// quote, spaces around the =, an element, any prefix bound to the tiff
-// namespace, comments ignored), not only the ones Pillow reads: carries
-// reports an Orientation attribute or element, v is the first digit that
-// follows one (ok), and conflict a later one with another digit.
+// xmpScan reads the tiff:Orientation values of an XMP packet with encoding/xml:
+// every attribute and element in the tiff namespace (any prefix, the default
+// namespace included; references decoded, values trimmed). carries reports at
+// least one; v is the first as an integer (ok); conflict is set when the values
+// differ, or the packet is not XML but names Orientation (malformed metadata,
+// which also carries unless Pillow's regex reads a digit from it).
 func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
-	x = xmpComment.ReplaceAll(x, nil)
-	names := []string{"tiff"}
-	for _, m := range xmpTiffNS.FindAllSubmatch(x, -1) {
-		names = append(names, regexp.QuoteMeta(string(m[1])))
-	}
-	re := regexp.MustCompile(`(?:^|[^\w.:-])(?:` + strings.Join(names, "|") + `):Orientation(?:\s*=\s*["']?\s*|\s*>\s*)(\d?)`)
-	for _, m := range re.FindAllSubmatch(x, -1) {
-		carries = true
-		if len(m[1]) == 0 {
-			continue
+	var vals []string
+	d := xml.NewDecoder(bytes.NewReader(x))
+	var buf []byte
+	depth, in := 0, -1 // in: depth of the open Orientation element
+	var err error
+	for n := 0; err == nil && n < xmpMaxTokens && depth < xmpMaxNesting; n++ {
+		var t xml.Token
+		if t, err = d.Token(); err != nil {
+			break
 		}
-		if d := int(m[1][0] - '0'); !ok {
-			v, ok = d, true
-		} else if d != v {
-			conflict = true
+		switch t := t.(type) {
+		case xml.StartElement:
+			depth++
+			for _, a := range t.Attr {
+				if a.Name.Space == xmpTiffNS && a.Name.Local == "Orientation" {
+					vals = append(vals, strings.TrimSpace(a.Value))
+				}
+			}
+			if in < 0 && t.Name.Space == xmpTiffNS && t.Name.Local == "Orientation" {
+				in, buf = depth, buf[:0]
+			}
+		case xml.CharData:
+			if in >= 0 {
+				buf = append(buf, t...)
+			}
+		case xml.EndElement:
+			if depth == in {
+				vals, in = append(vals, strings.TrimSpace(string(buf))), -1
+			}
+			depth--
 		}
 	}
-	return v, carries, ok, conflict
+	if err != io.EOF {
+		// Not XML (or past the limits): ignored unless it names Orientation. The
+		// img2pdf corpus holds Pillow's regex form in such packets (tiff:Orientation="6"
+		// with no element around it), so that digit still counts, as the lone value.
+		if v, ok = xmpOrientation(x); ok {
+			return v, true, true, false
+		}
+		bad := bytes.Contains(x, []byte("Orientation"))
+		return 0, bad, false, bad
+	}
+	for _, s := range vals {
+		conflict = conflict || s != vals[0]
+	}
+	if len(vals) > 0 {
+		v, err = strconv.Atoi(vals[0])
+		return v, true, err == nil, conflict
+	}
+	return 0, false, false, false
 }
 
 // xmpCarries reports whether an XMP packet holds an orientation in any form:

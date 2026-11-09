@@ -342,3 +342,32 @@ func TestOrientationTag700XMPAndMalformedOrientation(t *testing.T) {
 		}
 	}
 }
+
+// XMP is parsed as XML: references are decoded, the default namespace and
+// elements count, and a packet that is not XML but names Orientation is ambiguous.
+func TestOrientationXMPParsed(t *testing.T) {
+	const ns = `http://ns.adobe.com/tiff/1.0/`
+	pk := func(body string) []byte {
+		return append(append([]byte(nil), xapPrefix...), `<x:xmpmeta xmlns:x='adobe:ns:meta/'>`+body+`</x:xmpmeta>`...)
+	}
+	exif6 := append(exifPrefix[:6:6], tiffOrient(6)...)
+	for _, c := range []struct {
+		name string
+		xmp  []byte
+		want Orientation
+	}{
+		{"char-ref-agrees", pk(`<rdf:Description xmlns:tiff='` + ns + `' tiff:Orientation='&#54;'/>`), Orientation{Rotate: 90}},
+		{"char-ref-disagrees", pk(`<rdf:Description xmlns:tiff='` + ns + `' tiff:Orientation='&#51;'/>`), Orientation{Ambiguous: true}},
+		{"default-ns-element", pk(`<Description xmlns='` + ns + `'><Orientation>3</Orientation></Description>`), Orientation{Ambiguous: true}},
+		{"element-spaced", pk(`<rdf:Description xmlns:t='` + ns + `'><t:Orientation> 6 </t:Orientation></rdf:Description>`), Orientation{Rotate: 90}},
+		{"two-values", pk(`<rdf:Description xmlns:t='` + ns + `' t:Orientation='6'><t:Orientation>3</t:Orientation></rdf:Description>`), Orientation{Ambiguous: true}},
+		{"other-ns", pk(`<rdf:Description xmlns:t='urn:other' t:Orientation='3'/>`), Orientation{Rotate: 90}},
+		{"comment-only", pk(`<!-- tiff:Orientation="3" -->`), Orientation{Rotate: 90}},
+		{"unparsable-with-orientation", pk(`<rdf:Description tiff:Orientation='3'>`), Orientation{Ambiguous: true}},
+		{"unparsable-without", pk(`<rdf:Description>`), Orientation{Rotate: 90}},
+	} {
+		if o, err := EXIFOrientation(jpegApp1(exif6, c.xmp), Limits{}); err != nil || o != c.want {
+			t.Errorf("%s: got %+v, %v; want %+v", c.name, o, err, c.want)
+		}
+	}
+}
