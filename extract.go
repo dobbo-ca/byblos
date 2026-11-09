@@ -13,6 +13,8 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 
+	jpegcopy "github.com/dobbo-ca/jpeg-go"
+
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
@@ -596,7 +598,11 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 				Issue:      capabilityIssue["decode-jpx"],
 			}))
 	default:
-		img, _, err = image.Decode(bytes.NewReader(data))
+		if bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
+			img, err = decodeDCT(ctx, data)
+		} else {
+			img, _, err = image.Decode(bytes.NewReader(data))
+		}
 	}
 	if err != nil {
 		// As above, the reason carries fileType so the divert nominates one
@@ -704,6 +710,22 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	}
 	countExtracted(out.CoversPage())
 	return out, rec, nil
+}
+
+// decodeDCT decodes a JPEG through the jpeg-go copy, whose pixels are
+// libjpeg-turbo's (poppler's and ocrmypdf's decoder): a grey stream comes back
+// as *image.Gray, a colour one as *image.RGBA. What the copy does not read
+// (CMYK and YCCK, 12-bit, lossless) falls back to image/jpeg, as before.
+func decodeDCT(ctx context.Context, data []byte) (image.Image, error) {
+	f := jpegcopy.FormatRGBA
+	if cfg, err := jpegcopy.DecodeConfig(data, nil); err == nil && cfg.Components == 1 {
+		f = jpegcopy.FormatGray
+	}
+	img, err := jpegcopy.Decode(ctx, data, &jpegcopy.DecodeOptions{Format: f})
+	if errors.Is(err, jpegcopy.ErrUnsupported) {
+		img, _, err = image.Decode(bytes.NewReader(data))
+	}
+	return img, err
 }
 
 // normalizedBox returns [llx lly urx ury] with each pair of corners put in
