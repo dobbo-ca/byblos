@@ -344,6 +344,12 @@ func Open(rs io.ReadSeeker) (Doc, error) {
 	return openDoc(context.Background(), rs, limits.Limits{})
 }
 
+// OpenLimits is Open under the caps of lim, reserving nothing from the memory
+// budget.
+func OpenLimits(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
+	return openDoc(ctx, rs, lim)
+}
+
 // OpenBudgeted is Open under lim, with the object table and one stream decode
 // reserved from the package memory budget (limits.SetMemoryLimit) before pdfcpu
 // parses. The returned release gives the reservation back; call it when done

@@ -3,7 +3,6 @@ package content
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"unsafe"
@@ -365,7 +364,7 @@ type Scan struct {
 	// between them move the text matrix. TextChars, TextOps and InkedTextOps
 	// above are unchanged by it: they are the counters classification already
 	// reads, and this is the record byb-lez.5/.7 and the renderer read.
-	// Capped at maxTextShows; the counters keep counting past the cap.
+	// Capped at Limits.MaxTextShows; the counters keep counting past the cap.
 	TextShows []TextShow
 	// Paints is in paint order too, and interleaves with Images through the
 	// shared Index. Clipping alone does not appear here.
@@ -419,53 +418,50 @@ func withClip(n int64, clip *Box) int64 {
 	return n
 }
 
-const (
-	// maxFormDepth bounds Form XObject recursion. Real documents nest two or
-	// three deep; anything beyond this is malformed or hostile.
-	maxFormDepth = 8
-	// maxOperands bounds the pending-operand buffer. Only a TJ array comes
-	// close; truncating one costs a little TextChars precision on absurd input
-	// and nothing else.
-	maxOperands = 8192
-	// maxTextShows bounds Scan.TextShows: each entry retains its Raw bytes and
-	// text state (~30x the stream on a hostile many-Tj input), and a real
-	// page's OCR layer is a few thousand shows. Past the cap the shows still
-	// count into TextChars/TextOps/InkedTextOps; only the per-string record
-	// stops growing.
-	maxTextShows = 1 << 16
-	// maxPaints bounds Scan.Paints the same way. A Paint is about 200 bytes
-	// and `0 0 m 1 1 l S` is 14, so 60 MiB of decoded content (60 KB of flate)
-	// retained 2.5 GB. Past the cap the path-painting operators still run;
-	// only the record of them stops growing, so a later opaque fill past the
-	// cap no longer hides an image from classification. A real page is
-	// thousands; a dense vector map is a few hundred thousand.
-	maxPaints = 1 << 18
-	// maxGStateDepth bounds the q graphics-state stack. Every other budget
-	// here bounded a slice of parsed CONTENT; this one bounds a slice of
-	// SAVED STATE, and nothing did before byb-9ml: `q` is two bytes and
-	// retains a 328-byte gstate until the walk ends, so 8.4 MB of `q ` --
-	// 8.6 KB after flate, at a ratio real deflate reaches -- drove peak heap
-	// to 3.3 GB with a nil error. Measured over 31,705 page-walks (the
-	// corpus plus every 3rd row of the sample manifest, 1,891 documents):
-	// p50 1, p90 2, p99 4, MAX 18. 1024 is 56x that maximum and refuses none
-	// of them; it bounds one walk's saved state at 1024*328 = 336 KB, and
-	// maxFormDepth bounds the nesting of walks, so the product is ~3 MB.
-	maxGStateDepth = 1024
-	// maxFormInvocations bounds how many times a walk enters a Form XObject,
-	// across the whole page rather than per level. maxFormDepth above bounds
-	// the DEPTH of that recursion and says nothing about its WIDTH: eight
-	// chained forms each invoking the next `fan` times cost fan^7 walks, so
-	// 505 bytes of form content at fan 10 appended 10,000,000 Paints and
-	// reached 5.6 GB, and 3.7 KB at fan 40 is 1.6e11 walks -- about sixteen
-	// hours. Same population as above: p50 0, p90 0, p99 2, MAX 110, and
-	// that maximum is one document (govdocs1/000146.pdf p1); the next is 17.
-	// 4096 is 37x the maximum and refuses none of them.
-	//
-	// This one counter is what bounds BOTH shapes, because the walk aborts:
-	// the uncapped Scan.Images, Scan.InlineImages and
-	// Scan.Unresolved slices can only grow while a walk is running.
-	maxFormInvocations = 4096
-)
+// The walk caps are Limits fields (MaxFormDepth, MaxOperands, MaxTextShows,
+// MaxPaints, MaxGStateDepth, MaxFormInvocations); defaults are in
+// internal/limits. What each one bounds, and the measurements behind the
+// defaults:
+//
+// maxFormDepth bounds Form XObject recursion. Real documents nest two or
+// three deep; anything beyond this is malformed or hostile.
+// maxOperands bounds the pending-operand buffer. Only a TJ array comes
+// close; truncating one costs a little TextChars precision on absurd input
+// and nothing else.
+// maxTextShows bounds Scan.TextShows: each entry retains its Raw bytes and
+// text state (~30x the stream on a hostile many-Tj input), and a real
+// page's OCR layer is a few thousand shows. Past the cap the shows still
+// count into TextChars/TextOps/InkedTextOps; only the per-string record
+// stops growing.
+// maxPaints bounds Scan.Paints the same way. A Paint is about 200 bytes
+// and `0 0 m 1 1 l S` is 14, so 60 MiB of decoded content (60 KB of flate)
+// retained 2.5 GB. Past the cap the path-painting operators still run;
+// only the record of them stops growing, so a later opaque fill past the
+// cap no longer hides an image from classification. A real page is
+// thousands; a dense vector map is a few hundred thousand.
+// maxGStateDepth bounds the q graphics-state stack. Every other budget
+// here bounded a slice of parsed CONTENT; this one bounds a slice of
+// SAVED STATE, and nothing did before byb-9ml: `q` is two bytes and
+// retains a 328-byte gstate until the walk ends, so 8.4 MB of `q ` --
+// 8.6 KB after flate, at a ratio real deflate reaches -- drove peak heap
+// to 3.3 GB with a nil error. Measured over 31,705 page-walks (the
+// corpus plus every 3rd row of the sample manifest, 1,891 documents):
+// p50 1, p90 2, p99 4, MAX 18. 1024 is 56x that maximum and refuses none
+// of them; it bounds one walk's saved state at 1024*328 = 336 KB, and
+// maxFormDepth bounds the nesting of walks, so the product is ~3 MB.
+// maxFormInvocations bounds how many times a walk enters a Form XObject,
+// across the whole page rather than per level. maxFormDepth above bounds
+// the DEPTH of that recursion and says nothing about its WIDTH: eight
+// chained forms each invoking the next `fan` times cost fan^7 walks, so
+// 505 bytes of form content at fan 10 appended 10,000,000 Paints and
+// reached 5.6 GB, and 3.7 KB at fan 40 is 1.6e11 walks -- about sixteen
+// hours. Same population as above: p50 0, p90 0, p99 2, MAX 110, and
+// that maximum is one document (govdocs1/000146.pdf p1); the next is 17.
+// 4096 is 37x the maximum and refuses none of them.
+//
+// This one counter is what bounds BOTH shapes, because the walk aborts:
+// the uncapped Scan.Images, Scan.InlineImages and
+// Scan.Unresolved slices can only grow while a walk is running.
 
 // Walk interprets a decoded content stream, resolving resource names in scope
 // through env.
@@ -627,8 +623,8 @@ func (p *pathBox) reset() { *p = pathBox{} }
 func inksGlyphs(tr int) bool { return tr != 3 && tr != 7 }
 
 func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth int, s *Scan) error {
-	if depth > maxFormDepth {
-		return fmt.Errorf("content: form XObject nesting deeper than %d", maxFormDepth)
+	if err := limits.Check("form-depth", int64(depth), s.lim.FormDepth()); err != nil {
+		return err
 	}
 	l := NewLexer(src)
 	var stack []gstate
@@ -678,7 +674,7 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 			continue
 		}
 		if tok.Kind != KindKeyword {
-			if len(ops) < maxOperands {
+			if int64(len(ops)) < s.lim.Operands() {
 				ops = append(ops, tok)
 			}
 			continue
@@ -687,8 +683,8 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 		op := string(tok.Text)
 		switch op {
 		case "q":
-			if len(stack) >= maxGStateDepth {
-				return fmt.Errorf("content: q nesting deeper than %d", maxGStateDepth)
+			if err := limits.Check("q-depth", int64(len(stack))+1, s.lim.GStateDepth()); err != nil {
+				return err
 			}
 			stack = append(stack, gs)
 		case "Q":
@@ -905,7 +901,7 @@ func walk(ctx context.Context, src []byte, scope int, env Env, gs gstate, depth 
 // escapes (so every draw of one form shares the form's one buffer), else a
 // fresh copy, which is charged.
 func recordText(s *Scan, gs gstate, t Token) error {
-	if len(s.TextShows) >= maxTextShows {
+	if int64(len(s.TextShows)) >= s.lim.TextShows() {
 		return nil
 	}
 	n := textShowBytes + int64(len(gs.font)) // Tf copies the name per call
@@ -947,7 +943,7 @@ func recordPaint(s *Scan, path *pathBox, gs gstate, op string) error {
 		r := float64(gs.lineWidth * deviceScale(gs.ctm) / 2)
 		box = Box{LLX: box.LLX - r, LLY: box.LLY - r, URX: box.URX + r, URY: box.URY + r}
 	}
-	if len(s.Paints) >= maxPaints {
+	if int64(len(s.Paints)) >= s.lim.Paints() {
 		return nil
 	}
 	if err := s.keep(withClip(paintBytes, gs.clip) + colorBytes(gs.fill) + colorBytes(gs.stroke)); err != nil {
@@ -1038,8 +1034,8 @@ func doXObject(ctx context.Context, ops []Token, scope int, env Env, gs gstate, 
 		gs.clip = &dev
 	}
 	s.forms++
-	if s.forms > maxFormInvocations {
-		return fmt.Errorf("content: more than %d form XObject invocations", maxFormInvocations)
+	if err := limits.Check("form-invocations", int64(s.forms), s.lim.FormInvocations()); err != nil {
+		return err
 	}
 	return walk(ctx, xo.Content, xo.Scope, env, gs, depth+1, s)
 }

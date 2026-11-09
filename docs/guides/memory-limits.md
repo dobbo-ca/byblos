@@ -69,7 +69,7 @@ the header before allocation. The defaults are:
 | images, inline images, unresolved `Do` names recorded per page (`MaxImages`, `MaxInlineImages`, `MaxUnresolved`) | 262 144 each (`MaxPageStreamBytes` / 512); past it the call fails with `*LimitError` (`images`, `inline-images`, `unresolved`) rather than dropping images. `InspectDocument` holds the images and inline images of all pages together to the sum of the two caps (`images`), since pages can share one content stream |
 | whole-plane work | 1<<26 px; above it the call works by band |
 | font program | 16 MiB |
-| q-stack depth | 1024, and form-tree bounds |
+| PNG and `EncodedImage` pixels, render canvas and work, q-stack depth, form depth and invocations | see "Moved into `Limits`" under Today |
 | goroutines (`MaxGoroutines`) | `GOMAXPROCS` |
 
 Each new cap is checked against what ocrmypdf accepts before it ships, so no
@@ -143,8 +143,8 @@ returns an error wrapping `ErrPassword`.
 | Image records | `InspectDocument` records every image of every page until it returns, 144 bytes each (`TestImageRecordBytes`). Under a budget the records are reserved: an eighth of what the table and file leave, and the images and inline images of all pages together are held to half of that count each, so pages sharing one content stream cannot reach the unlowered 524 288 (75 MB) under a 32 MiB budget; about 14 500 each there. Past it, `*LimitError{images}`. Each record also keeps its `/Decode` numbers: a direct array is part of the image's own dictionary, which the parse cap already counts, and an indirect array is converted once per object (`numberArray`) and shared by every image naming it, so K images over one M-entry array hold one 8*M copy, not K. Before that, 1 000 images over one 100 000-entry array held 770 MiB at a 300 MiB budget. |
 
 The caps are checked in `Open`, so every entry point that parses a document
-enforces them with their defaults. Only `InspectDocument` takes a `Limits` and
-reserves from the budget; the others reserve nothing yet (see Planned).
+enforces them with their defaults. Only `InspectDocument` reserves from the
+budget; the others reserve nothing yet (see Planned).
 
 ### The pdfcpu fork
 
@@ -159,34 +159,42 @@ Every consumer carries the same line in its own `go.mod` (kleio does), or it
 builds against upstream pdfcpu v0.16.4, which does not have the fields, and
 fails to compile.
 
-### Not yet moved into `Limits`
+### Moved into `Limits` (owner decision D2)
 
-The PNG embed, `EncodedImage`, `Downsample`, `RenderPage` raster, flattened
-path, scanline, q-stack and operand caps, the content-walk caps and the JBIG2
-decoder budget below are still package constants. The content-walk caps are on
-the inspect path (they bound what `InspectDocument` retains per page) and are
-not in the budget: the walk's retained records are bounded by them, not
-reserved. Making them configurable is the last row of the Planned table.
+Each cap below is a `Limits` field; zero takes the default, which is the old
+constant, so nothing changes for a caller that passes `Limits{}`. A breach is a
+permanent `*LimitError` with the name shown, checked from the header or the
+page box before the allocation it guards. The content-walk caps reach the walk
+through `InspectDocument`'s `Limits`; the other entry points that walk a page
+use the defaults.
+
+| Cap (field) | Default | Error name | Entry point |
+|---|---|---|---|
+| PNG and `EncodedImage` width x height, and each axis of an `EncodedImage` (`MaxEncodedImagePixels`) | 1<<26 px | `encoded-image-pixels` | `EmbedPNGLimits`, `BuildPDFLimits` |
+| `Downsample` source bounds (`MaxImagePixels`, the image cap above) | 500 000 000 px | `image-pixels` | `DownsampleLimits`, `DownsampleDeclaredBPCLimits` |
+| `RenderPage` canvas, a side (`MaxRasterSide`) and total (`MaxRasterPixels`) | 20 000 px, 1<<26 px | `raster-side`, `raster-pixels` | `RenderPageLimits` |
+| Flattened path points (`MaxPathPoints`) | 1<<21 | `path-points` | `RenderPageLimits` |
+| Scanline fill work (`MaxFillWork`) | 1<<28 | `fill-work` | `RenderPageLimits` |
+| q-stack depth, render and content walk (`MaxGStateDepth`) | 1024 | `q-depth` | `RenderPageLimits`, `InspectDocument` |
+| Content-walk form nesting (`MaxFormDepth`) | 8 | `form-depth` | `InspectDocument` |
+| Content-walk form invocations (`MaxFormInvocations`) | 4096 | `form-invocations` | `InspectDocument` |
+| Font bytes retained per render (`MaxRenderFontBytes`) | 16 MiB | none: further fonts are skipped | `RenderPageLimits` |
+| Pending operands, render and content walk (`MaxOperands`) | 8192 | none: further operands are dropped | `RenderPageLimits`, `InspectDocument` |
+| Recorded text shows (`MaxTextShows`) | 1<<16 | none: the walk stops recording and carries on | `InspectDocument` |
+| Recorded paints (`MaxPaints`) | 1<<18 | none: the walk stops recording and carries on | `InspectDocument` |
+
+The last four are caps that truncate by design, not refuse: a page past them
+still classifies, and refusing would turn a dense vector map that passes today
+into an error. They are configurable and nothing else.
+
+`EmbedPNG`, `BuildPDFContext`, `RenderPageContext`, `Downsample` and
+`DownsampleDeclaredBPC` stay as thin wrappers over the `...Limits` forms with
+`Limits{}`; kleio and the tests call them.
 
 ### Enforced, still constants
 
 | Bound | Value | Where |
 |---|---|---|
-| PNG embed: declared width x height | 1<<26 px (67 108 864) | `embed.go:34`, checked at `embed.go:67` |
-| `EncodedImage` width x height, and each axis | 1<<26 px | `internal/pdfbuild/pdfbuild.go:146`, checked at `:263-267` |
-| `Downsample` source bounds | 500 000 000 px | `downsample.go:101`, checked at `:102` |
-| Page raster for `RenderPage` | 20 000 px a side and 1<<26 px | `internal/render/render.go:78-79`, checked at `:222` |
-| Font bytes retained per render | 16 MiB | `internal/render/render.go:125` |
-| Flattened path points | 1<<21 | `internal/render/render.go:98` |
-| Scanline fill work | 1<<28 | `internal/render/render.go:108` |
-| Render q-stack depth | 1024 | `internal/render/render.go:84` |
-| Render operands | 8192 | `internal/render/render.go:721` |
-| Content-walk q-stack depth | 1024 | `internal/content/walk.go:408` |
-| Content-walk form nesting | 8 | `internal/content/walk.go:387` |
-| Content-walk operands | 8192 | `internal/content/walk.go:391` |
-| Content-walk text shows | 1<<16 | `internal/content/walk.go:397` (charged to the retained-bytes account) |
-| Content-walk recorded paints | 1<<18 | `internal/content/walk.go` (`maxPaints`) |
-| Content-walk form invocations | 4096 | `internal/content/walk.go:422` |
 | JBIG2 page pixels | 1<<26 | `internal/jbig2/segment_decode.go:397`, checked at `:1173` (page width at `:1057`) |
 | JBIG2 retained bitmap bytes | 16 MiB | `internal/jbig2/segment_decode.go:398` |
 | JBIG2 segments per stream | 1<<16 | `internal/jbig2/segment_decode.go:401` |
@@ -200,7 +208,7 @@ stream can cost whatever the stream says; they are the only part of byblos
 that already meets the "refuse before allocating" rule end to end.
 
 `ctx` entry points exist today for the nine document-scale primitives,
-`BuildFromPagesContext` and `RenderPageContext`: `InspectContext` (`inspect.go:213`),
+`BuildFromPagesContext`, `RenderPageContext` and the `...Limits` forms above: `InspectContext` (`inspect.go:213`),
 `ExtractPageRasterContext` (`extract.go:437`), `OptimizeContext`
 (`optimize.go:129`), `StampTextLayerContext` (`stamp.go:185`),
 `BuildPDFContext` (`build.go:70`), `BuildFromPagesContext`
@@ -208,8 +216,7 @@ that already meets the "refuse before allocating" rule end to end.
 `RecordExtractionContext` (`provenance.go:450`), `WriteProvenanceContext`
 (`provenance.go:366`), `ReadProvenanceContext` (`provenance.go:531`) and
 `RenderPageContext` (`render.go:50`). `Sauvola`, `QuantizePNG`,
-`QuantizeIndexed`, `Downsample`, `DownsampleDeclaredBPC`,
-`EncodeJBIG2Generic`, `DecodeJBIG2Generic` and `EmbedPNG` take no `ctx`; the
+`QuantizeIndexed`, `EncodeJBIG2Generic`, `DecodeJBIG2Generic` and `EmbedPNG` take no `ctx`; the
 design reviewed these as image-scale calls bounded by one in-memory image the
 caller chose to pass (`context.go:27-35`), and that decision is revisited
 against owner decision D2 (ctx on every band-level and larger entry point)
@@ -224,7 +231,6 @@ when the budget lands.
 | Budget reservations for archival-raster bands | 3.6 |
 | Limit tests of 9A.4 for the other entry points | each stage that calls byblos adds its own (2.1 did `InspectDocument`) |
 | Banded `ExtractPageRaster` and ceiling refusal before allocation (the 1<<26 px design point decides banding, not refusal) | 3.5 |
-| Making the remaining caps (PNG, `EncodedImage`, `Downsample`, render, q-stack, content walk) configurable through `Limits` and returning `*LimitError` | follow-up to 2.1, kleio bead kleio-1eb.74.23.1 |
 
 ## Cost of the limiter
 

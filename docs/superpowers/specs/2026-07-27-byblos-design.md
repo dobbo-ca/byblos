@@ -574,6 +574,7 @@ func ExtractPageRasterContext(ctx context.Context, r io.ReadSeeker, page int) (*
 // FUTURE.md. ExtractPageRaster's answer is unchanged by this function existing.
 func RenderPage(r io.ReadSeeker, page, longEdgePx int) (*image.RGBA, error)
 func RenderPageContext(ctx context.Context, r io.ReadSeeker, page, longEdgePx int) (*image.RGBA, error)
+func RenderPageLimits(ctx context.Context, r io.ReadSeeker, page, longEdgePx int, lim Limits) (*image.RGBA, error)
 
 // --- extraction telemetry ---
 // Instruments the premise §2 rests on: that a page which is not a single
@@ -636,7 +637,9 @@ func DecodeJBIG2Generic(data []byte) (*Bitmap, error)
 
 func QuantizePNG(img image.Image, colors int) ([]byte, error)
 func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error)
+func DownsampleLimits(ctx context.Context, img image.Image, srcDPI, dstDPI float64, lim Limits) (image.Image, error)
 func DownsampleDeclaredBPC(img image.Image, declaredBPC int, srcDPI, dstDPI float64) (image.Image, error)
+func DownsampleDeclaredBPCLimits(ctx context.Context, img image.Image, declaredBPC int, srcDPI, dstDPI float64, lim Limits) (image.Image, error)
 
 // QuantizeIndexed (byb-96p) is QuantizePNG's embeddable variant: same core,
 // but it returns a PDF /Indexed /FlateDecode image rather than a PNG file.
@@ -674,6 +677,7 @@ type BuildPage struct {
 
 func BuildPDF(w io.Writer, pages []BuildPage) error
 func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error
+func BuildPDFLimits(ctx context.Context, w io.Writer, pages []BuildPage, lim Limits) error
 
 // EmbedPNG and EmbedJPEG (byb-js5.5) lift already-encoded image bytes into a
 // ready EncodedImage LOSSLESSLY -- carrying, not re-encoding -- plus the DPI
@@ -682,6 +686,7 @@ func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error
 // but 1 or 3 component frames (matching internal/pdfbuild's DCTDecode
 // allowlist).
 func EmbedPNG(data []byte) (EncodedImage, float64, error)
+func EmbedPNGLimits(data []byte, lim Limits) (EncodedImage, float64, error)
 func EmbedJPEG(data []byte) (EncodedImage, float64, error)
 
 // --- page editing (G4) ---

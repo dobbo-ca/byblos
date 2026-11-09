@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // ---- minimal TrueType builder ----------------------------------------------
@@ -433,8 +434,6 @@ func TestTextWidthsOverrideFontAdvance(t *testing.T) {
 // drawn large enough (fontSize 2000), each subdivide several times, past 1000
 // device points total.
 func TestHostileGlyphTripsPointBudget(t *testing.T) {
-	defer func(old int64) { maxPathPoints = old }(maxPathPoints)
-	maxPathPoints = 1000
 
 	var c []gpt
 	for i := 0; i < 400; i++ {
@@ -447,7 +446,7 @@ func TestHostileGlyphTripsPointBudget(t *testing.T) {
 	}
 	src := "BT /F1 2000 Tf 1 0 0 1 10 50 Tm (A) Tj ET"
 	box := content.Box{URX: 5000, URY: 5000}
-	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
+	_, err := PageLimits(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f), limits.Limits{MaxPathPoints: 1000})
 	if err == nil || !strings.Contains(err.Error(), "points") {
 		t.Fatalf("hostile glyph: got err %v, want the path-point budget error", err)
 	}
@@ -494,13 +493,11 @@ func TestHostileCompoundGlyphRefusedBeforeParse(t *testing.T) {
 // budget after every glyph -- so the per-glyph fillWork charge in fillGlyph
 // is the only budget that accrues, and it must trip.
 func TestHostileOffCanvasGlyphsTripFillWork(t *testing.T) {
-	defer func(old int64) { maxFillWork = old }(maxFillWork)
-	maxFillWork = 1000
 
 	src := "BT /F1 20 Tf 1 0 0 1 5000 5000 Tm (" + strings.Repeat("A", 300) + ") Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(testFont()))
-	if err == nil || !strings.Contains(err.Error(), "fill work") {
+	_, err := PageLimits(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(testFont()), limits.Limits{MaxFillWork: 1000})
+	if err == nil || limitName(err) != "fill-work" {
 		t.Fatalf("off-canvas glyph stream: got err %v, want the fill-work budget error", err)
 	}
 }

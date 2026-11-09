@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dobbo-ca/byblos/internal/limits"
+
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
@@ -76,7 +78,7 @@ func TestValidatePage(t *testing.T) {
 				img.Width = 1 << 61
 				return Page{Image: img, WidthPt: 612, HeightPt: 792}
 			}(),
-			wantErr: "exceeds the maximum",
+			wantErr: "limit encoded-image-pixels exceeded",
 		},
 		{
 			// One past the bound, so the case pins the CONSTANT and not just
@@ -89,7 +91,7 @@ func TestValidatePage(t *testing.T) {
 				img.Width = 1<<31 + 1
 				return Page{Image: img, WidthPt: 612, HeightPt: 792}
 			}(),
-			wantErr: "exceeds the maximum",
+			wantErr: "limit encoded-image-pixels exceeded",
 		},
 		{
 			// byb-37h: Width*Height past maxImagePixels, with neither axis
@@ -101,7 +103,7 @@ func TestValidatePage(t *testing.T) {
 				img.Width, img.Height = 1<<13+1, 1<<13+1 // (2^13+1)^2 > 1<<26
 				return Page{Image: img, WidthPt: 612, HeightPt: 792}
 			}(),
-			wantErr: "exceeds the maximum",
+			wantErr: "limit encoded-image-pixels exceeded",
 		},
 		{
 			// Width and Height each at the largest value a real PNG IHDR
@@ -115,7 +117,7 @@ func TestValidatePage(t *testing.T) {
 				img.Width, img.Height = 1<<32-1, 1<<32-1
 				return Page{Image: img, WidthPt: 612, HeightPt: 792}
 			}(),
-			wantErr: "exceeds the maximum",
+			wantErr: "limit encoded-image-pixels exceeded",
 		},
 		{
 			// byb-37h: Width and Height are declared int, not uint32, and
@@ -133,7 +135,7 @@ func TestValidatePage(t *testing.T) {
 				img.Width, img.Height = 1<<61, 8
 				return Page{Image: img, WidthPt: 612, HeightPt: 792}
 			}(),
-			wantErr: "exceeds the maximum",
+			wantErr: "limit encoded-image-pixels exceeded",
 		},
 		{
 			name: "empty data",
@@ -233,7 +235,7 @@ func TestValidatePage(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validatePage(tc.page)
+			err := validatePage(tc.page, limits.Limits{})
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("validatePage() = %v, want nil", err)
@@ -290,15 +292,15 @@ func TestValidatePageRefusesOversizedImageCheaply(t *testing.T) {
 	}
 
 	start := time.Now()
-	err := validatePage(page)
+	err := validatePage(page, limits.Limits{})
 	el := time.Since(start)
 	t.Logf("validatePage err = %v, elapsed = %v", err, el)
 
 	if err == nil {
 		t.Fatal("validatePage on a 999M-row declared image: want an error, got nil")
 	}
-	if !strings.Contains(err.Error(), "exceeds the maximum") {
-		t.Fatalf("validatePage() = %q, want it to contain %q", err.Error(), "exceeds the maximum")
+	if !strings.Contains(err.Error(), "limit encoded-image-pixels exceeded") {
+		t.Fatalf("validatePage() = %q, want it to contain %q", err.Error(), "limit encoded-image-pixels exceeded")
 	}
 	// The bug measured 3.3s on this exact input; 100ms is two orders of
 	// magnitude below that and comfortably above a guard-only refusal.

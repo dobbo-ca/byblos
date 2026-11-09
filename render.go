@@ -48,13 +48,24 @@ func RenderPage(r io.ReadSeeker, page, longEdgePx int) (*image.RGBA, error) {
 // stream, so a cancel lands within one operator of the check rather than at
 // the end of the page.
 func RenderPageContext(ctx context.Context, r io.ReadSeeker, page, longEdgePx int) (*image.RGBA, error) {
+	return RenderPageLimits(ctx, r, page, longEdgePx, Limits{})
+}
+
+// RenderPageLimits is RenderPageContext under lim: the parse caps of Inspect
+// (reserving nothing from the memory budget) and the render caps. A canvas over
+// lim.MaxRasterSide or lim.MaxRasterPixels is refused from the page box,
+// before it is allocated, as a *LimitError named raster-side or raster-pixels;
+// a path, a fill or a q stack past lim.MaxPathPoints, lim.MaxFillWork or
+// lim.MaxGStateDepth, as path-points, fill-work or q-depth. Fonts past
+// lim.MaxRenderFontBytes are skipped, not refused.
+func RenderPageLimits(ctx context.Context, r io.ReadSeeker, page, longEdgePx int, lim Limits) (*image.RGBA, error) {
 	if longEdgePx <= 0 {
 		return nil, fmt.Errorf("byblos: RenderPage: long edge %d is not a positive number of pixels", longEdgePx)
 	}
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	d, err := pdfdoc.Open(r)
+	d, err := pdfdoc.OpenLimits(ctx, r, lim)
 	if err != nil {
 		return nil, fmt.Errorf("byblos: RenderPage: %w", err)
 	}
@@ -76,8 +87,8 @@ func RenderPageContext(ctx context.Context, r io.ReadSeeker, page, longEdgePx in
 	}
 	// /Rotate turns the raster but does not change which edge is longer, so
 	// the scale is taken from the unrotated box.
-	img, err := render.Page(ctx, p.Content, box, p.Rotate, float64(longEdgePx)/long,
-		renderImages(d, p), renderFonts(d, p))
+	img, err := render.PageLimits(ctx, p.Content, box, p.Rotate, float64(longEdgePx)/long,
+		renderImages(d, p), renderFonts(d, p), lim)
 	if err != nil {
 		return nil, fmt.Errorf("byblos: RenderPage: page %d: %w", page, err)
 	}

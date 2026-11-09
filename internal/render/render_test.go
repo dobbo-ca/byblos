@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // box100 is a 100x100pt page rendered at scale 1: one device pixel per point,
@@ -223,10 +224,8 @@ func TestRasterDimensionsClamped(t *testing.T) {
 // TestPathPointBudget: a curve storm cannot allocate unbounded flattened
 // points. The budget is lowered so the test does not need a 30 MB stream.
 func TestPathPointBudget(t *testing.T) {
-	defer func(v int64) { maxPathPoints = v }(maxPathPoints)
-	maxPathPoints = 64
 	src := "0 g 10 50 m " + strings.Repeat("80 10 20 10 20 50 c 80 10 20 10 20 50 c ", 8) + "f"
-	if _, err := Page(context.Background(), []byte(src), box100, 0, 1, nil, nil); err == nil {
+	if _, err := PageLimits(context.Background(), []byte(src), box100, 0, 1, nil, nil, limits.Limits{MaxPathPoints: 64}); err == nil {
 		t.Fatal("Page accepted a path beyond the point budget")
 	}
 }
@@ -234,15 +233,13 @@ func TestPathPointBudget(t *testing.T) {
 // TestFillWorkBudget: scanline work is charged as it accrues, so a hostile
 // edge pile is cut off rather than looped over.
 func TestFillWorkBudget(t *testing.T) {
-	defer func(v int64) { maxFillWork = v }(maxFillWork)
-	maxFillWork = 16
 	var b strings.Builder
 	b.WriteString("0 g 0 0 m ")
 	for i := 0; i < 64; i++ {
 		fmt.Fprintf(&b, "%d 100 l %d 0 l ", i, i+1)
 	}
 	b.WriteString("f")
-	if _, err := Page(context.Background(), []byte(b.String()), box100, 0, 1, nil, nil); err == nil {
+	if _, err := PageLimits(context.Background(), []byte(b.String()), box100, 0, 1, nil, nil, limits.Limits{MaxFillWork: 16}); err == nil {
 		t.Fatal("Page accepted fill work beyond the budget")
 	}
 }
@@ -352,9 +349,7 @@ func TestVYCurveOperators(t *testing.T) {
 // row (300 total, under this budget) but 100 pixels per row, which must
 // trip it.
 func TestFillPixelWorkBudget(t *testing.T) {
-	defer func(v int64) { maxFillWork = v }(maxFillWork)
-	maxFillWork = 350
-	if _, err := Page(context.Background(), []byte("0 g 0 0 100 100 re f"), box100, 0, 1, nil, nil); err == nil {
+	if _, err := PageLimits(context.Background(), []byte("0 g 0 0 100 100 re f"), box100, 0, 1, nil, nil, limits.Limits{MaxFillWork: 350}); err == nil {
 		t.Fatal("Page accepted pixel-fill work beyond the budget")
 	}
 }
@@ -362,9 +357,7 @@ func TestFillPixelWorkBudget(t *testing.T) {
 // TestStrokeWorkBudget: stroke rasterisation goes through the same budgeted
 // scanline filler as fills, so a stroke is cut off too.
 func TestStrokeWorkBudget(t *testing.T) {
-	defer func(v int64) { maxFillWork = v }(maxFillWork)
-	maxFillWork = 16
-	if _, err := Page(context.Background(), []byte("0 g 4 w 10 10 m 90 90 l S"), box100, 0, 1, nil, nil); err == nil {
+	if _, err := PageLimits(context.Background(), []byte("0 g 4 w 10 10 m 90 90 l S"), box100, 0, 1, nil, nil, limits.Limits{MaxFillWork: 16}); err == nil {
 		t.Fatal("Page accepted stroke work beyond the budget")
 	}
 }
@@ -419,12 +412,12 @@ func TestFillHugeSpanStillPaints(t *testing.T) {
 // walker would have left this half open -- Page is reachable with the same
 // stream through a different door.
 func TestPageRefusesDeepGStateStack(t *testing.T) {
-	src := strings.Repeat("q ", maxGStateDepth+1)
+	src := strings.Repeat("q ", defGStateDepth+1)
 	if _, err := Page(context.Background(), []byte(src), box100, 0, 1, nil, nil); err == nil {
-		t.Fatalf("Page accepted %d nested q with no error", maxGStateDepth+1)
+		t.Fatalf("Page accepted %d nested q with no error", defGStateDepth+1)
 	}
-	if _, err := Page(context.Background(), []byte(strings.Repeat("q ", maxGStateDepth)), box100, 0, 1, nil, nil); err != nil {
-		t.Errorf("Page refused %d nested q, which is within the cap: %v", maxGStateDepth, err)
+	if _, err := Page(context.Background(), []byte(strings.Repeat("q ", defGStateDepth)), box100, 0, 1, nil, nil); err != nil {
+		t.Errorf("Page refused %d nested q, which is within the cap: %v", defGStateDepth, err)
 	}
 }
 
