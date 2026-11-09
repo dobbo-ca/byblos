@@ -221,11 +221,13 @@ func rasterSize(box content.Box, scale float64, lim limits.Limits) (w, h int, fw
 	if !(fw >= 1) || !(fh >= 1) {
 		return 0, 0, 0, 0, fmt.Errorf("render: page box %+v at scale %v rasterises below one pixel", box, scale)
 	}
-	if err := limits.Check("raster-side", int64(math.Ceil(max(fw, fh))), lim.RasterSide()); err != nil {
-		return 0, 0, 0, 0, err
+	// Compared in float: a float beyond int64 converts to MinInt64 on amd64
+	// and would slip under the cap.
+	if v := math.Ceil(max(fw, fh)); v > float64(lim.RasterSide()) {
+		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-side", Got: int64(min(v, math.MaxInt64)), Max: lim.RasterSide()}
 	}
-	if err := limits.Check("raster-pixels", int64(math.Ceil(fw*fh)), lim.RasterPixels()); err != nil {
-		return 0, 0, 0, 0, err
+	if v := math.Ceil(fw * fh); v > float64(lim.RasterPixels()) {
+		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-pixels", Got: int64(min(v, math.MaxInt64)), Max: lim.RasterPixels()}
 	}
 	return int(math.Ceil(fw)), int(math.Ceil(fh)), fw, fh, nil
 }

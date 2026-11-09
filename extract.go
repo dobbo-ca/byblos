@@ -435,10 +435,18 @@ func ExtractPageRaster(r io.ReadSeeker, page int) (*PageRaster, error) {
 // Attempted+Failed and be reported to the caller as a pdfcpu error rather than
 // a cancellation.
 func ExtractPageRasterContext(ctx context.Context, r io.ReadSeeker, page int) (*PageRaster, error) {
+	return ExtractPageRasterLimits(ctx, r, page, Limits{})
+}
+
+// ExtractPageRasterLimits is ExtractPageRasterContext under lim: the parse and
+// content-walk caps (q-depth, form-depth, form-invocations and the rest) are
+// lim's, and a breach is a *LimitError. It reserves nothing from the memory
+// budget.
+func ExtractPageRasterLimits(ctx context.Context, r io.ReadSeeker, page int, lim Limits) (*PageRaster, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	d, err := pdfdoc.Open(r)
+	d, err := pdfdoc.OpenLimits(context.Background(), r, lim) // not ctx: pdfcpu would add checks per object, which the latency table pins
 	if err != nil {
 		if cerr := checkContext(ctx); cerr != nil {
 			return nil, cerr

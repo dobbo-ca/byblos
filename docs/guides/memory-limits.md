@@ -165,8 +165,11 @@ Each cap below is a `Limits` field; zero takes the default, which is the old
 constant, so nothing changes for a caller that passes `Limits{}`. A breach is a
 permanent `*LimitError` with the name shown, checked from the header or the
 page box before the allocation it guards. The content-walk caps reach the walk
-through `InspectDocument`'s `Limits`; the other entry points that walk a page
-use the defaults.
+through the `Limits` of `InspectDocument`, `ExtractPageRasterLimits` and
+`OptimizeLimits` (its JPEG pass); the other entry points that walk a page use
+the defaults. `InspectDocument` keeps a q-depth, form-depth or form-invocations
+breach at the default a page diagnostic, as before; once the caller sets the
+field, a breach fails the call.
 
 | Cap (field) | Default | Error name | Entry point |
 |---|---|---|---|
@@ -175,9 +178,9 @@ use the defaults.
 | `RenderPage` canvas, a side (`MaxRasterSide`) and total (`MaxRasterPixels`) | 20 000 px, 1<<26 px | `raster-side`, `raster-pixels` | `RenderPageLimits` |
 | Flattened path points (`MaxPathPoints`) | 1<<21 | `path-points` | `RenderPageLimits` |
 | Scanline fill work (`MaxFillWork`) | 1<<28 | `fill-work` | `RenderPageLimits` |
-| q-stack depth, render and content walk (`MaxGStateDepth`) | 1024 | `q-depth` | `RenderPageLimits`, `InspectDocument` |
-| Content-walk form nesting (`MaxFormDepth`) | 8 | `form-depth` | `InspectDocument` |
-| Content-walk form invocations (`MaxFormInvocations`) | 4096 | `form-invocations` | `InspectDocument` |
+| q-stack depth, render and content walk (`MaxGStateDepth`) | 1024 | `q-depth` | `RenderPageLimits`, `InspectDocument`, `ExtractPageRasterLimits`, `OptimizeLimits` |
+| Content-walk form nesting (`MaxFormDepth`) | 8 | `form-depth` | `InspectDocument`, `ExtractPageRasterLimits`, `OptimizeLimits` |
+| Content-walk form invocations (`MaxFormInvocations`) | 4096 | `form-invocations` | `InspectDocument`, `ExtractPageRasterLimits`, `OptimizeLimits` |
 | Font bytes retained per render (`MaxRenderFontBytes`) | 16 MiB | none: further fonts are skipped | `RenderPageLimits` |
 | Pending operands, render and content walk (`MaxOperands`) | 8192 | none: further operands are dropped | `RenderPageLimits`, `InspectDocument` |
 | Recorded text shows (`MaxTextShows`) | 1<<16 | none: the walk stops recording and carries on | `InspectDocument` |

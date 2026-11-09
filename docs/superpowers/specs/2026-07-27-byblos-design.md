@@ -575,6 +575,8 @@ func ExtractPageRasterContext(ctx context.Context, r io.ReadSeeker, page int) (*
 func RenderPage(r io.ReadSeeker, page, longEdgePx int) (*image.RGBA, error)
 func RenderPageContext(ctx context.Context, r io.ReadSeeker, page, longEdgePx int) (*image.RGBA, error)
 func RenderPageLimits(ctx context.Context, r io.ReadSeeker, page, longEdgePx int, lim Limits) (*image.RGBA, error)
+func ExtractPageRasterLimits(ctx context.Context, r io.ReadSeeker, page int, lim Limits) (*PageRaster, error)
+func OptimizeLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, opts OptimizeOptions, lim Limits) error
 
 // --- extraction telemetry ---
 // Instruments the premise §2 rests on: that a page which is not a single

@@ -3,6 +3,7 @@ package render
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
@@ -48,5 +49,13 @@ func TestRenderLowCapsRefuseByName(t *testing.T) {
 		if got := limitName(err); got != c.name {
 			t.Errorf("%s: err = %v; want *LimitError %s", c.name, err, c.name)
 		}
+	}
+}
+
+// A float past int64 converts to MinInt64 on amd64 and must still be refused.
+func TestRasterSizeHugeScaleRefused(t *testing.T) {
+	_, _, _, _, err := rasterSize(box100, math.MaxInt, limits.Limits{})
+	if got := limitName(err); got != "raster-side" {
+		t.Errorf("err = %v; want *LimitError raster-side", err)
 	}
 }

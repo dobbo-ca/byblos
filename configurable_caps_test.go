@@ -12,6 +12,8 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
+	"strings"
 	"testing"
 )
 
@@ -120,5 +122,33 @@ func TestInspectDocumentWalkCapsRefuseByName(t *testing.T) {
 		if limitNamed(err) != c.name {
 			t.Errorf("%s: err = %v; want *LimitError %s", c.name, err, c.name)
 		}
+	}
+}
+
+// A malformed page at the default walk caps stays a page diagnostic: the
+// document is still described (the behaviour before the caps were LimitErrors).
+func TestInspectDefaultWalkCapIsPageDiagnostic(t *testing.T) {
+	in := contentPDF(strings.Repeat("q ", 1025) + "0 0 10 10 re f")
+	di, err := InspectDocument(context.Background(), bytes.NewReader(in), Limits{})
+	if err != nil || len(di.Pages) != 1 || len(di.Pages[0].Diagnostics) != 1 {
+		t.Fatalf("defaults: err = %v di = %+v; want 1 page with 1 diagnostic", err, di)
+	}
+	// A caller who set the cap asked for the failure.
+	_, err = InspectDocument(context.Background(), bytes.NewReader(in), Limits{MaxGStateDepth: 1024})
+	if limitNamed(err) != "q-depth" {
+		t.Errorf("set cap: err = %v; want *LimitError q-depth", err)
+	}
+}
+
+func TestExtractAndOptimizeLimitsRefuseByName(t *testing.T) {
+	in := contentPDF("q q q q")
+	_, err := ExtractPageRasterLimits(context.Background(), bytes.NewReader(in), 1, Limits{MaxGStateDepth: 3})
+	if limitNamed(err) != "q-depth" {
+		t.Errorf("ExtractPageRasterLimits: err = %v; want *LimitError q-depth", err)
+	}
+	err = OptimizeLimits(context.Background(), io.Discard, bytes.NewReader(in),
+		OptimizeOptions{RecompressJPEG: true, JPEGQuality: 50}, Limits{MaxGStateDepth: 3})
+	if limitNamed(err) != "q-depth" {
+		t.Errorf("OptimizeLimits: err = %v; want *LimitError q-depth", err)
 	}
 }
