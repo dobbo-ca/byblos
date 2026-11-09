@@ -52,7 +52,8 @@ func RenderPageContext(ctx context.Context, r io.ReadSeeker, page, longEdgePx in
 }
 
 // RenderPageLimits is RenderPageContext under lim: the parse caps of Inspect
-// (reserving nothing from the memory budget) and the render caps. A canvas over
+// (reserving from the memory budget only for a JPEG image's decode, held for
+// that decode and waited for without ctx) and the render caps. A canvas over
 // lim.MaxRasterSide or lim.MaxRasterPixels is refused from the page box,
 // before it is allocated, as a *LimitError named raster-side or raster-pixels;
 // a path, a fill or a q stack past lim.MaxPathPoints, lim.MaxFillWork or
@@ -113,6 +114,11 @@ func renderImages(d pdfdoc.Doc, p *pdfdoc.Page) render.ImageFor {
 		if err != nil || fileType == "jbig2" || fileType == "jpx" {
 			return render.Image{}, false
 		}
+		_, release, err := reserveDCT(context.Background(), data, d, xo.ID)
+		if err != nil {
+			return render.Image{}, false
+		}
+		defer release()
 		im, _, err := image.Decode(bytes.NewReader(data))
 		if err != nil {
 			return render.Image{}, false

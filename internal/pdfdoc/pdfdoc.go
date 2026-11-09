@@ -49,6 +49,7 @@ import (
 	"sync"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/dct"
 	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/pdf-go/pkg/api"
 	"github.com/dobbo-ca/pdf-go/pkg/filter"
@@ -1371,6 +1372,11 @@ func (d *doc) RawImage(id int) (data []byte, fileType string, err error) {
 	saved := lims.MaxDecodeBytes
 	lims.MaxDecodeBytes = declared
 	defer func() { lims.MaxDecodeBytes = saved }()
+	release, err := d.reserveCMYKDCT(sd, info, declared)
+	if err != nil {
+		return nil, "", err
+	}
+	defer release()
 	im, err := pdfcpu.ExtractImage(context.Background(), d.ctx, sd, false, d.images[id].Name, id, false)
 	if err != nil {
 		if errors.Is(err, filter.ErrDecodeLimitExceeded) {
@@ -1388,6 +1394,43 @@ func (d *doc) RawImage(id int) (data []byte, fileType string, err error) {
 		return nil, "", fmt.Errorf("byblos/pdfdoc: reading image %d: %w", id, err)
 	}
 	return b, im.FileType, nil
+}
+
+// reserveCMYKDCT guards the one DCT decode pdfcpu makes itself: a four-component
+// stream is decoded with image/jpeg inside ExtractImage, before any caller sees
+// the bytes, so the SOF check and the memory reservation byblos gives every
+// other DCT decode happen here, on the encoded stream, first. A frame past the
+// pixel cap is a *limits.LimitError; one the dictionary does not allow is
+// ErrUnsupportedCodec. Anything else returns a no-op release. declared bounds
+// what pdfcpu holds after the decode (gob, then the RGBA it renders), so three
+// copies of it join the decode's own need in the reservation.
+func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int64) (func(), error) {
+	none := func() {}
+	n := len(sd.FilterPipeline)
+	if n == 0 || sd.FilterPipeline[n-1].Name != filter.DCT {
+		return none, nil
+	}
+	if comps, err := pdfcpu.ColorSpaceComponents(d.ctx.XRefTable, sd); err != nil || comps != 4 {
+		return none, nil // ExtractImage reports the former; the latter is not decoded here
+	}
+	jpg := sd.Raw
+	if n > 1 { // the filters in front of DCT, run on a copy so sd is left as it was
+		cp := *sd
+		cp.FilterPipeline, cp.Content = sd.FilterPipeline[:n-1], nil
+		if err := cp.DecodeWithLimit(declared); err != nil {
+			return nil, fmt.Errorf("byblos/pdfdoc: image %d: %w", info.ObjNr, err)
+		}
+		jpg = cp.Content
+	}
+	_, release, err := dct.Reserve(context.Background(), jpg, d.lim.ImagePixels(), int64(info.Width)*int64(info.Height), 4, 3*declared)
+	if err != nil {
+		var le *limits.LimitError
+		if !errors.As(err, &le) && !errors.Is(err, limits.ErrMemoryLimit) {
+			err = fmt.Errorf("%w: %v", ErrUnsupportedCodec, err)
+		}
+		return nil, err
+	}
+	return release, nil
 }
 
 // RawImageGlobals returns the JBIG2 page-0 segments image id declares in
