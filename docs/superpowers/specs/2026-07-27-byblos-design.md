@@ -666,6 +666,7 @@ var ErrUnstampableRune = errors.New("byblos: rune is outside the glyphless font'
 
 func StampTextLayer(w io.Writer, r io.ReadSeeker, tl TextLayer) error
 func StampTextLayerContext(ctx context.Context, w io.Writer, r io.ReadSeeker, tl TextLayer) error
+func StampTextLayerLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, tl TextLayer, lim Limits) error
 
 type ColorSpace = pdfdoc.ColorSpace   // §4 write-seam vocabulary, shared with
 type DecodeParms = pdfdoc.DecodeParms // ReplaceImage so BuildPDF isn't a second
@@ -812,6 +813,7 @@ func WriteProvenance(r io.ReadSeeker, w io.Writer, p Provenance) error
 func WriteProvenanceContext(ctx context.Context, r io.ReadSeeker, w io.Writer, p Provenance) error
 func RecordExtraction(r io.ReadSeeker) (Provenance, error) // runs extraction over every page, ready for WriteProvenance (byb-b5)
 func RecordExtractionContext(ctx context.Context, r io.ReadSeeker) (Provenance, error)
+func RecordExtractionLimits(ctx context.Context, r io.ReadSeeker, lim Limits) (Provenance, error)
 func UpgradeCandidates(p *Provenance, current []string) []string
 func Capabilities() []string // what this build can do
 ```

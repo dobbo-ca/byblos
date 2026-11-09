@@ -178,13 +178,13 @@ field, a breach fails the call.
 | `RenderPage` canvas, a side (`MaxRasterSide`) and total (`MaxRasterPixels`) | 20 000 px, 1<<26 px | `raster-side`, `raster-pixels` | `RenderPageLimits` |
 | Flattened path points (`MaxPathPoints`) | 1<<21 | `path-points` | `RenderPageLimits` |
 | Scanline fill work (`MaxFillWork`) | 1<<28 | `fill-work` | `RenderPageLimits` |
-| q-stack depth, render and content walk (`MaxGStateDepth`) | 1024 | `q-depth` | `RenderPageLimits`, `InspectDocument`, `ExtractPageRasterLimits`, `OptimizeLimits` |
-| Content-walk form nesting (`MaxFormDepth`) | 8 | `form-depth` | `InspectDocument`, `ExtractPageRasterLimits`, `OptimizeLimits` |
-| Content-walk form invocations (`MaxFormInvocations`) | 4096 | `form-invocations` | `InspectDocument`, `ExtractPageRasterLimits`, `OptimizeLimits` |
+| q-stack depth, render and content walk (`MaxGStateDepth`) | 1024 | `q-depth` | `RenderPageLimits`, `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `RecordExtractionLimits`, `OptimizeLimits` |
+| Content-walk form nesting (`MaxFormDepth`) | 8 | `form-depth` | `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `RecordExtractionLimits`, `OptimizeLimits` |
+| Content-walk form invocations (`MaxFormInvocations`) | 4096 | `form-invocations` | `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `RecordExtractionLimits`, `OptimizeLimits` |
 | Font bytes retained per render (`MaxRenderFontBytes`) | 16 MiB | none: further fonts are skipped | `RenderPageLimits` |
-| Pending operands, render and content walk (`MaxOperands`) | 8192 | none: further operands are dropped | `RenderPageLimits`, `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `OptimizeLimits` (its JPEG pass only) |
-| Recorded text shows (`MaxTextShows`) | 1<<16 | none: the walk stops recording and carries on | `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `OptimizeLimits` (its JPEG pass only) |
-| Recorded paints (`MaxPaints`) | 1<<18 | none: the walk stops recording and carries on | `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `OptimizeLimits` (its JPEG pass only) |
+| Pending operands, render and content walk (`MaxOperands`) | 8192 | none: further operands are dropped | `RenderPageLimits`, `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `RecordExtractionLimits`, `OptimizeLimits` (its JPEG pass only) |
+| Recorded text shows (`MaxTextShows`) | 1<<16 | none: the walk stops recording and carries on | `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `RecordExtractionLimits`, `OptimizeLimits` (its JPEG pass only) |
+| Recorded paints (`MaxPaints`) | 1<<18 | none: the walk stops recording and carries on | `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `RecordExtractionLimits`, `OptimizeLimits` (its JPEG pass only) |
 
 The last four are caps that truncate by design, not refuse: a page past them
 still classifies, and refusing would turn a dense vector map that passes today
@@ -213,10 +213,10 @@ that already meets the "refuse before allocating" rule end to end.
 `ctx` entry points exist today for the nine document-scale primitives,
 `BuildFromPagesContext`, `RenderPageContext` and the `...Limits` forms above: `InspectContext` (`inspect.go:213`),
 `ExtractPageRasterContext` (`extract.go:437`), `OptimizeContext`
-(`optimize.go:129`), `StampTextLayerContext` (`stamp.go:185`),
+(`optimize.go:129`), `StampTextLayerContext` (`stamp.go:185`, `StampTextLayerLimits` for caps),
 `BuildPDFContext` (`build.go:70`), `BuildFromPagesContext`
 (`editpages.go:143`), `ReplaceImagesContext` (`substitute.go:99`),
-`RecordExtractionContext` (`provenance.go:450`), `WriteProvenanceContext`
+`RecordExtractionContext` (`provenance.go:450`, `RecordExtractionLimits` for caps), `WriteProvenanceContext`
 (`provenance.go:366`), `ReadProvenanceContext` (`provenance.go:531`) and
 `RenderPageContext` (`render.go:50`). `Sauvola`, `QuantizePNG`,
 `QuantizeIndexed`, `EncodeJBIG2Generic`, `DecodeJBIG2Generic` and `EmbedPNG` take no `ctx`; the

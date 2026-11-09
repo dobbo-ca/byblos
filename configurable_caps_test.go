@@ -163,3 +163,25 @@ func TestReplaceImagesLimitsRefusesByName(t *testing.T) {
 		t.Errorf("ReplaceImagesLimits: err = %v; want *LimitError q-depth", err)
 	}
 }
+
+func TestRecordExtractionLimitsRefusesByName(t *testing.T) {
+	in := contentPDF("q q q q")
+	if _, err := RecordExtractionLimits(context.Background(), bytes.NewReader(in), Limits{}); err != nil {
+		t.Fatalf("defaults: %v", err)
+	}
+	_, err := RecordExtractionLimits(context.Background(), bytes.NewReader(in), Limits{MaxGStateDepth: 3})
+	if limitNamed(err) != "q-depth" {
+		t.Errorf("RecordExtractionLimits: err = %v; want *LimitError q-depth", err)
+	}
+}
+
+func TestStampTextLayerLimitsRefusesByName(t *testing.T) {
+	in := contentPDF("q Q")
+	if err := StampTextLayerLimits(context.Background(), io.Discard, bytes.NewReader(in), TextLayer{}, Limits{}); err != nil {
+		t.Fatalf("defaults: %v", err)
+	}
+	err := StampTextLayerLimits(context.Background(), io.Discard, bytes.NewReader(in), TextLayer{}, Limits{MaxObjects: 1})
+	if limitNamed(err) != "objects" {
+		t.Errorf("StampTextLayerLimits: err = %v; want *LimitError objects", err)
+	}
+}

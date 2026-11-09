@@ -183,10 +183,16 @@ func StampTextLayer(w io.Writer, r io.ReadSeeker, tl TextLayer) error {
 // call; on a document with fewer, longer pages the write dominates further.
 // A cancelled call writes nothing to w. See context.go.
 func StampTextLayerContext(ctx context.Context, w io.Writer, r io.ReadSeeker, tl TextLayer) error {
+	return StampTextLayerLimits(ctx, w, r, tl, Limits{})
+}
+
+// StampTextLayerLimits is StampTextLayerContext under lim: the parse caps are
+// lim's, and a breach is a *LimitError. A zero Limits is today's defaults.
+func StampTextLayerLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, tl TextLayer, lim Limits) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	d, err := pdfdoc.Open(r)
+	d, err := pdfdoc.OpenLimits(context.Background(), r, lim)
 	if err != nil {
 		return fmt.Errorf("byblos: stamp text layer: %w", err)
 	}
