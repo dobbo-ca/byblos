@@ -69,10 +69,14 @@ func TestRasterSizeHugeScaleRefused(t *testing.T) {
 // compares the canvas actually allocated: ceil(w)*ceil(h).
 func TestRasterSizeRaisedCapsAndCanvas(t *testing.T) {
 	big := limits.Limits{MaxRasterSide: math.MaxInt64, MaxRasterPixels: math.MaxInt64}
-	for _, b := range []content.Box{{URX: 2e9, URY: 2e9}, {URX: 9.2e18, URY: 1}} {
+	for _, b := range []content.Box{{URX: 2e9, URY: 2e9}, {URX: 9.2e18, URY: 1}, {URX: 1 << 22, URY: 1 << 22}, {URX: 1 << 17, URY: 1 << 17}} {
 		_, _, _, _, err := rasterSize(b, 1, big)
 		if got := limitName(err); got != "raster-pixels" {
 			t.Errorf("box %+v: err = %v; want *LimitError raster-pixels", b, err)
+		}
+		var le *limits.LimitError
+		if errors.As(err, &le) && le.Got <= le.Max {
+			t.Errorf("box %+v: Got %d <= Max %d", b, le.Got, le.Max)
 		}
 	}
 	// 8191.5 x 8192.4 is under 1<<26 by area but allocates 8192 x 8193 px.

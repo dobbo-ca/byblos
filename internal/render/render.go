@@ -210,6 +210,10 @@ func displayTurn(rot int, fw, fh float64) content.Matrix {
 	return content.Identity
 }
 
+// maxCanvasPixels is the hard ceiling on cw*ch (16 GiB of RGBA), whatever the
+// caller's MaxRasterPixels says.
+const maxCanvasPixels = 1 << 32
+
 // rasterSize returns the canvas in whole pixels AND the exact device extents it
 // was rounded up from. displayTurn needs the unrounded pair: see its comment.
 func rasterSize(box content.Box, scale float64, lim limits.Limits) (w, h int, fw, fh float64, err error) {
@@ -227,10 +231,12 @@ func rasterSize(box content.Box, scale float64, lim limits.Limits) (w, h int, fw
 		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-side", Got: satInt64(v), Max: lim.RasterSide()}
 	}
 	cw, ch := math.Ceil(fw), math.Ceil(fh)
-	// The canvas is cw x ch, not fw*fh, and image.NewRGBA panics when
-	// cw*ch*4 overflows int, which a caller-raised cap can admit.
-	if p := cw * ch; p > float64(lim.RasterPixels()) || p*4 >= 0x1p62 {
-		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-pixels", Got: satInt64(p), Max: lim.RasterPixels()}
+	// The canvas is cw x ch, not fw*fh. image.NewRGBA panics (or the process
+	// is OOM-killed) far below int overflow, so a caller-raised cap is
+	// clamped to maxCanvasPixels.
+	maxPx := min(lim.RasterPixels(), maxCanvasPixels)
+	if p := cw * ch; p > float64(maxPx) {
+		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-pixels", Got: satInt64(p), Max: maxPx}
 	}
 	return int(cw), int(ch), fw, fh, nil
 }

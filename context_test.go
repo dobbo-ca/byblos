@@ -162,7 +162,7 @@ func nineEntryPoints() []entryPoint {
 			plain: func(f fixture, _ io.Writer) error { _, e := ExtractPageRaster(bytes.NewReader(f.doc), 1); return e },
 		},
 		{
-			name: "Optimize",
+			name: "Optimize", perPageBoundary: true,
 			call: func(c context.Context, f fixture, w io.Writer) error {
 				return OptimizeContext(c, w, bytes.NewReader(f.doc), OptimizeOptions{})
 			},
@@ -478,7 +478,7 @@ func TestPerPageBoundarySetIsTheMeasuredOne(t *testing.T) {
 	want := map[string]bool{
 		"Inspect": true, "StampTextLayer": true, "BuildPDF": true,
 		"ReplaceImages": true, "RecordExtraction": true,
-		"ExtractPageRaster": false, "Optimize": false,
+		"ExtractPageRaster": false, "Optimize": true,
 		"WriteProvenance": false, "ReadProvenance": false,
 	}
 	for _, ep := range nineEntryPoints() {

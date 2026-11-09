@@ -121,10 +121,11 @@ func Optimize(w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 // and not the whole call; with RecompressJPEG false there is no finer boundary
 // than that. With RecompressJPEG true the recompression pass adds per-page and
 // per-image boundaries that ARE checked, so a context cancelled during
-// recompression is honoured within one image's re-encode.
+// recompression is honoured within one image's re-encode. The parse-cap gate
+// that opens every call also checks the context as it walks the document.
 //
 // A caller that needs Optimize to stop promptly does not have that option
-// today; it must budget for the document's full rewrite. A cancelled call
+// today; after the gate it must budget for the document's full rewrite. A cancelled call
 // writes nothing to w. See context.go.
 func OptimizeContext(ctx context.Context, w io.Writer, r io.ReadSeeker, opts OptimizeOptions) error {
 	return OptimizeLimits(ctx, w, r, opts, Limits{})
@@ -153,7 +154,7 @@ func OptimizeLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, opts Opti
 
 	// Gate every option on the parse caps: pdfdoc.Optimize below is pdfcpu
 	// alone and enforces none of them.
-	if _, err := pdfdoc.OpenLimits(context.Background(), bytes.NewReader(origIn), lim); err != nil {
+	if _, err := pdfdoc.OpenLimits(ctx, bytes.NewReader(origIn), lim); err != nil {
 		return fmt.Errorf("byblos: optimize: %w", err)
 	}
 
@@ -262,7 +263,7 @@ func OptimizeLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, opts Opti
 		// correctness requirement for the born-digital path, not a size
 		// optimization, so there is nothing to trade.
 		var out bytes.Buffer
-		if err := pdfdoc.Linearize(bytes.NewReader(candidate.Bytes()), &out, lim); err != nil {
+		if err := pdfdoc.Linearize(ctx, bytes.NewReader(candidate.Bytes()), &out, lim); err != nil {
 			return fmt.Errorf("byblos: optimize: %w", err)
 		}
 		if _, err := w.Write(out.Bytes()); err != nil {

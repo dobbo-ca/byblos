@@ -253,7 +253,7 @@ func TestEveryWritePathAnswersForEncryptedSource(t *testing.T) {
 
 	t.Run("pdfdoc.Linearize", func(t *testing.T) {
 		var out bytes.Buffer
-		err := pdfdoc.Linearize(bytes.NewReader(enc), &out, byblos.Limits{})
+		err := pdfdoc.Linearize(context.Background(), bytes.NewReader(enc), &out, byblos.Limits{})
 		assertRefuses(t, "pdfdoc.Linearize", err)
 	})
 }

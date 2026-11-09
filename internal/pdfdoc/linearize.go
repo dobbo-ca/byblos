@@ -61,10 +61,10 @@ var openDocKeys = []string{"ViewerPreferences", "PageMode", "Threads", "OpenActi
 // It is the last thing that may touch the bytes: anything that re-serializes
 // the document afterwards -- including WriteProperties, which goes through
 // pdfcpu's writer -- silently removes the linearization again.
-func Linearize(rs io.ReadSeeker, w io.Writer, lim limits.Limits) (err error) {
+func Linearize(ctx context.Context, rs io.ReadSeeker, w io.Writer, lim limits.Limits) (err error) {
 	defer catchPanic("linearize", &err)
 
-	opened, err := OpenLimits(context.Background(), rs, lim)
+	opened, err := OpenLimits(ctx, rs, lim)
 	if err != nil {
 		return err
 	}
