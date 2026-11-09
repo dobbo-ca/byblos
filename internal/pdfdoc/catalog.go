@@ -1,6 +1,6 @@
 package pdfdoc
 
-import "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+import "github.com/dobbo-ca/pdf-go/pkg/pdfcpu/types"
 
 // CatalogInfo is what the document catalog says about signatures and dynamic
 // XFA, the two inputs OCRmyPDF refuses (_pipeline.py validate_pdfinfo_options).

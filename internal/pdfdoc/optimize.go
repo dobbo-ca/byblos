@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/dobbo-ca/pdf-go/pkg/api"
 )
 
 // Optimize runs pdfcpu's structural optimize pass over rs and writes the

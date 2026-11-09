@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/dobbo-ca/pdf-go/pkg/api"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/types"
 )
 
 // DanglingRef is one reference naming an object the document does not define.

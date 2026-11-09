@@ -16,7 +16,7 @@ import (
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/corpus"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/types"
 )
 
 func sha(b []byte) string {

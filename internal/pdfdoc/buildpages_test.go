@@ -10,9 +10,9 @@ import (
 
 	"github.com/dobbo-ca/byblos/internal/corpus"
 	"github.com/dobbo-ca/byblos/internal/limits"
-	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/dobbo-ca/pdf-go/pkg/api"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/model"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/types"
 )
 
 // booklet returns a fresh reader over the eight-page corpus booklet. Fresh per

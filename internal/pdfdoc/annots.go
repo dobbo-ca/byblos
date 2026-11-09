@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/types"
 )
 
 // Annot is one annotation as its own dictionary declares it, in the same

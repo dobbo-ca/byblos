@@ -7,8 +7,8 @@ import (
 	"strconv"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
-	"github.com/pdfcpu/pdfcpu/pkg/filter"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/dobbo-ca/pdf-go/pkg/filter"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/types"
 )
 
 // trailerSize reads the /Size of the last trailer (or cross-reference stream

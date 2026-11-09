@@ -150,18 +150,11 @@ form takes. `ReadProvenance`, `WriteProvenance` and the rewrite inside
 byblos caps still apply to its input. Only `InspectDocument` reserves from the
 budget; the others reserve nothing yet (see Planned).
 
-### The pdfcpu fork
+### The pdf-go fork
 
 The three cumulative limits are `MaxObjectStreamTotalCount`, `MaxTotalDecodeBytes` and `MaxParsedBytes` in
-`github.com/dobbo-ca/pergamon-go` (a fork of pdfcpu; its module path is still
-`github.com/pdfcpu/pdfcpu`). byblos's `go.mod` carries
-
-    replace github.com/pdfcpu/pdfcpu => github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.4
-
-**A `replace` in byblos's `go.mod` does not apply to a program that imports byblos.**
-Every consumer carries the same line in its own `go.mod` (kleio does), or it
-builds against upstream pdfcpu v0.16.4, which does not have the fields, and
-fails to compile.
+`github.com/dobbo-ca/pdf-go` (a dobbo-ca-owned hard fork of pdfcpu). byblos and its
+consumers import it directly; no `replace` is needed.
 
 ### Moved into `Limits` (owner decision D2)
 

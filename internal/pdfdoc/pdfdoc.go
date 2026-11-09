@@ -50,11 +50,11 @@ import (
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/limits"
-	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/filter"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/dobbo-ca/pdf-go/pkg/api"
+	"github.com/dobbo-ca/pdf-go/pkg/filter"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/model"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/types"
 )
 
 var configOnce sync.Once
@@ -445,7 +445,7 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 	conf.Limits.MaxDecodeBytes = lim.StreamBytes()
 	conf.Limits.MaxObjectCount = int(lim.Objects())
 	conf.Limits.MaxObjectBytes = lim.ObjectBytes()
-	// The cumulative limits of pergamon-go: pdfcpu reads an object stream's /N
+	// The cumulative limits of pdf-go: pdfcpu reads an object stream's /N
 	// by its own rules, which no scan here tracks, so it counts the entries and
 	// the decoded bytes of the parse itself and refuses at the limit.
 	conf.Limits.MaxObjectStreamTotalCount = int(lim.ObjectStreamEntries())
