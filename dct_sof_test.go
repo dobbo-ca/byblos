@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"runtime"
 	"testing"
+
+	jpegcopy "github.com/dobbo-ca/jpeg-go"
 )
 
 // A 16x16 image dictionary wrapping a JPEG whose SOF claims NxN is refused from
@@ -43,5 +45,15 @@ func TestDCTSOFMustMatchDictionary(t *testing.T) {
 			}
 			_ = rerr // RenderPage skips the image and carries on
 		}
+	}
+}
+
+// byblos's memory budget is also jpeg-go's: its decodes may not hold more than
+// byblos reserved for them.
+func TestSetMemoryLimitReachesJPEGDecoder(t *testing.T) {
+	prev := SetMemoryLimit(123 << 20)
+	defer SetMemoryLimit(prev)
+	if got := jpegcopy.SetMemoryLimit(1 << 20); got != 123<<20 {
+		t.Errorf("jpeg-go limit = %d; want %d", got, 123<<20)
 	}
 }
