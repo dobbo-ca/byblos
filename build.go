@@ -44,6 +44,8 @@ type BuildPage struct {
 	Image             EncodedImage
 	WidthPt, HeightPt float64
 	DPI               float64
+	// DPIY is the vertical resolution; zero means the same as DPI.
+	DPIY float64
 	// Rotate is the page's /Rotate in degrees: 0 (none written), 90, 180 or
 	// 270, anything else refused. It turns the page on display and leaves the
 	// MediaBox and the placement as they are, which is what img2pdf writes for
@@ -110,10 +112,16 @@ func BuildPDFLimits(ctx context.Context, w io.Writer, pages []BuildPage, lim Lim
 func pageBox(p BuildPage) (float64, float64, error) {
 	w, h := p.WidthPt, p.HeightPt
 	if w == 0 && h == 0 {
-		if p.DPI <= 0 || math.IsNaN(p.DPI) || math.IsInf(p.DPI, 0) {
-			return 0, 0, fmt.Errorf("no page box given and DPI %v is not positive", p.DPI)
+		dy := p.DPIY
+		if dy == 0 {
+			dy = p.DPI
 		}
-		return float64(p.Image.Width) * 72 / p.DPI, float64(p.Image.Height) * 72 / p.DPI, nil
+		for _, d := range []float64{p.DPI, dy} {
+			if d <= 0 || math.IsNaN(d) || math.IsInf(d, 0) {
+				return 0, 0, fmt.Errorf("no page box given and DPI %v is not positive", d)
+			}
+		}
+		return float64(p.Image.Width) * 72 / p.DPI, float64(p.Image.Height) * 72 / dy, nil
 	}
 	if math.IsNaN(w) || math.IsNaN(h) || math.IsInf(w, 0) || math.IsInf(h, 0) || w <= 0 || h <= 0 {
 		return 0, 0, fmt.Errorf("page box %gx%g is not a positive finite size", w, h)

@@ -14,7 +14,10 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"math"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -230,8 +233,9 @@ func jp2(w, h uint32, bpc byte, enumCS uint32, extra ...[]byte) []byte {
 }
 
 func TestEmbedJP2ParsesBoxes(t *testing.T) {
-	// A resc box: 3937 / 1 pixels per metre vertically and horizontally, 10^0.
-	resc := binary.BigEndian.AppendUint16(nil, 3937)
+	// A resc box: 1969 / 1 pixels per metre vertically (50 dpi) and 3937 / 1
+	// horizontally (100 dpi), 10^0.
+	resc := binary.BigEndian.AppendUint16(nil, 1969)
 	resc = append(resc, 0, 1, 0x0F, 0x61, 0, 1, 0, 0)
 	res := append(binary.BigEndian.AppendUint32(nil, 8+8+10), []byte("res ")...)
 	res = append(res, binary.BigEndian.AppendUint32(nil, 8+10)...)
@@ -244,8 +248,8 @@ func TestEmbedJP2ParsesBoxes(t *testing.T) {
 	if img.Width != 30 || img.Height != 20 || img.BPC != 8 || img.ColorSpace.Name != "DeviceGray" {
 		t.Errorf("got %+v", img)
 	}
-	if dpi < 99.9 || dpi > 100.1 {
-		t.Errorf("dpi = %v; want 100 (3937 px/m)", dpi)
+	if dpi != (Resolution{100, 50}) {
+		t.Errorf("dpi = %v; want 100 x 50 (3937 and 1969 px/m, as img2pdf rounds them)", dpi)
 	}
 	for name, data := range map[string][]byte{
 		"empty":        nil,
@@ -368,6 +372,112 @@ func TestBuildPageRotate(t *testing.T) {
 	}
 }
 
+// --- the page box, against img2pdf -----------------------------------------------
+
+// exifVariants are the oracle-only Exif files, exif-6.jpg with its orientation
+// entry replaced as testdata/img2pdf/gen.py does.
+var exifVariants = map[string][]byte{
+	"exif-long.jpg":   {1, 0x12, 0, 4, 0, 0, 0, 1, 0, 0, 0, 6},
+	"exif-short0.jpg": {1, 0x12, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0},
+	"exif-short2.jpg": {1, 0x12, 0, 3, 0, 0, 0, 2, 0, 6, 0, 1},
+}
+
+// oracleInput is the input an oracle.json entry was made from: the file in
+// testdata/img2pdf, or for the exif variants, exif-6.jpg with its orientation
+// replaced.
+func oracleInput(t *testing.T, name string) []byte {
+	t.Helper()
+	if b, err := os.ReadFile("testdata/img2pdf/" + name); err == nil {
+		return b
+	}
+	repl, ok := exifVariants[name]
+	if !ok {
+		var o byte
+		if _, err := fmt.Sscanf(name, "exif-%d.jpg", &o); err != nil {
+			t.Fatalf("no input for oracle entry %s", name)
+		}
+		repl = []byte{1, 0x12, 0, 3, 0, 0, 0, 1, 0, o, 0, 0}
+	}
+	return bytes.Replace(img2pdfFile(t, "exif-6.jpg"), []byte{1, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0}, repl, 1)
+}
+
+// TestEmbedPageBoxMatchesImg2pdf builds a page from every accepted oracle
+// entry the way a caller does (the Resolution Embed returns, 96 when it
+// declares none, EXIFRotation for a JPEG) and holds its MediaBox and /Rotate to
+// what img2pdf wrote.
+func TestEmbedPageBoxMatchesImg2pdf(t *testing.T) {
+	for name, want := range img2pdfOracle(t) {
+		if want.Error != "" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			data := oracleInput(t, name)
+			var img EncodedImage
+			var res Resolution
+			var err error
+			rotate := 0
+			switch {
+			case strings.HasSuffix(name, ".jpg"):
+				if img, res, err = EmbedJPEG(data); err == nil {
+					rotate, err = EXIFRotation(data)
+				}
+			case strings.HasSuffix(name, ".jp2"):
+				img, res, err = EmbedJP2(data, Limits{})
+			case strings.HasPrefix(name, "rgba-"):
+				t.Skip("alpha: TranscodePNG")
+			case strings.HasSuffix(name, ".png"):
+				img, res, err = EmbedPNG(data)
+			default:
+				t.Fatalf("no Embed function for oracle entry %s", name)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res == (Resolution{}) {
+				res = Resolution{96, 96}
+			}
+			out := buildOrFatal(t, []BuildPage{{Image: img, DPI: res.X, DPIY: res.Y, Rotate: rotate}})
+			d := pageDict(t, out)
+			m := regexp.MustCompile(`/MediaBox \[([^\]]*)\]`).FindStringSubmatch(d)
+			if m == nil {
+				t.Fatalf("no MediaBox in %s", d)
+			}
+			box := strings.Fields(m[1])
+			if len(box) != len(want.Mediabox) {
+				t.Fatalf("MediaBox %v; img2pdf wrote %v", box, want.Mediabox)
+			}
+			for i, f := range box {
+				if v, err := strconv.ParseFloat(f, 64); err != nil || math.Abs(v-want.Mediabox[i]) > 1e-4 {
+					t.Errorf("MediaBox %v; img2pdf wrote %v (from %v dpi)", box, want.Mediabox, res)
+					break
+				}
+			}
+			if got := strings.Contains(d, fmt.Sprintf("/Rotate %d", want.Rotate)); got != (want.Rotate != 0) || (want.Rotate == 0 && strings.Contains(d, "/Rotate")) {
+				t.Errorf("page %s; img2pdf wrote /Rotate %d", d, want.Rotate)
+			}
+		})
+	}
+}
+
+// TestEXIFRotationOracleFiles holds EXIFRotation to img2pdf on every exif-*
+// oracle entry, the entries Pillow reads leniently (LONG, empty, two values)
+// among them.
+func TestEXIFRotationOracleFiles(t *testing.T) {
+	for name, want := range img2pdfOracle(t) {
+		if !strings.HasPrefix(name, "exif-") {
+			continue
+		}
+		got, err := EXIFRotation(oracleInput(t, name))
+		if want.Error != "" {
+			if err == nil {
+				t.Errorf("%s: got %d; img2pdf refuses (%s)", name, got, want.Error)
+			}
+		} else if err != nil || got != want.Rotate {
+			t.Errorf("%s: got %d, %v; img2pdf wrote /Rotate %d", name, got, err, want.Rotate)
+		}
+	}
+}
+
 // --- fuzz --------------------------------------------------------------------
 
 // FuzzBuildPDF throws declared images at BuildPDF under tight limits. Whatever
@@ -411,6 +521,7 @@ func FuzzEXIFRotation(f *testing.F) {
 	f.Add([]byte{0xFF, 0xD8, 0xFF, 0xE1, 0, 8, 'E', 'x', 'i', 'f', 0, 0})
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {
+		jpegDPI(data)
 		if r, err := EXIFRotation(data); err == nil && r != 0 && r != 90 && r != 180 && r != 270 {
 			t.Fatalf("rotation %d", r)
 		}

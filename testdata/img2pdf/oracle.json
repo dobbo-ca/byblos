@@ -43,6 +43,54 @@
   "stream_is_input": true,
   "width": 16
  },
+ "dpi-300x150.jp2": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/JPXDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   17.28
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "dpi-300x150.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   17.28
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "dpi-300x150.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   17.28
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
  "exif-0.jpg": {
   "error": "Invalid rotation (0): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
  },
@@ -125,6 +173,86 @@
  "exif-9.jpg": {
   "error": "Invalid rotation (9): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
  },
+ "exif-dpi-300.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "exif-dpi-cm.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   13.606299,
+   10.204724
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "exif-long.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-short0.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-short2.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
  "gray.jp2": {
   "bpc": 8,
   "colorspace": "/DeviceGray",
@@ -156,5 +284,37 @@
   "rotate": 0,
   "stream_is_input": true,
   "width": 16
+ },
+ "rgba-300x150.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   17.28
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-72.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   48.0,
+   36.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
  }
 }
