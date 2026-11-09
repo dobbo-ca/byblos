@@ -58,4 +58,8 @@ func TestRasterSizeHugeScaleRefused(t *testing.T) {
 	if got := limitName(err); got != "raster-side" {
 		t.Errorf("err = %v; want *LimitError raster-side", err)
 	}
+	var le *limits.LimitError
+	if errors.As(err, &le) && le.Got <= le.Max {
+		t.Errorf("Got = %d, want > Max %d", le.Got, le.Max)
+	}
 }

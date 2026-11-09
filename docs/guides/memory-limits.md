@@ -182,9 +182,9 @@ field, a breach fails the call.
 | Content-walk form nesting (`MaxFormDepth`) | 8 | `form-depth` | `InspectDocument`, `ExtractPageRasterLimits`, `OptimizeLimits` |
 | Content-walk form invocations (`MaxFormInvocations`) | 4096 | `form-invocations` | `InspectDocument`, `ExtractPageRasterLimits`, `OptimizeLimits` |
 | Font bytes retained per render (`MaxRenderFontBytes`) | 16 MiB | none: further fonts are skipped | `RenderPageLimits` |
-| Pending operands, render and content walk (`MaxOperands`) | 8192 | none: further operands are dropped | `RenderPageLimits`, `InspectDocument` |
-| Recorded text shows (`MaxTextShows`) | 1<<16 | none: the walk stops recording and carries on | `InspectDocument` |
-| Recorded paints (`MaxPaints`) | 1<<18 | none: the walk stops recording and carries on | `InspectDocument` |
+| Pending operands, render and content walk (`MaxOperands`) | 8192 | none: further operands are dropped | `RenderPageLimits`, `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `OptimizeLimits` (its JPEG pass only) |
+| Recorded text shows (`MaxTextShows`) | 1<<16 | none: the walk stops recording and carries on | `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `OptimizeLimits` (its JPEG pass only) |
+| Recorded paints (`MaxPaints`) | 1<<18 | none: the walk stops recording and carries on | `InspectDocument`, `ExtractPageRasterLimits`, `ReplaceImagesLimits`, `OptimizeLimits` (its JPEG pass only) |
 
 The last four are caps that truncate by design, not refuse: a page past them
 still classifies, and refusing would turn a dense vector map that passes today

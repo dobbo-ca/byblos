@@ -224,12 +224,21 @@ func rasterSize(box content.Box, scale float64, lim limits.Limits) (w, h int, fw
 	// Compared in float: a float beyond int64 converts to MinInt64 on amd64
 	// and would slip under the cap.
 	if v := math.Ceil(max(fw, fh)); v > float64(lim.RasterSide()) {
-		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-side", Got: int64(min(v, math.MaxInt64)), Max: lim.RasterSide()}
+		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-side", Got: satInt64(v), Max: lim.RasterSide()}
 	}
 	if v := math.Ceil(fw * fh); v > float64(lim.RasterPixels()) {
-		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-pixels", Got: int64(min(v, math.MaxInt64)), Max: lim.RasterPixels()}
+		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-pixels", Got: satInt64(v), Max: lim.RasterPixels()}
 	}
 	return int(math.Ceil(fw)), int(math.Ceil(fh)), fw, fh, nil
+}
+
+// satInt64 converts v to int64, saturating: float64(MaxInt64) is 2^63, itself
+// out of range, so the bound is compared with >= 0x1p63.
+func satInt64(v float64) int64 {
+	if v >= 0x1p63 {
+		return math.MaxInt64
+	}
+	return int64(v)
 }
 
 // gstate is the graphics state this stage tracks, saved and restored as a

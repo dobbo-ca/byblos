@@ -152,3 +152,14 @@ func TestExtractAndOptimizeLimitsRefuseByName(t *testing.T) {
 		t.Errorf("OptimizeLimits: err = %v; want *LimitError q-depth", err)
 	}
 }
+
+// The resolving walk runs before any substitution, so a placeholder sub is
+// enough to reach it.
+func TestReplaceImagesLimitsRefusesByName(t *testing.T) {
+	in := contentPDF("q q q q")
+	err := ReplaceImagesLimits(context.Background(), io.Discard, bytes.NewReader(in),
+		map[int]EncodedImage{1: {}}, Limits{MaxGStateDepth: 3})
+	if limitNamed(err) != "q-depth" {
+		t.Errorf("ReplaceImagesLimits: err = %v; want *LimitError q-depth", err)
+	}
+}

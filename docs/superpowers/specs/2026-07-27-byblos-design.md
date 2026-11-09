@@ -737,6 +737,7 @@ func ValidatePages(pages []PageSource) error
 // records what it applied, through RecordExtraction and WriteProvenance.
 func ReplaceImages(w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) error
 func ReplaceImagesContext(ctx context.Context, w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) error
+func ReplaceImagesLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage, lim Limits) error
 
 // --- capability errors ---
 
