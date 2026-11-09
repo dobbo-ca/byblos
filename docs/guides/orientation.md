@@ -15,6 +15,17 @@ orientation metadata is:
   packet in a JPEG; the Orientation tag (0x0112) twice in one Exif IFD0 (JPEG
   or PNG), whatever its values;
 - conflicting: the Exif orientation and the XMP orientation differ;
+- an XMP packet whose bytes contain "Orientation" and that is not normal. It is
+  normal only if it parses completely as XML (encoding/xml, at most 1<<17 tokens
+  and 1024 deep), holds exactly one distinct trimmed `tiff:Orientation` value
+  (namespace `http://ns.adobe.com/tiff/1.0/`, any prefix, attribute or element,
+  references decoded) that is 1..8, and Pillow's regex digit is absent or equal
+  to it. A packet without the word is ignored; two normal packets, or a normal
+  one that disagrees with Exif, are ambiguous. Non-XML packets that mention
+  Orientation (a bare `tiff:Orientation="6"`) are malformed, so the eight
+  synthetic oracle files built that way (xmp-attr2/6/8-300dpi.jpg, png-xmp2/6.png
+  and their rgba twins, xmp6-exif-noorient.jpg) are ambiguous, not img2pdf's
+  rotation; img2pdf parity is required only for well-formed files;
 - placed after the first IDAT (any of those sources);
 - an iTXt chunk (of a key we read) whose language, translated key or text is
   not valid UTF-8.

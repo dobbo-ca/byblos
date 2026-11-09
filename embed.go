@@ -357,7 +357,7 @@ type Orientation struct {
 // EXIFOrientation is EXIFRotationLimits with the ambiguity reported. A
 // well-formed file gets img2pdf's rotation. Where its orientation metadata is
 // duplicated (several eXIf chunks, Exif texts or XMP packets in a PNG),
-// conflicting (the Exif and the XMP orientation differ), placed after a PNG's
+// conflicting (the Exif and the XMP orientation differ), an XMP packet naming Orientation that is not well-formed (see xmpNormal), placed after a PNG's
 // IDAT, or a PNG iTXt that is not valid UTF-8, the rotation is 0 and Ambiguous
 // is set, whatever img2pdf makes of it. A defect img2pdf refuses stays an error
 // (a bad CRC before the IDAT, a zTXt or iTXt named exif, text past the budget).
@@ -381,23 +381,20 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	var o float64
 	f, dup, bad := tiffField(b.tiff, 0x0112, false)
 	x7, _, _ := tiffField(b.tiff, 700, true)
-	x1, ok1, _ := xmpOrientation(b.xmp)
-	a1, c1, aok1, conflict := xmpScan(b.xmp)
 	var x2 int
-	var ok2 bool
 	n7 := 0
-	carries2 := false
+	carries2, bad7 := false, false
 	for p := x7; p != nil; p = p.prev {
-		v, c, ok, cf := xmpScan(p.val)
-		conflict = conflict || cf
+		v, c, ok := xmpNormal(p.val)
+		bad7 = bad7 || c && !ok
 		if p == x7 {
-			x2, ok2, carries2 = v, ok, c
+			x2, carries2 = v, c
 		}
 		if c {
 			n7++
 		}
 	}
-	if dup || bad || n7 > 1 || n7 == 1 && !carries2 || conflict {
+	if dup || bad || n7 > 1 || n7 == 1 && !carries2 || bad7 {
 		return Orientation{Ambiguous: true}, nil
 	}
 	if carries2 {
@@ -407,10 +404,10 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 			if n, ok := f.num(); ok {
 				base = int(n)
 			}
-		} else if c1 {
-			base = a1
+		} else if b.xmpLast {
+			base = b.xmpV
 		}
-		if !ok2 || x2 != base {
+		if x2 != base {
 			return Orientation{Ambiguous: true}, nil
 		}
 	}
@@ -419,13 +416,13 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 		if o, ok = f.num(); !ok {
 			return Orientation{}, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
 		}
-	} else if ok1 {
-		o = float64(x1)
+		if b.xmpLast && float64(b.xmpV) != o {
+			return Orientation{Ambiguous: true}, nil
+		}
+	} else if b.xmpLast {
+		o = float64(b.xmpV)
 	} else {
 		return Orientation{}, nil
-	}
-	if c1 && !(aok1 && float64(a1) == o) && f != nil {
-		return Orientation{Ambiguous: true}, nil
 	}
 	switch o {
 	case 1:
@@ -500,21 +497,27 @@ type exifData struct {
 	ambiguous bool // see EXIFOrientation
 	xmpOri    int  // XMP packets that carry an orientation
 	xmpLast   bool // the last packet (xmp) is one of them
+	xmpBad    bool // a packet that carries an orientation is not normal
+	xmpV      int  // the last packet's orientation, when it is normal
 }
 
 // addXMP records one XMP packet. xmp is the last; only packets that carry an
 // orientation count towards ambiguity (xmpAmbiguous).
 func (d *exifData) addXMP(v []byte) {
-	d.xmpLast = xmpCarries(v)
+	var normal bool
+	d.xmpV, d.xmpLast, normal = xmpNormal(v)
 	if d.xmpLast {
 		d.xmpOri++
+		d.xmpBad = d.xmpBad || !normal
 	}
 	d.xmp = v
 }
 
-// xmpAmbiguous: two packets carry an orientation, or one does and a later
+// xmpAmbiguous: a packet that carries is not normal, two packets carry, or one does and a later
 // packet (the one Pillow reads) does not.
-func (d *exifData) xmpAmbiguous() bool { return d.xmpOri > 1 || d.xmpOri == 1 && !d.xmpLast }
+func (d *exifData) xmpAmbiguous() bool {
+	return d.xmpBad || d.xmpOri > 1 || d.xmpOri == 1 && !d.xmpLast
+}
 
 var (
 	exifPrefix = []byte("Exif\x00\x00")
@@ -721,25 +724,20 @@ func fromHex(s []byte) ([]byte, error) {
 const (
 	xmpTiffNS     = "http://ns.adobe.com/tiff/1.0/"
 	xmpMaxTokens  = 1 << 17 // the packet is already capped; this bounds the work per packet
-	xmpMaxNesting = 64
+	xmpMaxNesting = 1024
 )
 
-// isTiff: the tiff namespace, or an unbound tiff: prefix (encoding/xml leaves
-// it as the name's Space), which Pillow reads all the same.
-func isTiff(n xml.Name) bool { return n.Space == xmpTiffNS || n.Space == "tiff" }
-
-// xmpScan reads the tiff:Orientation values of an XMP packet with encoding/xml:
-// every attribute and element in the tiff namespace (any prefix, the default
-// namespace included; references decoded, values trimmed). carries reports at
-// least one; v is the first as an integer (ok); conflict is set when the values
-// differ, or the packet is not XML but names Orientation (malformed metadata).
-func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
-	var vals []string
-	add := func(s string) {
-		if s = strings.TrimSpace(s); s != "" { // no value, no orientation metadata
-			vals = append(vals, s)
-		}
+// xmpNormal applies the closed XMP rule to one packet. A packet whose bytes do
+// not contain "Orientation" is ignored (carries false). Otherwise it is normal
+// only if it parses completely as XML within the bounds, holds exactly one
+// distinct trimmed tiff:Orientation value (any prefix, attribute or element,
+// references decoded) that is 1..8, and Pillow's regex digit is absent or equal
+// to it; v is that value. Any other packet that carries is ambiguous.
+func xmpNormal(x []byte) (v int, carries, normal bool) {
+	if !bytes.Contains(x, []byte("Orientation")) {
+		return 0, false, false
 	}
+	vals := map[string]bool{}
 	d := xml.NewDecoder(bytes.NewReader(bytes.TrimRight(x, "\x00"))) // NUL padding is not part of the XML
 	var buf []byte
 	depth, in := 0, -1 // in: depth of the open Orientation element
@@ -753,11 +751,11 @@ func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
 		case xml.StartElement:
 			depth++
 			for _, a := range t.Attr {
-				if isTiff(a.Name) && a.Name.Local == "Orientation" {
-					add(a.Value)
+				if a.Name.Space == xmpTiffNS && a.Name.Local == "Orientation" {
+					vals[strings.TrimSpace(a.Value)] = true
 				}
 			}
-			if in < 0 && isTiff(t.Name) && t.Name.Local == "Orientation" {
+			if in < 0 && t.Name.Space == xmpTiffNS && t.Name.Local == "Orientation" {
 				in, buf = depth, buf[:0]
 			}
 		case xml.CharData:
@@ -766,39 +764,23 @@ func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
 			}
 		case xml.EndElement:
 			if depth == in {
-				add(string(buf))
+				vals[strings.TrimSpace(string(buf))] = true
 				in = -1
 			}
 			depth--
 		}
 	}
-	if err != io.EOF {
-		// Not XML (or past the limits): ignored unless it names Orientation, which
-		// is then malformed metadata. The img2pdf corpus holds Pillow's regex form in
-		// such packets (tiff:Orientation="6" with no element around it), so its digit
-		// still counts, but only when every mention is in that form and they agree;
-		// any other mention (entity, quotes, spaces) may hide a conflict.
-		n := bytes.Count(x, []byte("Orientation"))
-		if v, ok, conflict = xmpOrientation(x); ok && !conflict &&
-			n == bytes.Count(x, []byte(`tiff:Orientation="`))+bytes.Count(x, []byte("tiff:Orientation>")) {
-			return v, true, true, false
-		}
-		bad := n > 0
-		return 0, bad, false, bad
+	if err != io.EOF || len(vals) != 1 {
+		return 0, true, false
 	}
-	for _, s := range vals {
-		conflict = conflict || s != vals[0]
+	for s := range vals {
+		v, err = strconv.Atoi(s)
 	}
-	if len(vals) > 0 {
-		v, err = strconv.Atoi(vals[0])
-		return v, true, err == nil, conflict
+	if p, ok, _ := xmpOrientation(x); err != nil || v < 1 || v > 8 || ok && p != v {
+		return 0, true, false
 	}
-	return 0, false, false, false
+	return v, true, true
 }
-
-// xmpCarries reports whether an XMP packet holds an orientation in any form:
-// duplicated orientation metadata is ambiguous whatever its form.
-func xmpCarries(x []byte) bool { _, c, _, _ := xmpScan(x); return c }
 
 // xmpOrientation is the digit Pillow takes from an XMP packet: the first
 // tiff:Orientation=" or tiff:Orientation> that a digit follows. conflict reports

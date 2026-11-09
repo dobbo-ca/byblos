@@ -43,6 +43,16 @@ func orientationOf(t *testing.T, name string, data []byte) (Orientation, error) 
 	return o, err
 }
 
+// xmpNonXML: synthetic oracle files (testdata/img2pdf) whose XMP names
+// tiff:Orientation outside well-formed XML (a bare tiff:Orientation="6").
+// img2pdf reads them through Pillow's regex; the closed XMP rule calls them
+// ambiguous (rotation 0). r4's xmp-attr9.jpg is well formed but says 9: also ambiguous.
+var xmpNonXML = map[string]bool{
+	"xmp-attr2.jpg": true, "xmp-attr6.jpg": true, "xmp-attr8-300dpi.jpg": true, "xmp-attr9.jpg": true,
+	"xmp6-exif-noorient.jpg": true, "png-xmp2.png": true, "png-xmp6.png": true,
+	"rgba-png-xmp2.png": true, "rgba-png-xmp6.png": true,
+}
+
 func TestOrientationRound4MatchesImg2pdf(t *testing.T) {
 	for name, want := range orientationOracle(t, "r4") {
 		data, err := os.ReadFile("testdata/img2pdf/r4/" + name)
@@ -51,6 +61,10 @@ func TestOrientationRound4MatchesImg2pdf(t *testing.T) {
 		}
 		o, err := orientationOf(t, name, data)
 		switch {
+		case name == "xmp-attr9.jpg":
+			if err != nil || o != (Orientation{Ambiguous: true}) {
+				t.Errorf("%s: got %+v, %v; want ambiguous", name, o, err)
+			}
 		case strings.HasPrefix(name, "rgba-") && want.Error != "" && !strings.Contains(want.Error, "TIFF"):
 			// pHYs, page size: EmbedPNG's and BuildPDF's refusals, tested on the grey twin
 		case strings.Contains(name, "aspect-big"): // BuildPDF's page size refusal, not orientation
@@ -281,7 +295,7 @@ func TestOrientationDuplicateXMP(t *testing.T) {
 		{"two-prefixed-disagree", jpegApp1(prefPkt(3), prefPkt(6)), pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", pref(3)), pngTextChunk("zTXt", "XML:com.adobe.xmp", pref(6))), Orientation{Ambiguous: true}},
 		{"exif-one-prefixed-disagrees", jpegApp1(append(exifPrefix[:6:6], exif6...), prefPkt(3)), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", pref(3))), Orientation{Ambiguous: true}},
 		{"exif-one-odd-form-disagrees", jpegApp1(append(exifPrefix[:6:6], exif6...), oddPkt(3)), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", odd(3))), Orientation{Ambiguous: true}},
-		{"exif-two-comment-only", jpegApp1(append(exifPrefix[:6:6], exif6...), cmtPkt, cmtPkt), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", cmt), pngTextChunk("zTXt", "XML:com.adobe.xmp", cmt)), Orientation{Rotate: 90}},
+		{"exif-two-comment-only", jpegApp1(append(exifPrefix[:6:6], exif6...), cmtPkt, cmtPkt), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", cmt), pngTextChunk("zTXt", "XML:com.adobe.xmp", cmt)), Orientation{Ambiguous: true}},
 		{"two-agree", jpegApp1(xmpPacket(6), xmpPacket(6)), pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(6)), pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(6))), Orientation{Ambiguous: true}},
 		{"one-disagrees-with-exif", jpegApp1(append(exifPrefix[:6:6], exif6...), xmpPacket(3), noOr), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(3)), pngTextChunk("zTXt", "XML:com.adobe.xmp", noXML)), Orientation{Ambiguous: true}},
 		{"tag700-two-without", jpegApp1(append(exifPrefix[:6:6], tag700(noXML, noXML)...)), pngBeforeIDAT(t, pngRaw("eXIf", tag700(noXML, noXML))), Orientation{Rotate: 90}},
@@ -361,8 +375,8 @@ func TestOrientationXMPParsed(t *testing.T) {
 		{"default-ns-element", pk(`<Description xmlns='` + ns + `'><Orientation>3</Orientation></Description>`), Orientation{Ambiguous: true}},
 		{"element-spaced", pk(`<rdf:Description xmlns:t='` + ns + `'><t:Orientation> 6 </t:Orientation></rdf:Description>`), Orientation{Rotate: 90}},
 		{"two-values", pk(`<rdf:Description xmlns:t='` + ns + `' t:Orientation='6'><t:Orientation>3</t:Orientation></rdf:Description>`), Orientation{Ambiguous: true}},
-		{"other-ns", pk(`<rdf:Description xmlns:t='urn:other' t:Orientation='3'/>`), Orientation{Rotate: 90}},
-		{"comment-only", pk(`<!-- tiff:Orientation="3" -->`), Orientation{Rotate: 90}},
+		{"other-ns", pk(`<rdf:Description xmlns:t='urn:other' t:Orientation='3'/>`), Orientation{Ambiguous: true}},
+		{"comment-only", pk(`<!-- tiff:Orientation="3" -->`), Orientation{Ambiguous: true}},
 		{"unparsable-with-orientation", pk(`<rdf:Description tiff:Orientation='3'>`), Orientation{Ambiguous: true}},
 		{"unparsable-without", pk(`<rdf:Description>`), Orientation{Rotate: 90}},
 	} {
@@ -391,7 +405,45 @@ func TestOrientationXMPMalformedConflict(t *testing.T) {
 		{"non-xml-mixed-quotes", jpegApp1(append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<tiff:Orientation="6"/><tiff:Orientation='3'/>`...)), Orientation{Ambiguous: true}},
 		{"non-xml-mixed-quotes-exif", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<tiff:Orientation="6"/><tiff:Orientation='3'/>`...)), Orientation{Ambiguous: true}},
 		{"unbound-prefix", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><a tiff:Orientation="3"/></x:xmpmeta>`...)), Orientation{Ambiguous: true}},
-		{"empty-value", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><a xmlns:tiff='`+ns+`' tiff:Orientation=""/></x:xmpmeta>`...)), Orientation{Rotate: 90}},
+		{"empty-value", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><a xmlns:tiff='`+ns+`' tiff:Orientation=""/></x:xmpmeta>`...)), Orientation{Ambiguous: true}},
+	} {
+		if o, err := EXIFOrientation(c.jpeg, Limits{}); err != nil || o != c.want {
+			t.Errorf("%s: got %+v, %v; want %+v", c.name, o, err, c.want)
+		}
+	}
+}
+
+// The closed XMP rule's attack forms: a value Pillow's regex cannot see (padded,
+// an entity), a packet cut off after a conflicting element, and deep nesting.
+func TestOrientationXMPClosedRule(t *testing.T) {
+	const ns = `http://ns.adobe.com/tiff/1.0/`
+	pk := func(body string) []byte {
+		return append(append([]byte(nil), xapPrefix...), `<x:xmpmeta xmlns:x='adobe:ns:meta/'>`+body+`</x:xmpmeta>`...)
+	}
+	desc := func(attrs, inner string) []byte {
+		return pk(`<rdf:Description xmlns:tiff='` + ns + `' ` + attrs + `>` + inner + `</rdf:Description>`)
+	}
+	nest := func(n int) []byte { // n elements deep in all (x:xmpmeta included), the value in the innermost
+		return append(append([]byte(nil), xapPrefix...), strings.Repeat("<a>", n-2)+`<b xmlns:t='`+ns+`' t:Orientation='&#54;'/>`+strings.Repeat("</a>", n-2)...)
+	}
+	exif6 := append(exifPrefix[:6:6], tiffOrient(6)...)
+	trunc := append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='`+ns+`' tiff:Orientation="6"><tiff:Orientation>3</tiff:Orientation>`...)
+	for _, c := range []struct {
+		name string
+		jpeg []byte
+		want Orientation
+	}{
+		{"padded-3-vs-exif6", jpegApp1(exif6, desc(`tiff:Orientation=' 3'`, ``)), Orientation{Ambiguous: true}},
+		{"padded-3-alone", jpegApp1(desc(`tiff:Orientation=' 3'`, ``)), Orientation{Rotate: 180}},
+		{"entity-element-vs-exif6", jpegApp1(exif6, desc(``, `<tiff:Orientation>&#51;</tiff:Orientation>`)), Orientation{Ambiguous: true}},
+		{"entity-attr-vs-exif6", jpegApp1(exif6, desc(`tiff:Orientation='&#51;'`, ``)), Orientation{Ambiguous: true}},
+		{"entity-attr-regex-agrees", jpegApp1(exif6, pk(`<!-- tiff:Orientation="6" --><rdf:Description xmlns:tiff='`+ns+`' tiff:Orientation='&#54;'/>`)), Orientation{Rotate: 90}},
+		{"entity-attr-regex-says-other", jpegApp1(pk(`<!-- tiff:Orientation="6" --><rdf:Description xmlns:tiff='` + ns + `' tiff:Orientation='&#51;'/>`)), Orientation{Ambiguous: true}},
+		{"truncated-conflict", jpegApp1(trunc), Orientation{Ambiguous: true}},
+		{"truncated-conflict-exif6", jpegApp1(exif6, trunc), Orientation{Ambiguous: true}},
+		{"nested-70-agrees", jpegApp1(nest(70)), Orientation{Rotate: 90}},
+		{"nested-70-agrees-exif6", jpegApp1(exif6, nest(70)), Orientation{Rotate: 90}},
+		{"nested-over-bound", jpegApp1(nest(xmpMaxNesting + 2)), Orientation{Ambiguous: true}},
 	} {
 		if o, err := EXIFOrientation(c.jpeg, Limits{}); err != nil || o != c.want {
 			t.Errorf("%s: got %+v, %v; want %+v", c.name, o, err, c.want)
