@@ -8,7 +8,7 @@ package pdfdoc
 import (
 	"errors"
 
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu"
 )
 
 // EncryptInfo is what a document Open already accepted says about its own

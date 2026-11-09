@@ -3,7 +3,7 @@ module github.com/dobbo-ca/byblos
 go 1.27.3
 
 require (
-	github.com/pdfcpu/pdfcpu v0.16.4
+	github.com/dobbo-ca/pdf-go v0.17.0
 	golang.org/x/image v0.47.0
 )
 
@@ -16,5 +16,3 @@ require (
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 )
-
-replace github.com/pdfcpu/pdfcpu => github.com/dobbo-ca/pergamon-go v0.16.4-pergamon.5

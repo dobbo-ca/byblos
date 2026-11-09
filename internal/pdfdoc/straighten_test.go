@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/content"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/types"
 )
 
 // TestStraightenIsLossless pins that the underlying raster is carried byte

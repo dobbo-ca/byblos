@@ -52,8 +52,8 @@ import (
 
 	"github.com/dobbo-ca/byblos"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
-	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
+	"github.com/dobbo-ca/pdf-go/pkg/api"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/model"
 )
 
 // plaintextFixture is a one-page, one-image PDF built entirely in Go (no

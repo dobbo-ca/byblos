@@ -28,7 +28,7 @@ func TestOnlyPdfdocImportsPdfcpu(t *testing.T) {
 		if pkg == allowed {
 			continue
 		}
-		if strings.Contains(imports, "github.com/pdfcpu/pdfcpu") {
+		if strings.Contains(imports, "github.com/dobbo-ca/pdf-go") {
 			t.Errorf("package %s imports pdfcpu; only %s may", pkg, allowed)
 		}
 	}

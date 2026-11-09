@@ -110,8 +110,8 @@ jobs:
           go list -f '{{range .Imports}}{{.}}{{"\n"}}{{end}}{{range .TestImports}}{{.}}{{"\n"}}{{end}}{{range .XTestImports}}{{.}}{{"\n"}}{{end}}' ./... \
             | sort -u | grep '\.' | grep -v '^github.com/dobbo-ca/byblos' > ext.txt || true
           echo "external imports:"; cat ext.txt
-          if grep -vE '^(github\.com/pdfcpu/pdfcpu(/|$)|golang\.org/x/image/(ccitt|draw|font|font/sfnt|math/fixed)(/|$))' ext.txt; then
-            echo "FORBIDDEN dependency listed above. Permitted: pdfcpu, and"
+          if grep -vE '^(github\.com/dobbo-ca/pdf-go(/|$)|golang\.org/x/image/(ccitt|draw|font|font/sfnt|math/fixed)(/|$))' ext.txt; then
+            echo "FORBIDDEN dependency listed above. Permitted: pdf-go, and"
             echo "golang.org/x/image/{ccitt,draw,font,font/sfnt,math/fixed} ONLY --"
             echo "x/image is allowlisted by subpackage because /bmp, /tiff and"
             echo "/webp each call image.RegisterFormat in init(), which would"

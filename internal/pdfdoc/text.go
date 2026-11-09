@@ -21,8 +21,8 @@ import (
 	"io"
 
 	"github.com/dobbo-ca/byblos/internal/content"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/model"
+	"github.com/dobbo-ca/pdf-go/pkg/pdfcpu/types"
 )
 
 // TrueTypeFont describes a simple, single-byte-encoded TrueType font to embed.

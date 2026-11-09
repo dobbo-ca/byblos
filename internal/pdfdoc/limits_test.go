@@ -509,7 +509,7 @@ func TestObjectBoundAcrossChunks(t *testing.T) {
 	}
 }
 
-// The cumulative limits (pergamon-go v0.16.4-pergamon.1): each object stream
+// The cumulative limits (pdf-go): each object stream
 // is under every per-stream cap, so only the sum over the parse refuses them.
 // The comment line is a decoy that once raised the pre-scan's bound, and the
 // form feed spells /First as no scan here reads it. Both files sat under
