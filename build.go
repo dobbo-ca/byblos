@@ -68,6 +68,13 @@ func BuildPDF(w io.Writer, pages []BuildPage) error {
 // The per-page boundary here is real but nearly worthless; budget for the
 // whole write. A cancelled call writes nothing to w. See context.go.
 func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error {
+	return BuildPDFLimits(ctx, w, pages, Limits{})
+}
+
+// BuildPDFLimits is BuildPDFContext under lim. An image over
+// lim.MaxEncodedImagePixels (width x height, and each axis) is refused as a
+// *LimitError named encoded-image-pixels, before anything is written.
+func BuildPDFLimits(ctx context.Context, w io.Writer, pages []BuildPage, lim Limits) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
@@ -85,7 +92,7 @@ func BuildPDFContext(ctx context.Context, w io.Writer, pages []BuildPage) error 
 		}
 		built[i] = pdfbuild.Page{Image: p.Image, WidthPt: pw, HeightPt: ph}
 	}
-	if err := pdfbuild.Write(w, built); err != nil {
+	if err := pdfbuild.Write(w, built, lim); err != nil {
 		return fmt.Errorf("byblos: BuildPDF: %w", err)
 	}
 	return nil

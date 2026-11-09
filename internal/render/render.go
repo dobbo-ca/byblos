@@ -69,19 +69,50 @@ import (
 	"sort"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
+// The canvas, q-depth, operand, path-point, fill-work and font-byte caps are
+// Limits fields (defaults in internal/limits). maxCurveDepth and flatTol are
+// not caps on input and stay here.
+//
+// What each cap bounds, and the measurements behind the defaults:
+//
+// maxRasterDim and maxRasterPixels clamp the canvas. 20000px is 66in at
+// 300 DPI, beyond any real page; 1<<26 pixels (67M) is 256 MB of RGBA,
+// roughly twice a 600 DPI A4.
+//
+// maxGStateDepth bounds the q graphics-state stack, byb-9ml. Kept equal
+// to internal/content's cap of the same name rather than imported: the
+// two packages track different gstates and only the BOUND is shared.
+// maxPathPoints bounds the flattened device points held for the current
+// path. 2M points is far past any real page's most complex path.
+// maxFillWork bounds scanline filling, charged one unit per active edge
+// per scanline AND one per painted pixel, across the whole Page call --
+// pixel writes dominate large fills, so a budget that skipped them let a
+// 387 KB stream of full-canvas fills buy ~33 minutes of CPU. 1<<28 units
+// is four full coats of the largest permitted canvas (maxRasterPixels).
+// Image draws charge their destination pixels here too -- the only work
+// drawImage does is one sample per DESTINATION pixel, so no separate
+// source-pixel budget exists (decoding already happened behind ImageFor,
+// under the caller's own budgets).
+//
+// maxFontRetainedBytes bounds bytes resolveFont charges against the
+// current page across fontsBy: each resolved Tf NAME's program bytes
+// (progsBy dedups the PARSE, not the decode -- pdfdoc.RenderFont has no
+// cache of its own, so every name pays a fresh decode even when it
+// aliases an already-parsed program) plus that name's own /Widths and
+// /W arrays, which are never deduped at all. 16<<20 is this module's
+// stated per-unit memory concession (see internal/jbig2's
+// maxStreamBitmapBytes); a census of the pinned sample's font-bearing
+// pages found the worst single page retaining 2,821,308 bytes of
+// program plus 655,360 bytes of metric arrays (about 3.5 MiB), so the
+// bound is a 4.5x margin over anything actually seen. Without it, 2000
+// Tf names aliased to one /Widths-bearing 65536-entry dict retain >1
+// GiB live for a page that inks nothing (byb-rq3); charging only on a
+// progsBy miss instead of per name left a font with no /Widths or /W
+// uncharged past the first name and let every alias through for free.
 const (
-	// maxRasterDim and maxRasterPixels clamp the canvas. 20000px is 66in at
-	// 300 DPI, beyond any real page; 1<<26 pixels (67M) is 256 MB of RGBA,
-	// roughly twice a 600 DPI A4.
-	maxRasterDim    = 20000
-	maxRasterPixels = 1 << 26
-
-	// maxGStateDepth bounds the q graphics-state stack, byb-9ml. Kept equal
-	// to internal/content's cap of the same name rather than imported: the
-	// two packages track different gstates and only the BOUND is shared.
-	maxGStateDepth = 1024
 	// maxCurveDepth bounds recursive Bezier subdivision: at most 2^8 = 256
 	// segments per curve, so a hostile stream of `c` operators amplifies its
 	// own byte count by a bounded constant.
@@ -89,40 +120,6 @@ const (
 	// flatTol is the flattening tolerance in device pixels: subdivision stops
 	// when the control points sit within this distance of the chord.
 	flatTol = 0.2
-)
-
-// Budgets are vars so tests can lower them; production code never writes them.
-var (
-	// maxPathPoints bounds the flattened device points held for the current
-	// path. 2M points is far past any real page's most complex path.
-	maxPathPoints int64 = 1 << 21
-	// maxFillWork bounds scanline filling, charged one unit per active edge
-	// per scanline AND one per painted pixel, across the whole Page call --
-	// pixel writes dominate large fills, so a budget that skipped them let a
-	// 387 KB stream of full-canvas fills buy ~33 minutes of CPU. 1<<28 units
-	// is four full coats of the largest permitted canvas (maxRasterPixels).
-	// Image draws charge their destination pixels here too -- the only work
-	// drawImage does is one sample per DESTINATION pixel, so no separate
-	// source-pixel budget exists (decoding already happened behind ImageFor,
-	// under the caller's own budgets).
-	maxFillWork int64 = 1 << 28
-
-	// maxFontRetainedBytes bounds bytes resolveFont charges against the
-	// current page across fontsBy: each resolved Tf NAME's program bytes
-	// (progsBy dedups the PARSE, not the decode -- pdfdoc.RenderFont has no
-	// cache of its own, so every name pays a fresh decode even when it
-	// aliases an already-parsed program) plus that name's own /Widths and
-	// /W arrays, which are never deduped at all. 16<<20 is this module's
-	// stated per-unit memory concession (see internal/jbig2's
-	// maxStreamBitmapBytes); a census of the pinned sample's font-bearing
-	// pages found the worst single page retaining 2,821,308 bytes of
-	// program plus 655,360 bytes of metric arrays (about 3.5 MiB), so the
-	// bound is a 4.5x margin over anything actually seen. Without it, 2000
-	// Tf names aliased to one /Widths-bearing 65536-entry dict retain >1
-	// GiB live for a page that inks nothing (byb-rq3); charging only on a
-	// progsBy miss instead of per name left a font with no /Widths or /W
-	// uncharged past the first name and let every alias through for free.
-	maxFontRetainedBytes int64 = 16 << 20
 )
 
 // Image is a decoded image XObject ready for Do to sample. Decoding is the
@@ -154,7 +151,12 @@ type ImageFor func(name string) (Image, bool)
 // images resolves Do operands and fonts resolves Tf operands; either may be
 // nil to render without images or without text.
 func Page(ctx context.Context, src []byte, box content.Box, rotate int, scale float64, images ImageFor, fonts FontFor) (*image.RGBA, error) {
-	w, h, fw, fh, err := rasterSize(box, scale)
+	return PageLimits(ctx, src, box, rotate, scale, images, fonts, limits.Limits{})
+}
+
+// PageLimits is Page under lim's render caps; the zero Limits is Page.
+func PageLimits(ctx context.Context, src []byte, box content.Box, rotate int, scale float64, images ImageFor, fonts FontFor, lim limits.Limits) (*image.RGBA, error) {
+	w, h, fw, fh, err := rasterSize(box, scale, lim)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +171,7 @@ func Page(ctx context.Context, src []byte, box content.Box, rotate int, scale fl
 	for i := range img.Pix {
 		img.Pix[i] = 0xff
 	}
-	r := &renderer{img: img, images: images, fonts: fonts}
+	r := &renderer{lim: lim, img: img, images: images, fonts: fonts}
 	// User space to device space: scale, then flip y so user URY lands on
 	// device row 0, then turn the whole device space for /Rotate.
 	// Row-vector convention, like content.Matrix.
@@ -208,9 +210,13 @@ func displayTurn(rot int, fw, fh float64) content.Matrix {
 	return content.Identity
 }
 
+// maxCanvasPixels is the hard ceiling on cw*ch (16 GiB of RGBA), whatever the
+// caller's MaxRasterPixels says.
+const maxCanvasPixels = 1 << 32
+
 // rasterSize returns the canvas in whole pixels AND the exact device extents it
 // was rounded up from. displayTurn needs the unrounded pair: see its comment.
-func rasterSize(box content.Box, scale float64) (w, h int, fw, fh float64, err error) {
+func rasterSize(box content.Box, scale float64, lim limits.Limits) (w, h int, fw, fh float64, err error) {
 	if !(scale > 0) || math.IsInf(scale, 0) {
 		return 0, 0, 0, 0, fmt.Errorf("render: scale %v is not a positive finite number", scale)
 	}
@@ -219,10 +225,29 @@ func rasterSize(box content.Box, scale float64) (w, h int, fw, fh float64, err e
 	if !(fw >= 1) || !(fh >= 1) {
 		return 0, 0, 0, 0, fmt.Errorf("render: page box %+v at scale %v rasterises below one pixel", box, scale)
 	}
-	if fw > maxRasterDim || fh > maxRasterDim || fw*fh > maxRasterPixels {
-		return 0, 0, 0, 0, fmt.Errorf("render: raster %gx%g exceeds the size clamp", fw, fh)
+	// Compared in float: a float beyond int64 converts to MinInt64 on amd64
+	// and would slip under the cap.
+	if v := math.Ceil(max(fw, fh)); v > float64(lim.RasterSide()) {
+		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-side", Got: satInt64(v), Max: lim.RasterSide()}
 	}
-	return int(math.Ceil(fw)), int(math.Ceil(fh)), fw, fh, nil
+	cw, ch := math.Ceil(fw), math.Ceil(fh)
+	// The canvas is cw x ch, not fw*fh. image.NewRGBA panics (or the process
+	// is OOM-killed) far below int overflow, so a caller-raised cap is
+	// clamped to maxCanvasPixels.
+	maxPx := min(lim.RasterPixels(), maxCanvasPixels)
+	if p := cw * ch; p > float64(maxPx) {
+		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-pixels", Got: satInt64(p), Max: maxPx}
+	}
+	return int(cw), int(ch), fw, fh, nil
+}
+
+// satInt64 converts v to int64, saturating: float64(MaxInt64) is 2^63, itself
+// out of range, so the bound is compared with >= 0x1p63.
+func satInt64(v float64) int64 {
+	if v >= 0x1p63 {
+		return math.MaxInt64
+	}
+	return int64(v)
 }
 
 // gstate is the graphics state this stage tracks, saved and restored as a
@@ -379,6 +404,7 @@ type subpath struct {
 
 // renderer carries the canvas and the per-call budgets.
 type renderer struct {
+	lim        limits.Limits
 	img        *image.RGBA
 	images     ImageFor
 	fonts      FontFor
@@ -386,7 +412,7 @@ type renderer struct {
 	progsBy    map[[32]byte]*fontProg // parsed font programs by content hash
 	points     int64                  // flattened points held for the current path
 	fillWork   int64                  // active-edge x scanline units spent
-	fontBudget int64                  // bytes charged against maxFontRetainedBytes so far
+	fontBudget int64                  // bytes charged against lim.RenderFontBytes so far
 }
 
 // path is the current path under construction, all points already in device
@@ -415,10 +441,7 @@ func pathPoints(subs []subpath) int {
 
 func (r *renderer) charge(n int) error {
 	r.points += int64(n)
-	if r.points > maxPathPoints {
-		return fmt.Errorf("render: path exceeds %d points", maxPathPoints)
-	}
-	return nil
+	return limits.Check("path-points", r.points, r.lim.PathPoints())
 }
 
 func (p *path) moveTo(r *renderer, pt point) error {
@@ -531,7 +554,7 @@ func (r *renderer) run(ctx context.Context, src []byte, gs gstate) error {
 			return err
 		}
 		if tok.Kind != content.KindKeyword {
-			if tok.Kind != content.KindInlineImage && len(ops) < maxOperands {
+			if tok.Kind != content.KindInlineImage && int64(len(ops)) < r.lim.Operands() {
 				ops = append(ops, tok)
 			}
 			continue
@@ -545,8 +568,8 @@ func (r *renderer) run(ctx context.Context, src []byte, gs gstate) error {
 			// that is larger still. maxGStateDepth is content's, measured
 			// there over 31,705 real page-walks against an observed max of
 			// 18.
-			if len(stack) >= maxGStateDepth {
-				return fmt.Errorf("render: q nesting deeper than %d", maxGStateDepth)
+			if err := limits.Check("q-depth", int64(len(stack))+1, r.lim.GStateDepth()); err != nil {
+				return err
 			}
 			stack = append(stack, gs)
 		case "Q":
@@ -716,9 +739,6 @@ func (r *renderer) run(ctx context.Context, src []byte, gs gstate) error {
 		ops = ops[:0]
 	}
 }
-
-// maxOperands matches walk.go's bound on the pending-operand buffer.
-const maxOperands = 8192
 
 func curveOp(r *renderer, p *path, op string, nums []float64, m content.Matrix) error {
 	need := 6
@@ -919,8 +939,8 @@ func (r *renderer) fillEdges(edges []edge, evenOdd bool, clip clipRect, col colo
 		}
 		active = live
 		r.fillWork += int64(len(active)) + 1
-		if r.fillWork > maxFillWork {
-			return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+		if err := limits.Check("fill-work", r.fillWork, r.lim.FillWork()); err != nil {
+			return err
 		}
 		if len(xs) == 0 {
 			continue
@@ -953,8 +973,8 @@ func (r *renderer) fillEdges(edges []edge, evenOdd bool, clip clipRect, col colo
 				continue
 			}
 			r.fillWork += int64(xb - xa)
-			if r.fillWork > maxFillWork {
-				return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+			if err := limits.Check("fill-work", r.fillWork, r.lim.FillWork()); err != nil {
+				return err
 			}
 			for x := xa; x < xb; x++ {
 				r.img.SetRGBA(x, y, col)
@@ -1091,8 +1111,8 @@ func (r *renderer) drawImage(name string, gs gstate) error {
 	at := samplerFor(im.Data)
 	for y := y0; y < y1; y++ {
 		r.fillWork += int64(x1 - x0)
-		if r.fillWork > maxFillWork {
-			return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
+		if err := limits.Check("fill-work", r.fillWork, r.lim.FillWork()); err != nil {
+			return err
 		}
 		dy := float64(y) + 0.5 - m[5]
 		for x := x0; x < x1; x++ {

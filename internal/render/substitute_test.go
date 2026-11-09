@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
@@ -82,7 +83,7 @@ func TestSubstituteTakesTheTrueTypePath(t *testing.T) {
 	if g == nil {
 		t.Fatal("the bundled face is not an indexable TrueType; it cannot ride the 4c path")
 	}
-	if !g.boundedBy(maxPathPoints) {
+	if !g.boundedBy(limits.Limits{}.PathPoints()) {
 		t.Fatal("the bundled face fails the 4c pre-parse gate")
 	}
 }

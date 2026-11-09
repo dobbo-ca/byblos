@@ -92,6 +92,37 @@ type Limits struct {
 	// 66 MiB of paints and text shows); under a budget a fifth of what the
 	// table and file leave, less if that is more than this.
 	MaxRetainedBytes int64
+	// MaxEncodedImagePixels caps width x height of a PNG that EmbedPNG lifts
+	// and of an EncodedImage that BuildPDF writes ("encoded-image-pixels"; for
+	// BuildPDF each axis is also held to it). Default 1<<26.
+	MaxEncodedImagePixels int64
+	// MaxRasterSide and MaxRasterPixels cap the RenderPage canvas, in pixels a
+	// side ("raster-side", default 20 000) and in total ("raster-pixels",
+	// default 1<<26).
+	MaxRasterSide, MaxRasterPixels int64
+	// MaxRenderFontBytes caps the font bytes one render retains. Past it the
+	// render skips further fonts and carries on. Default 16 MiB.
+	MaxRenderFontBytes int64
+	// MaxPathPoints caps the flattened device points a render holds for the
+	// current path ("path-points"). Default 1<<21.
+	MaxPathPoints int64
+	// MaxFillWork caps a render's scanline filling, one unit per active edge
+	// per row ("fill-work"). Default 1<<28.
+	MaxFillWork int64
+	// MaxGStateDepth caps q nesting in the content walk and the render
+	// ("q-depth"). Default 1024.
+	MaxGStateDepth int64
+	// MaxFormDepth caps Form XObject nesting in the content walk
+	// ("form-depth"). Default 8.
+	MaxFormDepth int64
+	// MaxFormInvocations caps the Form XObject invocations of one page walk
+	// ("form-invocations"). Default 4096.
+	MaxFormInvocations int64
+	// MaxOperands, MaxTextShows and MaxPaints bound the walk's and the
+	// render's pending-operand buffer (default 8192) and the walk's recorded
+	// Scan.TextShows (1<<16) and Scan.Paints (1<<18). Past them the walk
+	// stops recording and carries on; it does not fail.
+	MaxOperands, MaxTextShows, MaxPaints int64
 }
 
 const DefaultFontProgramBytes = 16 << 20
@@ -103,21 +134,41 @@ func def(v, d int64) int64 {
 	return d
 }
 
-func (l Limits) Objects() int64         { return def(l.MaxObjects, 200_000) }
-func (l Limits) Pages() int64           { return def(l.MaxPages, 10_000) }
-func (l Limits) StreamBytes() int64     { return def(l.MaxStreamBytes, 64<<20) }
-func (l Limits) PageStreamBytes() int64 { return def(l.MaxPageStreamBytes, 128<<20) }
-func (l Limits) ImagePixels() int64     { return def(l.MaxImagePixels, 500_000_000) }
-func (l Limits) Images() int64          { return def(l.MaxImages, l.PageStreamBytes()/512) }
-func (l Limits) InlineImages() int64    { return def(l.MaxInlineImages, l.PageStreamBytes()/512) }
-func (l Limits) Unresolved() int64      { return def(l.MaxUnresolved, l.PageStreamBytes()/512) }
-func (l Limits) RetainedBytes() int64   { return def(l.MaxRetainedBytes, 128<<20) }
+func (l Limits) Objects() int64            { return def(l.MaxObjects, 200_000) }
+func (l Limits) Pages() int64              { return def(l.MaxPages, 10_000) }
+func (l Limits) StreamBytes() int64        { return def(l.MaxStreamBytes, 64<<20) }
+func (l Limits) PageStreamBytes() int64    { return def(l.MaxPageStreamBytes, 128<<20) }
+func (l Limits) ImagePixels() int64        { return def(l.MaxImagePixels, 500_000_000) }
+func (l Limits) Images() int64             { return def(l.MaxImages, l.PageStreamBytes()/512) }
+func (l Limits) InlineImages() int64       { return def(l.MaxInlineImages, l.PageStreamBytes()/512) }
+func (l Limits) Unresolved() int64         { return def(l.MaxUnresolved, l.PageStreamBytes()/512) }
+func (l Limits) RetainedBytes() int64      { return def(l.MaxRetainedBytes, 128<<20) }
+func (l Limits) EncodedImagePixels() int64 { return def(l.MaxEncodedImagePixels, 1<<26) }
+func (l Limits) RasterSide() int64         { return def(l.MaxRasterSide, 20000) }
+func (l Limits) RasterPixels() int64       { return def(l.MaxRasterPixels, 1<<26) }
+func (l Limits) RenderFontBytes() int64    { return def(l.MaxRenderFontBytes, 16<<20) }
+func (l Limits) PathPoints() int64         { return def(l.MaxPathPoints, 1<<21) }
+func (l Limits) FillWork() int64           { return def(l.MaxFillWork, 1<<28) }
+func (l Limits) GStateDepth() int64        { return def(l.MaxGStateDepth, 1024) }
+func (l Limits) FormDepth() int64          { return def(l.MaxFormDepth, 8) }
+func (l Limits) FormInvocations() int64    { return def(l.MaxFormInvocations, 4096) }
+func (l Limits) Operands() int64           { return def(l.MaxOperands, 8192) }
+func (l Limits) TextShows() int64          { return def(l.MaxTextShows, 1<<16) }
+func (l Limits) Paints() int64             { return def(l.MaxPaints, 1<<18) }
 func (l Limits) ObjectStreamEntries() int64 {
 	return min(def(l.MaxObjectStreamEntries, l.Objects()), l.Objects())
 }
 func (l Limits) TotalDecodeBytes() int64 { return def(l.MaxTotalDecodeBytes, l.StreamBytes()) }
 func (l Limits) ObjectBytes() int64      { return def(l.MaxObjectBytes, l.StreamBytes()) }
 func (l Limits) FontProgramBytes() int64 { return def(l.MaxFontProgramBytes, DefaultFontProgramBytes) }
+
+// MulSat is a*b for non-negative a and b, saturating at MaxInt64.
+func MulSat(a, b int64) int64 {
+	if a != 0 && b > math.MaxInt64/a {
+		return math.MaxInt64
+	}
+	return a * b
+}
 
 // Check returns a *LimitError when got > max.
 func Check(name string, got, max int64) error {

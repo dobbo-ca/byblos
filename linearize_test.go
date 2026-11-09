@@ -3,6 +3,7 @@ package byblos
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -1578,7 +1579,7 @@ func TestLinearizeDoesNotOrphanAnIndirectStreamLength(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := pdfdoc.Linearize(bytes.NewReader(in), &out); err != nil {
+	if err := pdfdoc.Linearize(context.Background(), bytes.NewReader(in), &out, Limits{}); err != nil {
 		t.Fatalf("pdfdoc.Linearize: %v", err)
 	}
 	if orphans := orphanObjects(t, out.Bytes()); len(orphans) > 0 {

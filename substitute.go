@@ -97,13 +97,21 @@ func ReplaceImages(w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) erro
 // context checks was 46% of the call. A cancelled call writes nothing to w.
 // See context.go.
 func ReplaceImagesContext(ctx context.Context, w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage) error {
+	return ReplaceImagesLimits(ctx, w, r, subs, Limits{})
+}
+
+// ReplaceImagesLimits is ReplaceImagesContext under lim: the parse and
+// content-walk caps (q-depth, form-depth, form-invocations and the rest) are
+// lim's, and a breach is a *LimitError. It reserves nothing from the memory
+// budget.
+func ReplaceImagesLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, subs map[int]EncodedImage, lim Limits) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
 	if len(subs) == 0 {
 		return fmt.Errorf("byblos: replace images: no substitutions")
 	}
-	d, err := pdfdoc.Open(r)
+	d, err := pdfdoc.OpenLimits(context.Background(), r, lim)
 	if err != nil {
 		return fmt.Errorf("byblos: replace images: %w", err)
 	}

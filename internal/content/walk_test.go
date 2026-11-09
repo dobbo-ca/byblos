@@ -412,8 +412,8 @@ func TestWalkRejectsUnboundedFormRecursion(t *testing.T) {
 	if err == nil {
 		t.Fatal("Walk(context.Background(), ) on a self-referencing form: want an error, got nil")
 	}
-	if !strings.Contains(err.Error(), "nesting") {
-		t.Errorf("error = %v; want it to mention nesting", err)
+	if limitName(err) != "form-depth" {
+		t.Errorf("error = %v; want *LimitError form-depth", err)
 	}
 }
 
@@ -1542,8 +1542,8 @@ func TestWalkRefusesDeepGStateStack(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Walk accepted %d nested q with no error", maxGStateDepth+1)
 	}
-	if !strings.Contains(err.Error(), "q nesting") {
-		t.Errorf("error = %v; want it to name q nesting", err)
+	if limitName(err) != "q-depth" {
+		t.Errorf("error = %v; want *LimitError q-depth", err)
 	}
 	// The partial scan still comes back: inspectPage relies on that for a
 	// damaged stream, and refusing must not become discarding (byb-3jq).
@@ -1584,7 +1584,7 @@ func TestWalkRefusesFormInvocationFanOut(t *testing.T) {
 	if err == nil {
 		t.Fatal("Walk accepted a form fan-out of 6^7 invocations with no error")
 	}
-	if !strings.Contains(err.Error(), "form XObject invocations") {
+	if limitName(err) != "form-invocations" {
 		t.Errorf("error = %v; want it to name the invocation cap (a deadline here means the cap did not fire)", err)
 	}
 }

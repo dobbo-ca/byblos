@@ -1,11 +1,14 @@
 package byblos
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"math"
 
 	"golang.org/x/image/draw"
+
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // Downsample resamples img from srcDPI to dstDPI with a Catmull-Rom kernel
@@ -28,6 +31,12 @@ import (
 // DownsampleDeclaredBPC, which takes the depth as an argument.
 func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error) {
 	return DownsampleDeclaredBPC(img, 8, srcDPI, dstDPI)
+}
+
+// DownsampleLimits is Downsample under lim and ctx: DownsampleDeclaredBPCLimits
+// with an assumed depth of 8.
+func DownsampleLimits(ctx context.Context, img image.Image, srcDPI, dstDPI float64, lim Limits) (image.Image, error) {
+	return DownsampleDeclaredBPCLimits(ctx, img, 8, srcDPI, dstDPI, lim)
 }
 
 // DownsampleDeclaredBPC is Downsample plus the one input an image.Image cannot
@@ -77,6 +86,21 @@ func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error) {
 // the only surviving record of what those samples were widened from, which is
 // why it is a field beside the image rather than something recoverable from it.
 func DownsampleDeclaredBPC(img image.Image, declaredBPC int, srcDPI, dstDPI float64) (image.Image, error) {
+	return DownsampleDeclaredBPCLimits(context.Background(), img, declaredBPC, srcDPI, dstDPI, Limits{})
+}
+
+// DownsampleDeclaredBPCLimits is DownsampleDeclaredBPC under lim and ctx. A
+// source over lim.MaxImagePixels (default 500 000 000) is refused as a
+// *LimitError named image-pixels, from its bounds and before the output is
+// allocated.
+//
+// CANCELLATION LATENCY: THE WHOLE RESAMPLE. ctx is checked on entry and
+// before the scale; the x/image scaler is one uninterruptible pass over the
+// image (context.go).
+func DownsampleDeclaredBPCLimits(ctx context.Context, img image.Image, declaredBPC int, srcDPI, dstDPI float64, lim Limits) (image.Image, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
 	// The /BitsPerComponent values an image XObject may declare, the same set
 	// internal/pdfdoc/write.go accepts. 0 is pdfdoc.ImageInfo.BPC's "no such
 	// entry", and a caller that does not know the depth must not be silently
@@ -96,11 +120,10 @@ func DownsampleDeclaredBPC(img image.Image, declaredBPC int, srcDPI, dstDPI floa
 	// A source this large (an image.Uniform-style unbounded image, or a
 	// lazily-computed tiled one) would drive image.NewRGBA below into a
 	// makeslice panic rather than a returned error. Nothing in this package
-	// panics; reject it here instead. maxSourcePixels is far above any real
+	// panics; reject it here instead. The cap (Limits.MaxImagePixels) is far above any real
 	// scanned page (a few hundred megapixels at most).
-	const maxSourcePixels = 500_000_000
-	if int64(b.Dx())*int64(b.Dy()) > maxSourcePixels {
-		return nil, fmt.Errorf("byblos: downsample: image bounds %v exceed %d pixels", b, maxSourcePixels)
+	if err := limits.Check("image-pixels", limits.MulSat(int64(b.Dx()), int64(b.Dy())), lim.ImagePixels()); err != nil {
+		return nil, fmt.Errorf("byblos: downsample: image bounds %v: %w", b, err)
 	}
 	if srcDPI <= 0 || math.IsNaN(srcDPI) || math.IsInf(srcDPI, 0) {
 		return nil, fmt.Errorf("byblos: downsample: srcDPI %v must be positive and finite", srcDPI)

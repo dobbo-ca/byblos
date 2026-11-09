@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/corpus"
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -244,7 +245,7 @@ func TestBuildFromPagesWithPropertiesRoundTrips(t *testing.T) {
 	// A value outside ASCII, so a wrong encoding (plain bytes instead of
 	// UTF-16BE-with-BOM) would be caught rather than coincidentally surviving.
 	want := `{"note":"café"}`
-	if err := BuildFromPagesWithProperties(&buf, pages, map[string]string{"byblos-test-key": want}); err != nil {
+	if err := BuildFromPagesWithProperties(&buf, pages, map[string]string{"byblos-test-key": want}, limits.Limits{}); err != nil {
 		t.Fatalf("BuildFromPagesWithProperties: %v", err)
 	}
 	out := buf.Bytes()

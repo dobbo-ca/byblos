@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // ---- minimal bare-CFF builder ----------------------------------------------
@@ -708,8 +709,6 @@ func TestHostileCIDCFFTotalGateBudget(t *testing.T) {
 // same per-show charge, so re-showing a zero-segment hstem sled through
 // 2-byte codes trips maxFillWork instead of re-running the interpreter free.
 func TestCIDZeroSegmentGlyphChargesFillWork(t *testing.T) {
-	defer func(old int64) { maxFillWork = old }(maxFillWork)
-	maxFillWork = 100_000
 
 	sled := append(bytes.Repeat([]byte{1}, 60_000), t2cs("return")...)
 	f := Font{
@@ -727,8 +726,8 @@ func TestCIDZeroSegmentGlyphChargesFillWork(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm <00070007> Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
-	if err == nil || !strings.Contains(err.Error(), "fill work exceeds") {
+	_, err := PageLimits(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f), limits.Limits{MaxFillWork: 100_000})
+	if err == nil || limitName(err) != "fill-work" {
 		t.Fatalf("two shows of a ~60000-work zero-segment glyph under a 100000 budget must trip fill work, got %v", err)
 	}
 }
@@ -977,8 +976,6 @@ func TestCFFSubrsOffsetOverflowRefused(t *testing.T) {
 // gate-measured work per SHOW, so re-showing it trips maxFillWork like any
 // other expensive operation.
 func TestCFFZeroSegmentGlyphChargesFillWork(t *testing.T) {
-	defer func(old int64) { maxFillWork = old }(maxFillWork)
-	maxFillWork = 100_000
 
 	sled := append(bytes.Repeat([]byte{1}, 60_000), t2cs("return")...)
 	f := Font{
@@ -995,8 +992,8 @@ func TestCFFZeroSegmentGlyphChargesFillWork(t *testing.T) {
 	}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (AA) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
-	if err == nil || !strings.Contains(err.Error(), "fill work exceeds") {
+	_, err := PageLimits(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f), limits.Limits{MaxFillWork: 100_000})
+	if err == nil || limitName(err) != "fill-work" {
 		t.Fatalf("two shows of a ~60000-work zero-segment glyph under a 100000 budget must trip fill work, got %v", err)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
@@ -48,12 +49,12 @@ type Page struct {
 // ISO 32000-1 section 8.9.5.2 maps image sample row 0 (the top row) to the
 // TOP of the unit square, so the ordinary `w 0 0 h tx ty cm` placement below
 // already paints the image top-down. No y-flip belongs here.
-func Write(out io.Writer, pages []Page) error {
+func Write(out io.Writer, pages []Page, lim limits.Limits) error {
 	if len(pages) == 0 {
 		return fmt.Errorf("byblos/pdfbuild: no pages")
 	}
 	for i, p := range pages {
-		if err := validatePage(p); err != nil {
+		if err := validatePage(p, lim); err != nil {
 			return fmt.Errorf("byblos/pdfbuild: page %d: %w", i+1, err)
 		}
 	}
@@ -129,7 +130,7 @@ func inRange(v float64) bool {
 	return !math.IsNaN(v) && v >= minCoord && v <= maxCoord
 }
 
-// maxImagePixels bounds an EncodedImage's Width*Height, restated (not
+// The default of Limits.MaxEncodedImagePixels bounds an EncodedImage's Width*Height, restated (not
 // imported -- see internal/render's maxRasterPixels, which restates the same
 // number for the same reason) from this module's design point:
 // internal/jbig2's MaxPagePixels and internal/render's maxRasterPixels are
@@ -143,7 +144,7 @@ func inRange(v float64) bool {
 // inputs (a declared 2147483647x1 or 1x999000000 image) many orders of
 // magnitude below the point where validatePage or Write would otherwise
 // allocate or loop over them.
-const maxImagePixels = 1 << 26
+// Limits.MaxEncodedImagePixels now carries it; this is its default.
 
 // colorSpaceObject renders cs as the object /ColorSpace takes: a name for a
 // device space, or the [/Indexed base hival <lookup>] array of ISO 32000-1
@@ -239,7 +240,7 @@ func deviceComponents(space string) (int, bool) {
 // it declares, which is the same panic from the other side; that is a side
 // effect for /Indexed only, not a dimension check the other colour spaces get.
 // See maxSampleValue for what it costs.
-func validatePage(p Page) error {
+func validatePage(p Page, lim limits.Limits) error {
 	if !inRange(p.WidthPt) || !inRange(p.HeightPt) {
 		return fmt.Errorf("page box %gx%g is not in the representable range [%g, %g] points", p.WidthPt, p.HeightPt, minCoord, maxCoord)
 	}
@@ -247,24 +248,25 @@ func validatePage(p Page) error {
 	if img.Width <= 0 || img.Height <= 0 {
 		return fmt.Errorf("image dimensions %dx%d are not positive", img.Width, img.Height)
 	}
-	// byb-37h: each axis is bounded by maxImagePixels BEFORE the product is
+	// byb-37h: each axis is bounded by the pixel cap BEFORE the product is
 	// taken, before either dimension reaches maxSampleValue or the scaling
 	// arithmetic in Write. Width and Height are declared ints and can arrive
 	// from parsed file headers (EmbedPNG's IHDR is a uint32 each way) or from
 	// a caller-built Page, so either can be large enough that Width*Height
 	// overflows uint64 itself -- a uint64 product alone is not enough, it
 	// just moves the wrap from 2^63 to 2^64 (e.g. Width=1<<61, Height=8
-	// still computes to 0 and passes). Bounding each axis to maxImagePixels
+	// still computes to 0 and passes). Bounding each axis to the cap
 	// first makes the subsequent product at most (1<<26)*(1<<26) = 1<<52,
 	// nowhere near uint64's range, so it cannot wrap. This also subsumes
-	// byb-jo9's old `Width > 1<<31` bound: maxImagePixels is 1<<26, so any
+	// byb-jo9's old `Width > 1<<31` bound: the cap defaults to 1<<26, so any
 	// Width admitted here is already far under 1<<31, which is what made
 	// rowLen := (img.Width*img.BPC+7)/8 wrap in the first place.
-	if img.Width > maxImagePixels || img.Height > maxImagePixels {
-		return fmt.Errorf("image is %dx%d, which exceeds the maximum of %d pixels", img.Width, img.Height, maxImagePixels)
+	cap := lim.EncodedImagePixels()
+	if err := limits.Check("encoded-image-pixels", int64(max(img.Width, img.Height)), cap); err != nil {
+		return err
 	}
-	if uint64(img.Width)*uint64(img.Height) > maxImagePixels {
-		return fmt.Errorf("image is %dx%d (%d pixels), which exceeds the maximum of %d pixels", img.Width, img.Height, uint64(img.Width)*uint64(img.Height), maxImagePixels)
+	if err := limits.Check("encoded-image-pixels", limits.MulSat(int64(img.Width), int64(img.Height)), cap); err != nil {
+		return err
 	}
 	if len(img.Data) == 0 {
 		return fmt.Errorf("image has no data")

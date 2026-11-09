@@ -273,7 +273,9 @@ func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Documen
 		if derr := d.Err(); derr != nil {
 			err = derr
 		}
-		if errors.Is(err, ErrLimit) || errors.Is(err, ErrMemoryLimit) {
+		// The walk caps at their defaults stay page diagnostics, as before
+		// they were LimitErrors; a caller who set one asked for the failure.
+		if (errors.Is(err, ErrLimit) && !defaultWalkCap(err, dl)) || errors.Is(err, ErrMemoryLimit) {
 			return nil, err
 		}
 		if err != nil {
@@ -302,6 +304,24 @@ func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Documen
 		di.Pages = append(di.Pages, *pi)
 	}
 	return di, nil
+}
+
+// defaultWalkCap reports whether err is a content-walk nesting cap the caller
+// left at its default.
+func defaultWalkCap(err error, l Limits) bool {
+	var le *LimitError
+	if !errors.As(err, &le) {
+		return false
+	}
+	switch le.Name {
+	case "q-depth":
+		return l.MaxGStateDepth <= 0
+	case "form-depth":
+		return l.MaxFormDepth <= 0
+	case "form-invocations":
+		return l.MaxFormInvocations <= 0
+	}
+	return false
 }
 
 // inspectPage returns the page's PageInfo alongside the raw walk, which

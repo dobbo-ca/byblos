@@ -448,6 +448,13 @@ func RecordExtraction(r io.ReadSeeker) (Provenance, error) {
 // against the hostile number. See TestCancellationLatencyOnAHostilePage and
 // context.go.
 func RecordExtractionContext(ctx context.Context, r io.ReadSeeker) (Provenance, error) {
+	return RecordExtractionLimits(ctx, r, Limits{})
+}
+
+// RecordExtractionLimits is RecordExtractionContext under lim: the parse and
+// content-walk caps are lim's, and a breach is a *LimitError. A zero Limits is
+// today's defaults.
+func RecordExtractionLimits(ctx context.Context, r io.ReadSeeker, lim Limits) (Provenance, error) {
 	if err := checkContext(ctx); err != nil {
 		return Provenance{}, err
 	}
@@ -461,7 +468,7 @@ func RecordExtractionContext(ctx context.Context, r io.ReadSeeker) (Provenance, 
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return Provenance{}, fmt.Errorf("byblos: provenance: seek: %w", err)
 	}
-	d, err := pdfdoc.Open(r)
+	d, err := pdfdoc.OpenLimits(context.Background(), r, lim)
 	if err != nil {
 		return Provenance{}, err
 	}

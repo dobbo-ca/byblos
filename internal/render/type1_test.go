@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // ---- minimal Type 1 builder -------------------------------------------------
@@ -389,8 +389,6 @@ func TestHostileType1SelfRecursionBounded(t *testing.T) {
 // against maxFillWork on EVERY show, so a stream re-showing it forever stays
 // bounded per Page. Mirrors TestCFFZeroSegmentGlyphChargesFillWork.
 func TestType1WorkChargedPerShow(t *testing.T) {
-	defer func(old int64) { maxFillWork = old }(maxFillWork)
-	maxFillWork = 100_000
 
 	sled := t1cs(0, 600, "hsbw")
 	sled = append(sled, bytes.Repeat([]byte{1}, 60_000)...) // hstem sled
@@ -400,8 +398,8 @@ func TestType1WorkChargedPerShow(t *testing.T) {
 	f := Font{Program: raw, FirstChar: 'A', Widths: []float64{600}}
 	src := "BT /F1 20 Tf 1 0 0 1 10 50 Tm (AA) Tj ET"
 	box := content.Box{URX: 100, URY: 100}
-	_, err := Page(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f))
-	if err == nil || !strings.Contains(err.Error(), "fill work exceeds") {
+	_, err := PageLimits(context.Background(), []byte(src), box, 0, 1, nil, fontsFor(f), limits.Limits{MaxFillWork: 100_000})
+	if err == nil || limitName(err) != "fill-work" {
 		t.Fatalf("two shows of a ~60000-work zero-segment glyph under a 100000 budget must trip fill work, got %v", err)
 	}
 }

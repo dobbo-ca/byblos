@@ -4,7 +4,6 @@ package render
 
 import (
 	"crypto/sha256"
-	"fmt"
 	"math"
 
 	"golang.org/x/image/font"
@@ -12,6 +11,7 @@ import (
 	"golang.org/x/image/math/fixed"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
 // Font is a simple embedded TrueType font, resolved by the caller from the
@@ -121,7 +121,7 @@ func (r *renderer) resolveFont(name string) *textFont {
 		r.fontsBy[name] = nil
 		return nil
 	}
-	if r.fontBudget >= maxFontRetainedBytes {
+	if r.fontBudget >= r.lim.RenderFontBytes() {
 		// Already over budget: refuse before even asking the caller, so a
 		// long run of names past the limit cannot keep paying FontFor's own
 		// decode cost (byb-utl's pdfdoc.RenderFont has no cache of its own --
@@ -172,7 +172,7 @@ func (r *renderer) resolveFont(name string) *textFont {
 			}
 		}
 		if g := parseGlyfIndex(program); g != nil {
-			if g.boundedBy(maxPathPoints) {
+			if g.boundedBy(r.lim.PathPoints()) {
 				parse(program)
 			}
 		} else if otf, gwork, cid2gid := cffToSFNT(program); otf != nil {
@@ -203,7 +203,7 @@ func (r *renderer) resolveFont(name string) *textFont {
 	// and /W are never deduped -- each resolved name gets its own
 	// slice/map -- so they are charged the same way, per name.
 	r.fontBudget += int64(len(program)) + 8*int64(len(src.Widths)) + 16*int64(len(src.W))
-	if r.fontBudget > maxFontRetainedBytes {
+	if r.fontBudget > r.lim.RenderFontBytes() {
 		r.fontsBy[name] = nil
 		return nil
 	}
@@ -345,10 +345,7 @@ func glyphMatrix(gs *gstate, upem, ySign float64) content.Matrix {
 // chargeFill charges n units against the per-Page fill budget.
 func (r *renderer) chargeFill(n int64) error {
 	r.fillWork += n
-	if r.fillWork > maxFillWork {
-		return fmt.Errorf("render: fill work exceeds %d edge-scanline units", maxFillWork)
-	}
-	return nil
+	return limits.Check("fill-work", r.fillWork, r.lim.FillWork())
 }
 
 // fillGlyph rasterises one glyph outline through the same path machinery as

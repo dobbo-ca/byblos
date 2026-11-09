@@ -37,10 +37,12 @@ package pdfdoc
 //     optional.
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"slices"
 
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/linearize"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -59,10 +61,10 @@ var openDocKeys = []string{"ViewerPreferences", "PageMode", "Threads", "OpenActi
 // It is the last thing that may touch the bytes: anything that re-serializes
 // the document afterwards -- including WriteProperties, which goes through
 // pdfcpu's writer -- silently removes the linearization again.
-func Linearize(rs io.ReadSeeker, w io.Writer) (err error) {
+func Linearize(ctx context.Context, rs io.ReadSeeker, w io.Writer, lim limits.Limits) (err error) {
 	defer catchPanic("linearize", &err)
 
-	opened, err := Open(rs)
+	opened, err := OpenLimits(ctx, rs, lim)
 	if err != nil {
 		return err
 	}

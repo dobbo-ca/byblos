@@ -8,6 +8,7 @@ package render
 
 import (
 	"context"
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"image"
 	"image/color"
 	"strings"
@@ -253,11 +254,9 @@ func TestImageRGBAFastPath(t *testing.T) {
 // budget as fills, so a full-canvas image draw is cut off like a full-canvas
 // fill.
 func TestImageWriteBudget(t *testing.T) {
-	defer func(v int64) { maxFillWork = v }(maxFillWork)
-	maxFillWork = 16
 	src := "q 100 0 0 100 0 0 cm /Im0 Do Q"
-	if _, err := Page(context.Background(), []byte(src), box100, 0, 1,
-		func(string) (Image, bool) { return Image{Data: twoByTwo()}, true }, nil); err == nil {
+	if _, err := PageLimits(context.Background(), []byte(src), box100, 0, 1,
+		func(string) (Image, bool) { return Image{Data: twoByTwo()}, true }, nil, limits.Limits{MaxFillWork: 16}); err == nil {
 		t.Fatal("Page accepted image write work beyond the budget")
 	}
 }
