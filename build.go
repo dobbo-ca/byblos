@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfbuild"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
@@ -127,4 +128,74 @@ func pageBox(p BuildPage) (float64, float64, error) {
 		return 0, 0, fmt.Errorf("page box %gx%g is not a positive finite size", w, h)
 	}
 	return w, h, nil
+}
+
+// TranscodePNG turns a PNG that EmbedPNG cannot carry (alpha, tRNS, Adam7,
+// 16-bit) into an EncodedImage for BuildPDF: Flate colour at the PNG's depth
+// with a Flate /SMask for alpha or tRNS, read from r once and a row at a time.
+// It also returns the DPI the pHYs chunk declares (0 if none). See
+// internal/pdfbuild.TranscodePNG for the rules; in short:
+//
+// lim's pixel cap (MaxEncodedImagePixels) is checked against the IHDR before
+// anything is allocated, then the row buffers are reserved from the memory
+// budget. An interlaced file needs half the image at native sample size for
+// the even rows (Adam7 passes 1 to 6 hold exactly those): scratch, if not nil,
+// is called with that many bytes and supplies them, the caller reserving them
+// from its own budget; if nil they come from byblos's budget. The compressed
+// output grows under the budget and is released on return; the returned bytes
+// are the caller's to account for.
+//
+// Every chunk's CRC is checked; files the standard library's image/png refuses
+// are refused. ctx is checked between rows.
+func TranscodePNG(ctx context.Context, r io.Reader, lim Limits, scratch func(n int64) ([]byte, error)) (EncodedImage, float64, error) {
+	img, dpi, err := pdfbuild.TranscodePNG(ctx, r, lim, scratch)
+	if err != nil {
+		return EncodedImage{}, 0, fmt.Errorf("byblos: TranscodePNG: %w", err)
+	}
+	return img, dpi, nil
+}
+
+// BuildWriter writes a PDF one page at a time (BuildPDF over a slice holds
+// every page's encoded image at once). AddPage puts a page on the io.Writer as
+// it is added and keeps no more than its object numbers; Close writes the page
+// tree and the xref. The page being added is the caller's, in memory for the
+// call: TranscodePNG's output, say.
+type BuildWriter struct {
+	b   *pdfbuild.Builder
+	lim Limits
+}
+
+// NewBuildWriter starts a PDF on w. lim.MaxPages (default 10 000) caps the
+// pages, and lim.MaxEncodedImagePixels each image, as for BuildPDFLimits.
+func NewBuildWriter(w io.Writer, lim Limits) *BuildWriter {
+	return &BuildWriter{b: pdfbuild.NewBuilder(w, lim), lim: lim}
+}
+
+// AddPage writes one page, with the same page-box, image and rotation rules as
+// BuildPDF. A page it refuses (including on a cancelled ctx or past the page
+// cap) writes nothing and leaves the writer usable. ctx is checked on entry;
+// the write itself is one pass over the page's bytes and cannot be cancelled.
+func (bw *BuildWriter) AddPage(ctx context.Context, p BuildPage) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if err := limits.Check("pages", int64(bw.b.Pages()+1), bw.lim.Pages()); err != nil {
+		return fmt.Errorf("byblos: BuildWriter: %w", err)
+	}
+	pw, ph, err := pageBox(p)
+	if err != nil {
+		return fmt.Errorf("byblos: BuildWriter: page %d: %w", bw.b.Pages()+1, err)
+	}
+	if err := bw.b.AddPage(pdfbuild.Page{Image: p.Image, WidthPt: pw, HeightPt: ph, Rotate: p.Rotate}); err != nil {
+		return fmt.Errorf("byblos: BuildWriter: %w", err)
+	}
+	return nil
+}
+
+// Close writes the page tree and the xref. A document with no page is an error.
+func (bw *BuildWriter) Close() error {
+	if err := bw.b.Close(); err != nil {
+		return fmt.Errorf("byblos: BuildWriter: %w", err)
+	}
+	return nil
 }

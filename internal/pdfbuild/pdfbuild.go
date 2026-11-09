@@ -59,54 +59,109 @@ func Write(out io.Writer, pages []Page, lim limits.Limits) error {
 			return fmt.Errorf("byblos/pdfbuild: page %d: %w", i+1, err)
 		}
 	}
-
-	w := newWriter(out)
-	catalog := w.reserve()
-	pagesRoot := w.reserve()
-
-	type objs struct{ page, content, image int }
-	po := make([]objs, len(pages))
-	kids := make([]string, len(pages))
-	for i := range pages {
-		po[i] = objs{page: w.reserve(), content: w.reserve(), image: w.reserve()}
-		kids[i] = fmt.Sprintf("%d 0 R", po[i].page)
-	}
-
+	b := NewBuilder(out, lim)
 	for i, p := range pages {
-		img := p.Image
-		scale := math.Min(p.WidthPt/float64(img.Width), p.HeightPt/float64(img.Height))
-		dw := float64(float64(img.Width) * scale)
-		dh := float64(float64(img.Height) * scale)
-		if !inRange(dw) || !inRange(dh) {
-			return fmt.Errorf("byblos/pdfbuild: page %d: scaled image size %gx%g is not representable", i+1, dw, dh)
-		}
-		tx := (p.WidthPt - dw) / 2
-		ty := (p.HeightPt - dh) / 2
-
-		content := fmt.Sprintf("q %s 0 0 %s %s %s cm /Im0 Do Q\n",
-			formatNum(dw), formatNum(dh), formatNum(tx), formatNum(ty))
-		w.fillStream(po[i].content, "", []byte(content))
-
-		dict, err := imageDict(img)
-		if err != nil {
+		if err := b.emit(p); err != nil {
 			return fmt.Errorf("byblos/pdfbuild: page %d: %w", i+1, err)
 		}
-		w.fillStream(po[i].image, dict, img.Data)
-
-		rotate := ""
-		if p.Rotate != 0 {
-			rotate = fmt.Sprintf(" /Rotate %d", p.Rotate)
-		}
-		w.fill(po[i].page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %s %s]%s"+
-			" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
-			pagesRoot, formatNum(p.WidthPt), formatNum(p.HeightPt), rotate, po[i].image, po[i].content))
 	}
+	return b.Close()
+}
 
-	w.fill(pagesRoot, fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>",
-		strings.Join(kids, " "), len(pages)))
-	w.fill(catalog, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pagesRoot))
+// Builder writes a PDF one page at a time: AddPage puts the page's objects on
+// the io.Writer at once and keeps only their numbers, so a caller holds one
+// page's encoded image, not the document. The page tree and the xref come at
+// Close. Write is a Builder run over a whole slice.
+type Builder struct {
+	w                  *writer
+	lim                limits.Limits
+	catalog, pagesRoot int
+	kids               []string
+	closed             bool
+}
 
-	return w.finish(catalog)
+// NewBuilder starts a PDF on out.
+func NewBuilder(out io.Writer, lim limits.Limits) *Builder {
+	b := &Builder{w: newWriter(out), lim: lim}
+	b.catalog = b.w.reserve()
+	b.pagesRoot = b.w.reserve()
+	return b
+}
+
+// Pages is the number of pages added so far.
+func (b *Builder) Pages() int { return len(b.kids) }
+
+// AddPage validates p and writes it. A page it refuses writes nothing.
+func (b *Builder) AddPage(p Page) error {
+	if b.closed {
+		return fmt.Errorf("byblos/pdfbuild: AddPage after Close")
+	}
+	if err := validatePage(p, b.lim); err != nil {
+		return fmt.Errorf("byblos/pdfbuild: page %d: %w", len(b.kids)+1, err)
+	}
+	return b.emit(p)
+}
+
+// emit writes the objects of a validated page.
+func (b *Builder) emit(p Page) error {
+	w := b.w
+	img := p.Image
+	scale := math.Min(p.WidthPt/float64(img.Width), p.HeightPt/float64(img.Height))
+	dw := float64(float64(img.Width) * scale)
+	dh := float64(float64(img.Height) * scale)
+	if !inRange(dw) || !inRange(dh) {
+		return fmt.Errorf("byblos/pdfbuild: page %d: scaled image size %gx%g is not representable", len(b.kids)+1, dw, dh)
+	}
+	tx := (p.WidthPt - dw) / 2
+	ty := (p.HeightPt - dh) / 2
+
+	page, content, image := w.reserve(), w.reserve(), w.reserve()
+	smask := 0
+	if img.SMask != nil {
+		smask = w.reserve()
+	}
+	b.kids = append(b.kids, fmt.Sprintf("%d 0 R", page))
+
+	w.fillStream(content, "", []byte(fmt.Sprintf("q %s 0 0 %s %s %s cm /Im0 Do Q\n",
+		formatNum(dw), formatNum(dh), formatNum(tx), formatNum(ty))))
+
+	dict, err := imageDict(img, smask)
+	if err != nil {
+		return fmt.Errorf("byblos/pdfbuild: page %d: %w", len(b.kids), err)
+	}
+	if smask > 0 {
+		sdict, err := imageDict(*img.SMask, 0)
+		if err != nil {
+			return fmt.Errorf("byblos/pdfbuild: page %d: %w", len(b.kids), err)
+		}
+		w.fillStream(smask, sdict, img.SMask.Data)
+	}
+	w.fillStream(image, dict, img.Data)
+
+	rotate := ""
+	if p.Rotate != 0 {
+		rotate = fmt.Sprintf(" /Rotate %d", p.Rotate)
+	}
+	w.fill(page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %s %s]%s"+
+		" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
+		b.pagesRoot, formatNum(p.WidthPt), formatNum(p.HeightPt), rotate, image, content))
+	return w.err
+}
+
+// Close writes the page tree, the catalog and the xref. A document with no
+// page is an error.
+func (b *Builder) Close() error {
+	if b.closed {
+		return fmt.Errorf("byblos/pdfbuild: Close twice")
+	}
+	b.closed = true
+	if len(b.kids) == 0 {
+		return fmt.Errorf("byblos/pdfbuild: no pages")
+	}
+	b.w.fill(b.pagesRoot, fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>",
+		strings.Join(b.kids, " "), len(b.kids)))
+	b.w.fill(b.catalog, fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", b.pagesRoot))
+	return b.w.finish(b.catalog)
 }
 
 // formatNum renders v as a PDF real: fixed notation only (ISO 32000-1 section
@@ -335,6 +390,19 @@ func validatePage(p Page, lim limits.Limits) error {
 	default:
 		return fmt.Errorf("filter %q is not supported", img.Filter)
 	}
+	if sm := img.SMask; sm != nil {
+		switch {
+		case sm.SMask != nil:
+			return fmt.Errorf("an /SMask cannot carry an /SMask")
+		case sm.Width != img.Width || sm.Height != img.Height:
+			return fmt.Errorf("/SMask is %dx%d, the image %dx%d", sm.Width, sm.Height, img.Width, img.Height)
+		case sm.Filter != "FlateDecode" || sm.ColorSpace.Name != "DeviceGray" || len(sm.Decode) > 0:
+			return fmt.Errorf("/SMask must be FlateDecode DeviceGray without /Decode")
+		}
+		if err := validatePage(Page{Image: *sm, WidthPt: p.WidthPt, HeightPt: p.HeightPt}, lim); err != nil {
+			return fmt.Errorf("/SMask: %w", err)
+		}
+	}
 	if len(img.Decode) > 0 {
 		n := 2
 		if img.ColorSpace.Name != "Indexed" {
@@ -419,7 +487,7 @@ func maxSampleValue(img pdfdoc.EncodedImage) (int, error) {
 			return 0, fmt.Errorf("row %d: %w", y+1, err)
 		}
 		if predicted {
-			if err := unfilterPNGRow(ft[0], cur, prev); err != nil {
+			if err := unfilterPNGRow(ft[0], cur, prev, 1); err != nil {
 				return 0, fmt.Errorf("row %d: %w", y+1, err)
 			}
 		}
@@ -478,17 +546,15 @@ func pngPredicted(img pdfdoc.EncodedImage) (bool, error) {
 
 // unfilterPNGRow reconstructs one PNG-predicted row in place, given the
 // reconstructed row above it (ISO/IEC 15948 section 9.2, which ISO 32000-1
-// table 10 adopts wholesale for /Predictor >= 10).
-//
-// PNG's bpp -- the byte distance to the pixel on the left -- is 1 for every
-// row that reaches here: pngPredicted has already required /Colors 1, and BPC
-// is at most 8, so a "pixel" rounds up to a single byte.
-func unfilterPNGRow(ft byte, row, prev []byte) error {
+// table 10 adopts wholesale for /Predictor >= 10). bpp is PNG's: the byte
+// distance to the pixel on the left, 1 for any pixel under 8 bits. maxSampleValue
+// passes 1 because pngPredicted requires /Colors 1 and BPC at most 8.
+func unfilterPNGRow(ft byte, row, prev []byte, bpp int) error {
 	switch ft {
 	case 0: // None
 	case 1: // Sub
-		for i := 1; i < len(row); i++ {
-			row[i] += row[i-1]
+		for i := bpp; i < len(row); i++ {
+			row[i] += row[i-bpp]
 		}
 	case 2: // Up
 		for i := range row {
@@ -497,16 +563,16 @@ func unfilterPNGRow(ft byte, row, prev []byte) error {
 	case 3: // Average
 		for i := range row {
 			var left byte
-			if i > 0 {
-				left = row[i-1]
+			if i >= bpp {
+				left = row[i-bpp]
 			}
 			row[i] += byte((int(left) + int(prev[i])) / 2)
 		}
 	case 4: // Paeth
 		for i := range row {
 			var left, upLeft byte
-			if i > 0 {
-				left, upLeft = row[i-1], prev[i-1]
+			if i >= bpp {
+				left, upLeft = row[i-bpp], prev[i-bpp]
 			}
 			row[i] += paethPredictor(left, prev[i], upLeft)
 		}
@@ -616,8 +682,9 @@ func decodeParmsDict(p *pdfdoc.DecodeParms) string {
 }
 
 // imageDict renders the image XObject dictionary contents (without the
-// enclosing << >>, which fillStream adds) for img.
-func imageDict(img pdfdoc.EncodedImage) (string, error) {
+// enclosing << >>, which fillStream adds) for img; smask is the object number
+// of its soft mask, or 0.
+func imageDict(img pdfdoc.EncodedImage, smask int) (string, error) {
 	cs, err := colorSpaceObject(img.ColorSpace)
 	if err != nil {
 		return "", err
@@ -637,6 +704,9 @@ func imageDict(img pdfdoc.EncodedImage) (string, error) {
 			v[i] = formatNum(f)
 		}
 		d += " /Decode [" + strings.Join(v, " ") + "]"
+	}
+	if smask > 0 {
+		d += fmt.Sprintf(" /SMask %d 0 R", smask)
 	}
 	return d, nil
 }
