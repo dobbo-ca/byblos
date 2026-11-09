@@ -692,7 +692,7 @@ func BuildPDFLimits(ctx context.Context, w io.Writer, pages []BuildPage, lim Lim
 // component frames (4 is DeviceCMYK, with /Decode [1 0 1 0 1 0 1 0] when the
 // file has an Adobe APP14 segment). EmbedJP2 carries a JP2 file under
 // /JPXDecode after reading its boxes (sRGB and greyscale only). EXIFRotation
-// maps a JPEG's EXIF orientation to BuildPage.Rotate; mirrored orientations
+// maps a JPEG's or PNG's EXIF orientation to BuildPage.Rotate; mirrored orientations
 // are ErrMirroredOrientation.
 type Resolution struct{ X, Y float64 }
 func EmbedPNG(data []byte) (EncodedImage, Resolution, error)

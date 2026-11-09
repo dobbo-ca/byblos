@@ -23,6 +23,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"math"
+	"math/big"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfbuild"
@@ -30,8 +31,19 @@ import (
 
 // Resolution is a raster's pixels per inch along each axis, whole numbers as
 // img2pdf reads them. Zero means the file declares none (BuildPage.DPI is then
-// the caller's to choose; img2pdf uses 96).
+// the caller's to choose; img2pdf uses 96). A PNG that declares only an aspect
+// ratio (pHYs unit 0) gets img2pdf's 96 dpi default scaled by it, as img2pdf
+// does.
 type Resolution struct{ X, Y float64 }
+
+// check refuses a resolution with one zero axis, which img2pdf divides by
+// (both zero is "none declared").
+func (r Resolution) check() error {
+	if (r.X == 0) != (r.Y == 0) {
+		return fmt.Errorf("resolution %gx%g has a zero axis", r.X, r.Y)
+	}
+	return nil
+}
 
 var pngSignature = [8]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
 
@@ -42,7 +54,9 @@ var pngSignature = [8]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
 // EmbedPNG lifts a PNG file's pixel data into a ready EncodedImage under
 // /FlateDecode, plus the resolution its pHYs chunk declares (zero if the file
 // declares none -- see BuildPage's doc comment on why 0 is not silently
-// defaulted), rounded per axis as img2pdf does.
+// defaulted), rounded per axis as img2pdf does: pixels per metre (pHYs unit 1),
+// else an aspect ratio (unit 0) scaling img2pdf's 96 dpi default. A resolution
+// with one zero axis is refused, as img2pdf divides by it.
 //
 // Refused, because none of these can be carried by this route: colour types 4
 // and 6 (grayscale+alpha, truecolour+alpha -- alpha needs an /SMask split
@@ -109,6 +123,9 @@ func EmbedPNGLimits(data []byte, lim Limits) (EncodedImage, Resolution, error) {
 		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: EmbedPNG: unsupported PNG colour type %d", info.colorType)
 	}
 
+	if err := info.dpi.check(); err != nil {
+		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: EmbedPNG: %w", err)
+	}
 	depth := int(info.bitDepth)
 	return EncodedImage{
 		Width:      info.width,
@@ -147,6 +164,7 @@ func parsePNG(data []byte) (pngInfo, error) {
 		return info, err
 	}
 	sawIHDR := false
+	var phys pdfbuild.PNGPhys
 	for _, c := range chunks {
 		switch c.typ {
 		case "IHDR":
@@ -166,17 +184,14 @@ func parsePNG(data []byte) (pngInfo, error) {
 		case "tRNS":
 			info.hasTRNS = true
 		case "pHYs":
-			if len(c.data) == 9 && c.data[8] == 1 { // unit specifier 1 = metre
-				info.dpi = Resolution{
-					math.RoundToEven(float64(binary.BigEndian.Uint32(c.data[0:4])) * 0.0254),
-					math.RoundToEven(float64(binary.BigEndian.Uint32(c.data[4:8])) * 0.0254),
-				}
-			}
+			phys.Add(c.data)
 		}
 	}
 	if !sawIHDR {
 		return info, fmt.Errorf("no IHDR chunk")
 	}
+	x, y := phys.Resolution()
+	info.dpi = Resolution{x, y}
 	if info.width <= 0 || info.height <= 0 {
 		return info, fmt.Errorf("IHDR declares %dx%d; dimensions must be positive", info.width, info.height)
 	}
@@ -189,9 +204,10 @@ func parsePNG(data []byte) (pngInfo, error) {
 // EmbedJPEG lifts a JPEG file's compressed data into a ready EncodedImage
 // under /DCTDecode -- carried verbatim, not re-encoded, so the embed costs no
 // generation of quality -- plus its resolution as img2pdf (through Pillow)
-// reads it, per axis and rounded: the JFIF density if the units are inches or
-// centimetres, else the Exif XResolution and ResolutionUnit (72 if the file
-// has an Exif block that does not give them), else zero.
+// reads it, per axis and rounded: the density of the last JFIF segment whose
+// units are inches or centimetres, else the Exif XResolution and ResolutionUnit
+// (72 if the file has an Exif block that does not give them), else zero. A
+// resolution with one zero axis is refused, as img2pdf divides by it.
 //
 // Dimensions, precision and colour components come from image/jpeg's own
 // DecodeConfig, which reads exactly the same SOF marker byblos's own JPEG
@@ -223,6 +239,10 @@ func EmbedJPEG(data []byte) (EncodedImage, Resolution, error) {
 	default:
 		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: EmbedJPEG: unsupported JPEG colour model")
 	}
+	dpi := jpegDPI(data)
+	if err := dpi.check(); err != nil {
+		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: EmbedJPEG: %w", err)
+	}
 	return EncodedImage{
 		Width:      cfg.Width,
 		Height:     cfg.Height,
@@ -231,7 +251,7 @@ func EmbedJPEG(data []byte) (EncodedImage, Resolution, error) {
 		Filter:     "DCTDecode",
 		Decode:     decode,
 		Data:       data,
-	}, jpegDPI(data), nil
+	}, dpi, nil
 }
 
 // jpegSegment returns the payload (after the two length bytes) of the first
@@ -274,25 +294,26 @@ func hasAdobeSegment(data []byte) bool {
 // them too, so the in-process path parks them as it does today.
 var ErrMirroredOrientation = errors.New("byblos: EXIF orientation is mirrored")
 
-// EXIFRotation returns the /Rotate (0, 90, 180 or 270) that a JPEG's EXIF
-// orientation asks for, for BuildPage.Rotate: orientation 1 or no Exif at all
-// is 0, 3 is 180, 6 is 90, 8 is 270. Mirrored 2, 4, 5 and 7 are
-// ErrMirroredOrientation; any other value, or an Exif block whose orientation
-// entry is malformed, is an error. This is img2pdf's behaviour (checked on
-// testdata/img2pdf), including Pillow's leniency: the value may be a SHORT or a
-// LONG, only the first of several counts, and an empty entry is no orientation.
-// It reads the headers only.
+// EXIFRotation returns the /Rotate (0, 90, 180 or 270) that a JPEG's or PNG's
+// EXIF orientation asks for, for BuildPage.Rotate: orientation 1 or no Exif at
+// all is 0, 3 is 180, 6 is 90, 8 is 270. Mirrored 2, 4, 5 and 7 are
+// ErrMirroredOrientation; any other value, or one that is not a number, is an
+// error. This is img2pdf's behaviour (checked on testdata/img2pdf), reading the
+// Exif block as Pillow does: the Exif APP1 segments of a JPEG, joined, or the last
+// eXIf chunk of a PNG (found anywhere in data: a caller streaming a PNG may
+// pass the file up to its first IDAT); a block that is malformed, or whose IFD0
+// is cut short, is read as far as it goes, and a tag Pillow skips (a type it
+// does not know, an empty value) is absent; the last of a repeated tag wins; the
+// value may be any numeric type, its first element if there are several. It
+// reads the headers only.
 func EXIFRotation(data []byte) (int, error) {
-	f, _, err := exifTag(data, 0x0112)
-	if err != nil {
-		return 0, fmt.Errorf("byblos: EXIFRotation: %w", err)
-	}
+	f, _ := exifTag(data, 0x0112)
 	if f == nil {
 		return 0, nil
 	}
-	o, ok := f.uint()
+	o, ok := f.num()
 	if !ok {
-		return 0, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a SHORT or LONG")
+		return 0, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
 	}
 	switch o {
 	case 1:
@@ -306,96 +327,149 @@ func EXIFRotation(data []byte) (int, error) {
 	case 2, 4, 5, 7:
 		return 0, ErrMirroredOrientation
 	default:
-		return 0, fmt.Errorf("byblos: EXIFRotation: invalid orientation %d", o)
+		return 0, fmt.Errorf("byblos: EXIFRotation: invalid orientation %v", o)
 	}
 }
 
-// exifField is the first value of one IFD0 entry of a JPEG's Exif block: typ is
-// its TIFF type and val the bytes of that value, nil for a type exifTag does not
-// size (anything but SHORT, LONG and RATIONAL).
+// exifField is one IFD0 entry of an Exif block: typ is its TIFF type and val the
+// bytes of its values.
 type exifField struct {
 	typ uint16
 	val []byte
 	bo  binary.ByteOrder
 }
 
-// uint is f as a SHORT or LONG.
-func (f *exifField) uint() (uint32, bool) {
+// num is f's first value as the number Pillow hands img2pdf, which compares it with the
+// orientations (a rational with a zero denominator is NaN); false for a type
+// that is not a number (BYTE, ASCII, UNDEFINED).
+func (f *exifField) num() (float64, bool) {
+	u, v := f.bo, f.val
 	switch f.typ {
 	case 3:
-		return uint32(f.bo.Uint16(f.val)), true
-	case 4:
-		return f.bo.Uint32(f.val), true
+		return float64(u.Uint16(v)), true
+	case 4, 13:
+		return float64(u.Uint32(v)), true
+	case 6:
+		return float64(int8(v[0])), true
+	case 8:
+		return float64(int16(u.Uint16(v))), true
+	case 9:
+		return float64(int32(u.Uint32(v))), true
+	case 16:
+		return float64(u.Uint64(v)), true
+	case 11:
+		return float64(math.Float32frombits(u.Uint32(v))), true
+	case 12:
+		return math.Float64frombits(u.Uint64(v)), true
+	case 5, 10:
+		n, d := float64(u.Uint32(v)), float64(u.Uint32(v[4:]))
+		if f.typ == 10 {
+			n, d = float64(int32(u.Uint32(v))), float64(int32(u.Uint32(v[4:])))
+		}
+		if d == 0 {
+			return math.NaN(), true
+		}
+		return n / d, true
 	}
 	return 0, false
 }
 
-// exifTag finds tag in IFD0 of data's Exif block. exif reports whether there is
-// a block at all; f is nil when the tag is absent or its count is zero (Pillow
-// drops an empty entry). It reads the headers only.
-func exifTag(data []byte, tag uint16) (f *exifField, exif bool, err error) {
-	seg := jpegSegment(data, func(m byte, p []byte) bool { return m == 0xE1 && bytes.HasPrefix(p, []byte("Exif\x00\x00")) })
-	if seg == nil {
-		return nil, false, nil
+// exifSize is the size of one value of each TIFF type Pillow reads; the other
+// types are skipped.
+var exifSize = [17]uint8{1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 13: 4, 16: 8}
+
+var exifPrefix = []byte("Exif\x00\x00")
+
+// exifBlock is the TIFF data of data's Exif block as Pillow takes it, minus any
+// "Exif\0\0" it starts with; exif reports whether there is a block at all.
+// A JPEG's is the first Exif APP1 segment, a PNG's the last eXIf chunk.
+func exifBlock(data []byte) (t []byte, exif bool) {
+	if bytes.HasPrefix(data, pngSignature[:]) {
+		chunks, _ := walkPNGChunks(data)
+		for _, c := range chunks {
+			if c.typ == "eXIf" {
+				t, exif = c.data, true
+			}
+		}
+	} else {
+		// Pillow joins every Exif segment into one block, a later one after the
+		// first's end. ponytail: capped at 1 MiB so a file of nothing but APP1
+		// segments cannot make a copy of itself; a real block is under 64 KiB.
+		jpegSegment(data, func(m byte, p []byte) bool {
+			if m == 0xE1 && bytes.HasPrefix(p, exifPrefix) {
+				if !exif {
+					t, exif = p[6:], true
+				} else if len(t) < 1<<20 {
+					t = append(t[:len(t):len(t)], p[6:]...)
+				}
+			}
+			return false
+		})
 	}
-	t := seg[6:]
-	var bo binary.ByteOrder
-	switch {
-	case bytes.HasPrefix(t, []byte("II\x2a\x00")):
+	for bytes.HasPrefix(t, exifPrefix) {
+		t = t[6:]
+	}
+	return t, exif
+}
+
+// exifTag finds tag in IFD0 of data's Exif block, loaded as Pillow loads it
+// (img2pdf and the JPEG resolution both go through it): a block without a
+// TIFF header or with IFD0 out of range has no tags; entries are read in order
+// and the last of a repeated tag wins; an entry of a type Pillow does not know
+// or with no values is skipped; an entry whose values lie outside the block
+// ends the read, keeping the tags before it, as does an IFD0 cut short. exif
+// reports whether there is a block at all; f is nil when the tag is absent.
+func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
+	t, exif := exifBlock(data)
+	// The second pair is 0x002a or 0x2a00 (Pillow accepts either order); BigTIFF is not read.
+	if len(t) < 8 || t[0] != t[1] || (t[0] != 'I' && t[0] != 'M') || t[2]|t[3] != 0x2a || t[2]&t[3] != 0 {
+		return nil, exif
+	}
+	var bo binary.ByteOrder = binary.BigEndian
+	if t[0] == 'I' {
 		bo = binary.LittleEndian
-	case bytes.HasPrefix(t, []byte("MM\x00\x2a")):
-		bo = binary.BigEndian
-	default:
-		return nil, true, fmt.Errorf("bad TIFF header")
 	}
-	if len(t) < 8 {
-		return nil, true, fmt.Errorf("bad TIFF header")
+	ifd := uint64(bo.Uint32(t[4:]))
+	if ifd+2 > uint64(len(t)) {
+		return nil, exif
 	}
-	ifd := int64(bo.Uint32(t[4:]))
-	if ifd+2 > int64(len(t)) {
-		return nil, true, fmt.Errorf("IFD0 is outside the Exif block")
-	}
-	n := int64(bo.Uint16(t[ifd:]))
-	for e := ifd + 2; n > 0 && e+12 <= int64(len(t)); e, n = e+12, n-1 {
-		if bo.Uint16(t[e:]) != tag {
+	n := bo.Uint16(t[ifd:])
+	for e := ifd + 2; n > 0 && e+12 <= uint64(len(t)); e, n = e+12, n-1 {
+		typ, count := bo.Uint16(t[e+2:]), bo.Uint32(t[e+4:])
+		if int(typ) >= len(exifSize) || exifSize[typ] == 0 || count == 0 {
 			continue
 		}
-		typ, count := bo.Uint16(t[e+2:]), bo.Uint32(t[e+4:])
-		size := map[uint16]uint64{3: 2, 4: 4, 5: 8}[typ]
-		if count == 0 {
-			return nil, true, nil
-		}
-		f = &exifField{typ: typ, bo: bo}
-		if size == 0 {
-			return f, true, nil
-		}
-		val := t[e+8 : e+12] // inline if the whole value fits, else an offset to it
-		if size*uint64(count) > 4 {
+		val := t[e+8 : e+12] // inline if every value fits, else an offset to them
+		if size := uint64(exifSize[typ]) * uint64(count); size > 4 {
 			off := uint64(bo.Uint32(val))
 			if off+size > uint64(len(t)) {
-				return nil, true, fmt.Errorf("value of tag %#x is outside the Exif block", tag)
+				break
 			}
 			val = t[off:]
 		}
-		f.val = val[:size]
-		return f, true, nil
+		if bo.Uint16(t[e:]) == tag {
+			f = &exifField{typ, val[:uint64(exifSize[typ])*uint64(count)], bo}
+		}
 	}
-	return nil, true, nil
+	return f, exif
 }
 
 // EmbedJP2 lifts a JP2 file under /JPXDecode, verbatim, after reading its
 // boxes as img2pdf does: size and bit depth from ihdr, colour from the first
 // colr box, which must be enumerated sRGB (DeviceRGB) or greyscale
 // (DeviceGray); CMYK, sYCC and ICC-profile files are refused, as img2pdf
-// refuses them. The resolution is the res box's capture resolution, rounded per axis as img2pdf rounds it (zero if none). The
-// pixel cap in lim is checked against the ihdr before the image is built, so a
-// forged header is refused as a *LimitError. byblos does not decode JPX; the
-// returned image is for BuildPDF only. It reads the boxes only and takes no ctx.
+// refuses them. The resolution is the res box's first capture resolution box,
+// rounded per axis as img2pdf rounds it (zero if none); a resc box that is not
+// 10 bytes, has a zero denominator or gives one zero axis is refused, as img2pdf
+// refuses it. The pixel cap in lim is checked against the ihdr before the
+// image is built, so a forged header is refused as a *LimitError. byblos does
+// not decode JPX; the returned image is for BuildPDF only. It reads the boxes
+// only and takes no ctx.
 func EmbedJP2(data []byte, lim Limits) (EncodedImage, Resolution, error) {
 	var w, h uint32
 	var depth, enumCS int
 	var dpi Resolution
-	haveIHDR, haveColr, haveCodestream := false, false, false
+	haveIHDR, haveColr, haveCodestream, haveRes := false, false, false, false
 	if !bytes.HasPrefix(data, pdfbuild.JP2Signature) {
 		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: EmbedJP2: no JP2 signature box")
 	}
@@ -444,17 +518,16 @@ func EmbedJP2(data []byte, lim Limits) (EncodedImage, Resolution, error) {
 					return fmt.Errorf("colour is not an enumerated space")
 				}
 				enumCS, haveColr = int(binary.BigEndian.Uint32(body[3:])), true
-			case "resc": // VRcN VRcD HRcN HRcD VRcE HRcE
-				if len(body) == 10 && dpi == (Resolution{}) {
-					perInch := func(num, den uint16, exp byte) float64 {
-						if den == 0 {
-							return 0
-						}
-						return math.RoundToEven(float64(num) / float64(den) * math.Pow(10, float64(exp)) * 0.0254)
-					}
-					u := binary.BigEndian.Uint16
-					dpi = Resolution{perInch(u(body[4:]), u(body[6:]), body[9]), perInch(u(body[0:]), u(body[2:]), body[8])}
+			case "resc": // VRcN VRcD HRcN HRcD VRcE HRcE; img2pdf reads the first, and refuses any but 10 bytes or a zero denominator
+				if haveRes {
+					break
 				}
+				haveRes = true
+				u := binary.BigEndian.Uint16
+				if len(body) != 10 || u(body[2:]) == 0 || u(body[6:]) == 0 {
+					return fmt.Errorf("resc box of %d bytes, or with a zero denominator", len(body))
+				}
+				dpi = Resolution{jp2PerInch(u(body[4:]), u(body[6:]), body[9]), jp2PerInch(u(body[0:]), u(body[2:]), body[8])}
 			case "jp2c":
 				haveCodestream = true
 			}
@@ -486,45 +559,61 @@ func EmbedJP2(data []byte, lim Limits) (EncodedImage, Resolution, error) {
 	default:
 		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: EmbedJP2: only sRGB and greyscale are supported, got enumerated colour space %d", enumCS)
 	}
+	if err := dpi.check(); err != nil {
+		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: EmbedJP2: %w", err)
+	}
 	return EncodedImage{Width: int(w), Height: int(h), BPC: depth, ColorSpace: cs, Filter: "JPXDecode", Data: data}, dpi, nil
 }
 
+// jp2PerInch is a resc capture resolution, num/den x 10^exp per metre, in
+// pixels per inch: Pillow's exact (254 x num x 10^exp) / (10000 x den), rounded
+// to even as img2pdf rounds it. Floating-point arithmetic would round 3.5 to 3.
+func jp2PerInch(num, den uint16, exp byte) float64 {
+	r := new(big.Rat).SetFrac64(254*int64(num), 10000*int64(den))
+	r.Mul(r, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(exp)), nil)))
+	f, _ := r.Float64()
+	return math.RoundToEven(f)
+}
+
 // jpegDPI is the resolution Pillow reads from a JPEG, rounded as img2pdf
-// rounds it: a JFIF density in inches or centimetres, else (with an Exif block
-// present) the Exif XResolution in ResolutionUnit, 72 when the block lacks
-// them or they do not parse, else zero. Pillow takes the vertical resolution
-// from XResolution too.
+// rounds it: the density of the last JFIF segment in inches or centimetres,
+// else (with an Exif block present) the Exif XResolution in ResolutionUnit, 72
+// when the block lacks them or they do not parse, else zero. Pillow takes the
+// vertical resolution from XResolution too.
 func jpegDPI(data []byte) Resolution {
-	if p := jpegSegment(data, func(m byte, p []byte) bool { return m == 0xE0 && bytes.HasPrefix(p, []byte("JFIF")) }); len(p) >= 12 {
-		x, y := float64(binary.BigEndian.Uint16(p[8:])), float64(binary.BigEndian.Uint16(p[10:]))
-		switch p[7] {
-		case 1:
-			return Resolution{x, y}
-		case 2:
-			return Resolution{math.RoundToEven(x * 2.54), math.RoundToEven(y * 2.54)}
+	var jfif []byte
+	jpegSegment(data, func(m byte, p []byte) bool {
+		if m == 0xE0 && bytes.HasPrefix(p, []byte("JFIF")) && len(p) >= 12 && (p[7] == 1 || p[7] == 2) {
+			jfif = p
 		}
+		return false
+	})
+	if jfif != nil {
+		x, y := float64(binary.BigEndian.Uint16(jfif[8:])), float64(binary.BigEndian.Uint16(jfif[10:]))
+		if jfif[7] == 2 {
+			x, y = math.RoundToEven(x*2.54), math.RoundToEven(y*2.54)
+		}
+		return Resolution{x, y}
 	}
-	res, exif, err := exifTag(data, 0x011A)
+	res, exif := exifTag(data, 0x011A)
 	if !exif {
 		return Resolution{}
 	}
-	unit, _, _ := exifTag(data, 0x0128)
-	if err != nil || res == nil || unit == nil {
+	unit, _ := exifTag(data, 0x0128)
+	if res == nil || unit == nil {
 		return Resolution{72, 72}
 	}
-	var dpi float64
-	if res.typ == 5 {
-		num, den := res.bo.Uint32(res.val), res.bo.Uint32(res.val[4:])
-		if den == 0 {
-			return Resolution{72, 72}
+	dpi, ok := res.num()
+	if res.typ == 1 || res.typ == 7 { // Pillow hands over bytes, and divides the first by the second
+		ok = len(res.val) > 1 && res.val[1] != 0
+		if ok {
+			dpi = float64(res.val[0]) / float64(res.val[1])
 		}
-		dpi = float64(num) / float64(den)
-	} else if v, ok := res.uint(); ok {
-		dpi = float64(v)
-	} else {
+	}
+	if !ok || math.IsNaN(dpi) {
 		return Resolution{72, 72}
 	}
-	if u, _ := unit.uint(); u == 3 {
+	if u, _ := unit.num(); u == 3 {
 		dpi *= 2.54
 	}
 	dpi = math.RoundToEven(dpi)

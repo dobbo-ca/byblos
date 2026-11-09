@@ -403,13 +403,10 @@ func oracleInput(t *testing.T, name string) []byte {
 
 // TestEmbedPageBoxMatchesImg2pdf builds a page from every accepted oracle
 // entry the way a caller does (the Resolution Embed returns, 96 when it
-// declares none, EXIFRotation for a JPEG) and holds its MediaBox and /Rotate to
-// what img2pdf wrote.
+// declares none, EXIFRotation) and holds its MediaBox and /Rotate to what
+// img2pdf wrote; an entry img2pdf refuses must be refused.
 func TestEmbedPageBoxMatchesImg2pdf(t *testing.T) {
 	for name, want := range img2pdfOracle(t) {
-		if want.Error != "" {
-			continue
-		}
 		t.Run(name, func(t *testing.T) {
 			data := oracleInput(t, name)
 			var img EncodedImage
@@ -418,9 +415,7 @@ func TestEmbedPageBoxMatchesImg2pdf(t *testing.T) {
 			rotate := 0
 			switch {
 			case strings.HasSuffix(name, ".jpg"):
-				if img, res, err = EmbedJPEG(data); err == nil {
-					rotate, err = EXIFRotation(data)
-				}
+				img, res, err = EmbedJPEG(data)
 			case strings.HasSuffix(name, ".jp2"):
 				img, res, err = EmbedJP2(data, Limits{})
 			case strings.HasPrefix(name, "rgba-"):
@@ -429,6 +424,15 @@ func TestEmbedPageBoxMatchesImg2pdf(t *testing.T) {
 				img, res, err = EmbedPNG(data)
 			default:
 				t.Fatalf("no Embed function for oracle entry %s", name)
+			}
+			if err == nil {
+				rotate, err = EXIFRotation(data)
+			}
+			if want.Error != "" {
+				if err == nil {
+					t.Errorf("accepted; img2pdf refuses it (%s)", want.Error)
+				}
+				return
 			}
 			if err != nil {
 				t.Fatal(err)
