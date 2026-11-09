@@ -376,8 +376,8 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 		return Orientation{}, nil
 	}
 	var o float64
-	f, dup, bad := tiffField(b.tiff, 0x0112)
-	x7, xmpDup, _ := tiffField(b.tiff, 700)
+	f, dup, bad := tiffField(b.tiff, 0x0112, false)
+	x7, xmpDup, _ := tiffField(b.tiff, 700, true)
 	x1, ok1, conflict := xmpOrientation(b.xmp)
 	var x2 int
 	var ok2 bool
@@ -732,7 +732,7 @@ func loadFails(t []byte) bool {
 // whether there is a block at all.
 func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 	d, _ := exifBlock(data, Limits{})
-	f, _, _ = tiffField(d.tiff, tag)
+	f, _, _ = tiffField(d.tiff, tag, false)
 	return f, d.exif
 }
 
@@ -745,8 +745,10 @@ func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 // repeats of tag, which runs over every entry the block holds (an entry cut
 // short by the block end that starts with tag counts as a repeat). bad reports
 // an entry of tag whose values lie outside the block or that follows such an
-// entry, so Pillow never sees it. f is nil when the tag is absent.
-func tiffField(t []byte, tag uint16) (f *exifField, dup, bad bool) {
+// entry, so Pillow never sees it. f is nil when the tag is absent. With
+// lost, an entry after such an entry is still read if its own values lie in
+// range (for a reader of the whole file, which Pillow is not).
+func tiffField(t []byte, tag uint16, lost bool) (f *exifField, dup, bad bool) {
 	// The second pair is 0x002a or 0x2a00 (Pillow accepts either order); BigTIFF is not read.
 	if len(t) < 8 || t[0] != t[1] || (t[0] != 'I' && t[0] != 'M') || t[2]|t[3] != 0x2a || t[2]&t[3] != 0 {
 		return nil, false, false
@@ -772,7 +774,9 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup, bad bool) {
 		}
 		if stop {
 			bad = bad || match
-			continue
+			if !lost {
+				continue
+			}
 		}
 		typ, count := bo.Uint16(t[e+2:]), bo.Uint32(t[e+4:])
 		if int(typ) >= len(exifSize) || exifSize[typ] == 0 || count == 0 {

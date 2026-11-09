@@ -279,7 +279,8 @@ func TestOrientationTag700XMPAndMalformedOrientation(t *testing.T) {
 		tiff []byte
 		want Orientation
 	}{
-		{"orient6-outside-tag700", ifd0(xmp("1"), orient6, outside, ent(700, 1, uint32(len(xmp("1"))), dataOff)), Orientation{Rotate: 90}},
+		{"orient6-outside-tag700", ifd0(xmp("1"), orient6, outside, ent(700, 1, uint32(len(xmp("1"))), dataOff)), Orientation{Ambiguous: true}},
+		{"orient6-outside-tag700-agrees", ifd0(xmp("6"), orient6, outside, ent(700, 1, uint32(len(xmp("6"))), dataOff)), Orientation{Rotate: 90}},
 		{"orient6-tag700-agrees", ifd0(xmp("6"), orient6, ent(700, 1, uint32(len(xmp("6"))), 8+2+2*12+4)), Orientation{Rotate: 90}},
 		{"orient6-tag700-says3", ifd0(xmp("3"), orient6, ent(700, 1, uint32(len(xmp("3"))), 8+2+2*12+4)), Orientation{Ambiguous: true}},
 		{"no-orient-tag700-says6", ifd0(xmp("6"), ent(700, 1, uint32(len(xmp("6"))), 8+2+12+4)), Orientation{Ambiguous: true}},
