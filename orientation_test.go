@@ -248,3 +248,50 @@ func TestOrientationConflictsAreAmbiguous(t *testing.T) {
 		t.Errorf("single tag 700: got %+v, %v; want 0", o, err)
 	}
 }
+
+// ifd0 is a little-endian TIFF whose IFD0 holds the given 12-byte entries,
+// then data (offsets in the entries count from the start of the TIFF).
+func ifd0(data []byte, entries ...[]byte) []byte {
+	b := binary.LittleEndian.AppendUint16([]byte{'I', 'I', 42, 0, 8, 0, 0, 0}, uint16(len(entries)))
+	for _, e := range entries {
+		b = append(b, e...)
+	}
+	return append(append(b, 0, 0, 0, 0), data...)
+}
+
+func ent(tag, typ uint16, count, val uint32) []byte {
+	e := binary.LittleEndian.AppendUint16(nil, tag)
+	e = binary.LittleEndian.AppendUint16(e, typ)
+	e = binary.LittleEndian.AppendUint32(e, count)
+	return binary.LittleEndian.AppendUint32(e, val)
+}
+
+// A tag 700 XMP is read by a reader of the whole file, not by Pillow: it
+// conflicts with the IFD0 Orientation, and a lost one changes nothing.
+func TestOrientationTag700XMPAndMalformedOrientation(t *testing.T) {
+	xmp := func(o string) []byte {
+		return []byte(`<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/'><tiff:Orientation>` + o + `</tiff:Orientation></rdf:Description></x:xmpmeta>`)
+	}
+	const dataOff = 8 + 2 + 3*12 + 4 // after a three-entry IFD0
+	orient6, outside := ent(0x112, 3, 1, 6), ent(0x10f, 2, 100, 0xfff0)
+	for _, c := range []struct {
+		name string
+		tiff []byte
+		want Orientation
+	}{
+		{"orient6-outside-tag700", ifd0(xmp("1"), orient6, outside, ent(700, 1, uint32(len(xmp("1"))), dataOff)), Orientation{Rotate: 90}},
+		{"orient6-tag700-agrees", ifd0(xmp("6"), orient6, ent(700, 1, uint32(len(xmp("6"))), 8+2+2*12+4)), Orientation{Rotate: 90}},
+		{"orient6-tag700-says3", ifd0(xmp("3"), orient6, ent(700, 1, uint32(len(xmp("3"))), 8+2+2*12+4)), Orientation{Ambiguous: true}},
+		{"no-orient-tag700-says6", ifd0(xmp("6"), ent(700, 1, uint32(len(xmp("6"))), 8+2+12+4)), Orientation{Ambiguous: true}},
+		{"orient-itself-outside", ifd0(nil, ent(0x112, 3, 3, 0xfff0)), Orientation{Ambiguous: true}},
+	} {
+		for kind, data := range map[string][]byte{
+			"jpeg": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], c.tiff...)),
+			"png":  pngBeforeIDAT(t, pngRaw("eXIf", c.tiff)),
+		} {
+			if o, err := EXIFOrientation(data, Limits{}); err != nil || o != c.want {
+				t.Errorf("%s/%s: got %+v, %v; want %+v", c.name, kind, o, err, c.want)
+			}
+		}
+	}
+}
