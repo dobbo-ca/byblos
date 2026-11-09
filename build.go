@@ -44,11 +44,17 @@ type BuildPage struct {
 	Image             EncodedImage
 	WidthPt, HeightPt float64
 	DPI               float64
+	// Rotate is the page's /Rotate in degrees: 0 (none written), 90, 180 or
+	// 270, anything else refused. It turns the page on display and leaves the
+	// MediaBox and the placement as they are, which is what img2pdf writes for
+	// an EXIF orientation (see EXIFRotation).
+	Rotate int
 }
 
 // BuildPDF writes a PDF whose page i paints pages[i].Image and nothing else.
 //
-// It supports FlateDecode, DCTDecode (DeviceGray/DeviceRGB only) and
+// It supports FlateDecode (up to 16 bits per component), DCTDecode
+// (DeviceGray, DeviceRGB, DeviceCMYK), JPXDecode (a JP2 file, see EmbedJP2) and
 // JBIG2Decode (carried verbatim); any other filter, or an unsupported
 // BPC/colour-space combination for one of those, is rejected rather than
 // written as a file no reader can open.
@@ -90,7 +96,7 @@ func BuildPDFLimits(ctx context.Context, w io.Writer, pages []BuildPage, lim Lim
 		if err != nil {
 			return fmt.Errorf("byblos: BuildPDF: page %d: %w", i+1, err)
 		}
-		built[i] = pdfbuild.Page{Image: p.Image, WidthPt: pw, HeightPt: ph}
+		built[i] = pdfbuild.Page{Image: p.Image, WidthPt: pw, HeightPt: ph, Rotate: p.Rotate}
 	}
 	if err := pdfbuild.Write(w, built, lim); err != nil {
 		return fmt.Errorf("byblos: BuildPDF: %w", err)

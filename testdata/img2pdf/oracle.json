@@ -1,0 +1,160 @@
+{
+ "cmyk-noadobe.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceCMYK",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "cmyk.jp2": {
+  "error": "only sRGB and greyscale color space is supported, got 12"
+ },
+ "cmyk.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceCMYK",
+  "decode": [
+   1.0,
+   0.0,
+   1.0,
+   0.0,
+   1.0,
+   0.0,
+   1.0,
+   0.0
+  ],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-0.jpg": {
+  "error": "Invalid rotation (0): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-1.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-2.jpg": {
+  "error": "Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-3.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 180,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-4.jpg": {
+  "error": "Unsupported flipped rotation mode (4): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-5.jpg": {
+  "error": "Unsupported flipped rotation mode (5): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-6.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-7.jpg": {
+  "error": "Unsupported flipped rotation mode (7): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-8.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 270,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-9.jpg": {
+  "error": "Invalid rotation (9): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "gray.jp2": {
+  "bpc": 8,
+  "colorspace": "/DeviceGray",
+  "decode": [],
+  "filter": "/JPXDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "rgb.jp2": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/JPXDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ }
+}

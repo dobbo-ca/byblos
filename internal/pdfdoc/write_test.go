@@ -952,3 +952,16 @@ func TestReplaceImageInvalidatesTheDecodedContentCache(t *testing.T) {
 		t.Error("Encode() after ReplaceImage changed Raw: the stale decoded-content cache clobbered the substitution")
 	}
 }
+
+// ReplaceImage does not write /Decode, so an image that carries one is refused
+// rather than stored with the array silently dropped.
+func TestEncodedImageValidateRefusesDecode(t *testing.T) {
+	img := EncodedImage{Width: 1, Height: 1, BPC: 8, ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: []byte{0}}
+	if err := img.validate(); err != nil {
+		t.Fatal(err)
+	}
+	img.Decode = []float64{1, 0}
+	if img.validate() == nil {
+		t.Fatal("validate accepted a /Decode array")
+	}
+}

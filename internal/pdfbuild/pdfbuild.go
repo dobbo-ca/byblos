@@ -35,6 +35,7 @@ import (
 type Page struct {
 	Image             pdfdoc.EncodedImage
 	WidthPt, HeightPt float64
+	Rotate            int // /Rotate: 0, 90, 180 or 270; 0 writes none
 }
 
 // Write emits a PDF whose page i paints pages[i].Image, fit-centered on its
@@ -92,9 +93,13 @@ func Write(out io.Writer, pages []Page, lim limits.Limits) error {
 		}
 		w.fillStream(po[i].image, dict, img.Data)
 
-		w.fill(po[i].page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %s %s]"+
+		rotate := ""
+		if p.Rotate != 0 {
+			rotate = fmt.Sprintf(" /Rotate %d", p.Rotate)
+		}
+		w.fill(po[i].page, fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %s %s]%s"+
 			" /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
-			pagesRoot, formatNum(p.WidthPt), formatNum(p.HeightPt), po[i].image, po[i].content))
+			pagesRoot, formatNum(p.WidthPt), formatNum(p.HeightPt), rotate, po[i].image, po[i].content))
 	}
 
 	w.fill(pagesRoot, fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>",
@@ -206,19 +211,20 @@ func deviceComponents(space string) (int, bool) {
 //   - CCITTFaxDecode needs /K, /Rows, /BlackIs1 and /EncodedByteAlign, none of
 //     which pdfdoc.DecodeParms can express, so it is rejected rather than
 //     emitted wrong.
-//   - JPXDecode, LZWDecode, RunLengthDecode and the ASCII filters have no
-//     Byblos producer; supporting them here would be untested code.
-//   - DCTDecode is restricted to DeviceGray/DeviceRGB at 8 bits: byblos has no
-//     reader for CMYK JPEG's Adobe-inverted convention either, so writing one
-//     would produce a file this library's own read side cannot round-trip.
+//   - LZWDecode, RunLengthDecode and the ASCII filters have no Byblos
+//     producer; supporting them here would be untested code.
+//   - JPXDecode is carried verbatim as DeviceGray/DeviceRGB, behind the JP2
+//     signature box (EmbedJP2 has parsed the rest). byblos's own read side
+//     does not decode it.
+//   - DCTDecode is DeviceGray, DeviceRGB or DeviceCMYK at 8 bits. A CMYK page
+//     is written but byblos's own read side does not decode it (ExtractPageRaster
+//     refuses it), and the Adobe-inverted convention travels as /Decode.
 //   - JBIG2Decode carries 1-bit DeviceGray data verbatim (ISO 32000-1 section
 //     7.4.7); any other BPC or colour space could not have come from a real
 //     JBIG2 region.
-//   - FlateDecode excludes 16-bit-per-component: byblos has no producer for
-//     it either, and internal/pdfdoc's reader panics on a 16-bpc DeviceGray
-//     image (indexes past the end of the decoded row), so writing one would
-//     make a file this library's own read side crashes on, even though other
-//     readers accept it.
+//   - FlateDecode takes 16 bits per component for the device spaces (a 16-bit
+//     PNG's samples, big-endian as PDF wants them); not for /Indexed, whose
+//     index is at most 8 bits.
 //
 // FlateDecode additionally has its Data checked against the filter it names:
 // EncodedImage.Data is []byte and so is QuantizePNG's return, so a caller can
@@ -241,6 +247,11 @@ func deviceComponents(space string) (int, bool) {
 // effect for /Indexed only, not a dimension check the other colour spaces get.
 // See maxSampleValue for what it costs.
 func validatePage(p Page, lim limits.Limits) error {
+	switch p.Rotate {
+	case 0, 90, 180, 270:
+	default:
+		return fmt.Errorf("/Rotate %d is not 0, 90, 180 or 270", p.Rotate)
+	}
 	if !inRange(p.WidthPt) || !inRange(p.HeightPt) {
 		return fmt.Errorf("page box %gx%g is not in the representable range [%g, %g] points", p.WidthPt, p.HeightPt, minCoord, maxCoord)
 	}
@@ -275,8 +286,12 @@ func validatePage(p Page, lim limits.Limits) error {
 	case "FlateDecode":
 		switch img.BPC {
 		case 1, 2, 4, 8:
+		case 16:
+			if img.ColorSpace.Name == "Indexed" {
+				return fmt.Errorf("FlateDecode: an /Indexed image cannot be 16 bits per component")
+			}
 		default:
-			return fmt.Errorf("FlateDecode: bits per component %d is not one of 1, 2, 4, 8", img.BPC)
+			return fmt.Errorf("FlateDecode: bits per component %d is not one of 1, 2, 4, 8, 16", img.BPC)
 		}
 		if _, err := colorSpaceObject(img.ColorSpace); err != nil {
 			return err
@@ -297,8 +312,18 @@ func validatePage(p Page, lim limits.Limits) error {
 		if img.BPC != 8 {
 			return fmt.Errorf("DCTDecode: bits per component must be 8, got %d", img.BPC)
 		}
+		if _, ok := deviceComponents(img.ColorSpace.Name); !ok {
+			return fmt.Errorf("DCTDecode: colour space %q is not supported (only DeviceGray/DeviceRGB/DeviceCMYK)", img.ColorSpace.Name)
+		}
+	case "JPXDecode":
+		if img.BPC < 1 || img.BPC > 16 {
+			return fmt.Errorf("JPXDecode: bits per component %d is not 1 to 16", img.BPC)
+		}
 		if img.ColorSpace.Name != "DeviceGray" && img.ColorSpace.Name != "DeviceRGB" {
-			return fmt.Errorf("DCTDecode: colour space %q is not supported (only DeviceGray/DeviceRGB)", img.ColorSpace.Name)
+			return fmt.Errorf("JPXDecode: colour space %q is not supported (only DeviceGray/DeviceRGB)", img.ColorSpace.Name)
+		}
+		if !bytes.HasPrefix(img.Data, JP2Signature) {
+			return fmt.Errorf("JPXDecode: data does not start with the JP2 signature box")
 		}
 	case "JBIG2Decode":
 		if img.BPC != 1 {
@@ -310,8 +335,27 @@ func validatePage(p Page, lim limits.Limits) error {
 	default:
 		return fmt.Errorf("filter %q is not supported", img.Filter)
 	}
+	if len(img.Decode) > 0 {
+		n := 2
+		if img.ColorSpace.Name != "Indexed" {
+			c, _ := deviceComponents(img.ColorSpace.Name)
+			n = 2 * c
+		}
+		if len(img.Decode) != n {
+			return fmt.Errorf("/Decode has %d entries, want %d for %s", len(img.Decode), n, img.ColorSpace.Name)
+		}
+		for _, v := range img.Decode {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return fmt.Errorf("/Decode holds %v", v)
+			}
+		}
+	}
 	return nil
 }
+
+// JP2Signature is the 12-byte JP2 signature box (ISO/IEC 15444-1 I.5.1) every
+// JP2 file starts with.
+var JP2Signature = []byte{0, 0, 0, 12, 'j', 'P', ' ', ' ', 0x0D, 0x0A, 0x87, 0x0A}
 
 // maxSampleValue returns the largest sample in img's FlateDecode data,
 // decoding it the way a reader does: inflate, undo the /DecodeParms
@@ -586,6 +630,13 @@ func imageDict(img pdfdoc.EncodedImage) (string, error) {
 		if parms := decodeParmsDict(img.DecodeParms); parms != "" {
 			d += " /DecodeParms " + parms
 		}
+	}
+	if len(img.Decode) > 0 {
+		v := make([]string, len(img.Decode))
+		for i, f := range img.Decode {
+			v[i] = formatNum(f)
+		}
+		d += " /Decode [" + strings.Join(v, " ") + "]"
 	}
 	return d, nil
 }

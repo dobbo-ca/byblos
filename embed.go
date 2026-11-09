@@ -18,11 +18,14 @@ package byblos
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"image/color"
 	"image/jpeg"
+	"math"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
+	"github.com/dobbo-ca/byblos/internal/pdfbuild"
 )
 
 var pngSignature = [8]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
@@ -183,26 +186,33 @@ func parsePNG(data []byte) (pngInfo, error) {
 //
 // Dimensions, precision and colour components come from image/jpeg's own
 // DecodeConfig, which reads exactly the same SOF marker byblos's own JPEG
-// reader (extract.go) does, so an EmbedJPEG file is guaranteed decodable:
-// DecodeConfig accepts only single-scan baseline/extended-sequential/
-// progressive, 8-bit-precision frames, matching internal/pdfbuild's
-// DCTDecode allowlist (DeviceGray/DeviceRGB only). A 4-component (CMYK or
-// Adobe YCCK) JPEG is refused, because byblos has no reader for CMYK JPEG's
-// Adobe-inverted convention and writing one this library's own read side
-// cannot round-trip would be worse than refusing it.
+// reader (extract.go) does. DecodeConfig accepts only single-scan baseline/
+// extended-sequential/progressive, 8-bit-precision frames.
+//
+// A 4-component file (CMYK, or Adobe YCCK) is DeviceCMYK. Adobe writes such
+// samples inverted and marks the file with an APP14 "Adobe" segment, so with
+// that segment present the image carries /Decode [1 0 1 0 1 0 1 0], as img2pdf
+// writes it; without it the samples are taken as plain CMYK. byblos's own read
+// side does not decode CMYK JPEG, so ExtractPageRaster refuses such a page.
 func EmbedJPEG(data []byte) (EncodedImage, float64, error) {
 	cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJPEG: %w", err)
 	}
 	var cs ColorSpace
+	var decode []float64
 	switch cfg.ColorModel {
 	case color.GrayModel:
 		cs = ColorSpace{Name: "DeviceGray"}
 	case color.YCbCrModel, color.RGBAModel:
 		cs = ColorSpace{Name: "DeviceRGB"}
+	case color.CMYKModel:
+		cs = ColorSpace{Name: "DeviceCMYK"}
+		if hasAdobeSegment(data) {
+			decode = []float64{1, 0, 1, 0, 1, 0, 1, 0}
+		}
 	default:
-		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJPEG: unsupported JPEG colour model (only DeviceGray/DeviceRGB)")
+		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJPEG: unsupported JPEG colour model")
 	}
 	return EncodedImage{
 		Width:      cfg.Width,
@@ -210,8 +220,204 @@ func EmbedJPEG(data []byte) (EncodedImage, float64, error) {
 		BPC:        8,
 		ColorSpace: cs,
 		Filter:     "DCTDecode",
+		Decode:     decode,
 		Data:       data,
 	}, jfifDPI(data), nil
+}
+
+// jpegSegment returns the payload (after the two length bytes) of the first
+// marker segment before the scan for which pick returns true, or nil. It walks
+// only the headers, so it is bounded by the file and allocates nothing.
+func jpegSegment(data []byte, pick func(marker byte, payload []byte) bool) []byte {
+	for i := 2; i+4 <= len(data); {
+		if data[i] != 0xFF {
+			return nil
+		}
+		m := data[i+1]
+		switch {
+		case m == 0xFF: // fill byte
+			i++
+			continue
+		case m == 0x01 || m >= 0xD0 && m <= 0xD8: // no length
+			i += 2
+			continue
+		case m == 0xD9 || m == 0xDA: // end of image, start of scan
+			return nil
+		}
+		n := int(binary.BigEndian.Uint16(data[i+2:]))
+		if n < 2 || i+2+n > len(data) {
+			return nil
+		}
+		if p := data[i+4 : i+2+n]; pick(m, p) {
+			return p
+		}
+		i += 2 + n
+	}
+	return nil
+}
+
+func hasAdobeSegment(data []byte) bool {
+	return jpegSegment(data, func(m byte, p []byte) bool { return m == 0xEE && bytes.HasPrefix(p, []byte("Adobe")) }) != nil
+}
+
+// ErrMirroredOrientation is EXIFRotation's refusal of orientations 2, 4, 5 and
+// 7, which flip the image and which /Rotate cannot express. img2pdf refuses
+// them too, so the in-process path parks them as it does today.
+var ErrMirroredOrientation = errors.New("byblos: EXIF orientation is mirrored")
+
+// EXIFRotation returns the /Rotate (0, 90, 180 or 270) that a JPEG's EXIF
+// orientation asks for, for BuildPage.Rotate: orientation 1 or no Exif at all
+// is 0, 3 is 180, 6 is 90, 8 is 270. Mirrored 2, 4, 5 and 7 are
+// ErrMirroredOrientation; any other value, or an Exif block whose orientation
+// entry is malformed, is an error. All of this is img2pdf's behaviour (checked
+// on testdata/img2pdf). It reads the headers only.
+func EXIFRotation(data []byte) (int, error) {
+	exif := jpegSegment(data, func(m byte, p []byte) bool { return m == 0xE1 && bytes.HasPrefix(p, []byte("Exif\x00\x00")) })
+	if exif == nil {
+		return 0, nil
+	}
+	t := exif[6:]
+	var bo binary.ByteOrder
+	switch {
+	case bytes.HasPrefix(t, []byte("II\x2a\x00")):
+		bo = binary.LittleEndian
+	case bytes.HasPrefix(t, []byte("MM\x00\x2a")):
+		bo = binary.BigEndian
+	default:
+		return 0, fmt.Errorf("byblos: EXIFRotation: bad TIFF header")
+	}
+	if len(t) < 8 {
+		return 0, fmt.Errorf("byblos: EXIFRotation: bad TIFF header")
+	}
+	ifd := int64(bo.Uint32(t[4:]))
+	if ifd+2 > int64(len(t)) {
+		return 0, fmt.Errorf("byblos: EXIFRotation: IFD0 is outside the Exif block")
+	}
+	n := int64(bo.Uint16(t[ifd:]))
+	for e := ifd + 2; n > 0 && e+12 <= int64(len(t)); e, n = e+12, n-1 {
+		if bo.Uint16(t[e:]) != 0x0112 {
+			continue
+		}
+		if bo.Uint16(t[e+2:]) != 3 || bo.Uint32(t[e+4:]) != 1 {
+			return 0, fmt.Errorf("byblos: EXIFRotation: orientation entry is not one SHORT")
+		}
+		switch o := bo.Uint16(t[e+8:]); o {
+		case 1:
+			return 0, nil
+		case 3:
+			return 180, nil
+		case 6:
+			return 90, nil
+		case 8:
+			return 270, nil
+		case 2, 4, 5, 7:
+			return 0, ErrMirroredOrientation
+		default:
+			return 0, fmt.Errorf("byblos: EXIFRotation: invalid orientation %d", o)
+		}
+	}
+	return 0, nil
+}
+
+// EmbedJP2 lifts a JP2 file under /JPXDecode, verbatim, after reading its
+// boxes as img2pdf does: size and bit depth from ihdr, colour from the first
+// colr box, which must be enumerated sRGB (DeviceRGB) or greyscale
+// (DeviceGray); CMYK, sYCC and ICC-profile files are refused, as img2pdf
+// refuses them. The DPI is the res box's capture resolution (0 if none). The
+// pixel cap in lim is checked against the ihdr before the image is built, so a
+// forged header is refused as a *LimitError. byblos does not decode JPX; the
+// returned image is for BuildPDF only. It reads the boxes only and takes no ctx.
+func EmbedJP2(data []byte, lim Limits) (EncodedImage, float64, error) {
+	var w, h uint32
+	var depth, enumCS int
+	var dpi float64
+	haveIHDR, haveColr, haveCodestream := false, false, false
+	if !bytes.HasPrefix(data, pdfbuild.JP2Signature) {
+		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJP2: no JP2 signature box")
+	}
+	var walk func(b []byte, nest int) error
+	walk = func(b []byte, nest int) error {
+		for len(b) > 0 {
+			if len(b) < 8 {
+				return fmt.Errorf("truncated box header")
+			}
+			size, typ, hdr := uint64(binary.BigEndian.Uint32(b)), string(b[4:8]), uint64(8)
+			switch {
+			case size == 1:
+				if len(b) < 16 {
+					return fmt.Errorf("truncated box header")
+				}
+				size, hdr = binary.BigEndian.Uint64(b[8:]), 16
+			case size == 0:
+				size = uint64(len(b))
+			}
+			if size < hdr || size > uint64(len(b)) {
+				return fmt.Errorf("%q box overruns the file", typ)
+			}
+			body := b[hdr:size]
+			switch typ {
+			case "jp2h", "res ":
+				if nest > 2 {
+					return fmt.Errorf("boxes nest too deep")
+				}
+				if err := walk(body, nest+1); err != nil {
+					return err
+				}
+			case "ihdr":
+				if len(body) != 14 || haveIHDR {
+					return fmt.Errorf("bad ihdr box")
+				}
+				h, w = binary.BigEndian.Uint32(body), binary.BigEndian.Uint32(body[4:])
+				if body[10] == 0xFF || body[10]&0x80 != 0 {
+					return fmt.Errorf("components differ in depth or are signed")
+				}
+				depth, haveIHDR = int(body[10])+1, true
+			case "colr":
+				if haveColr {
+					break // only the first applies
+				}
+				if len(body) < 3 || body[0] != 1 || len(body) < 7 {
+					return fmt.Errorf("colour is not an enumerated space")
+				}
+				enumCS, haveColr = int(binary.BigEndian.Uint32(body[3:])), true
+			case "resc":
+				if len(body) == 10 && dpi == 0 { // HRcN HRcD at 4..8, HRcE at 9
+					if d := float64(binary.BigEndian.Uint16(body[6:])); d > 0 {
+						dpi = float64(binary.BigEndian.Uint16(body[4:])) / d * math.Pow(10, float64(int8(body[9]))) * 0.0254
+					}
+				}
+			case "jp2c":
+				haveCodestream = true
+			}
+			b = b[size:]
+		}
+		return nil
+	}
+	if err := walk(data, 0); err != nil {
+		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJP2: %w", err)
+	}
+	if !haveIHDR || !haveColr || !haveCodestream {
+		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJP2: no ihdr, colr or codestream box")
+	}
+	if w == 0 || h == 0 {
+		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJP2: ihdr declares %dx%d", w, h)
+	}
+	if err := limits.Check("encoded-image-pixels", limits.MulSat(int64(w), int64(h)), lim.EncodedImagePixels()); err != nil {
+		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJP2: %w", err)
+	}
+	if err := limits.Check("encoded-image-pixels", int64(max(w, h)), lim.EncodedImagePixels()); err != nil {
+		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJP2: %w", err)
+	}
+	var cs ColorSpace
+	switch enumCS {
+	case 16:
+		cs = ColorSpace{Name: "DeviceRGB"}
+	case 17:
+		cs = ColorSpace{Name: "DeviceGray"}
+	default:
+		return EncodedImage{}, 0, fmt.Errorf("byblos: EmbedJP2: only sRGB and greyscale are supported, got enumerated colour space %d", enumCS)
+	}
+	return EncodedImage{Width: int(w), Height: int(h), BPC: depth, ColorSpace: cs, Filter: "JPXDecode", Data: data}, dpi, nil
 }
 
 // jfifDPI returns the DPI data's JFIF APP0 segment declares, or 0 if data

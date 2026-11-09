@@ -676,6 +676,7 @@ type BuildPage struct {
     Image             EncodedImage
     WidthPt, HeightPt float64 // MediaBox in points; both zero derives from DPI
     DPI               float64
+    Rotate            int // /Rotate: 0, 90, 180 or 270
 }
 
 func BuildPDF(w io.Writer, pages []BuildPage) error
@@ -685,12 +686,18 @@ func BuildPDFLimits(ctx context.Context, w io.Writer, pages []BuildPage, lim Lim
 // EmbedPNG and EmbedJPEG (byb-js5.5) lift already-encoded image bytes into a
 // ready EncodedImage LOSSLESSLY -- carrying, not re-encoding -- plus the DPI
 // the file declares (0 if it declares none). EmbedPNG refuses alpha (colour
-// types 4/6), interlaced PNGs and 16-bit depth. EmbedJPEG refuses anything
-// but 1 or 3 component frames (matching internal/pdfbuild's DCTDecode
-// allowlist).
+// types 4/6), interlaced PNGs and 16-bit depth. EmbedJPEG takes 1, 3 and 4
+// component frames (4 is DeviceCMYK, with /Decode [1 0 1 0 1 0 1 0] when the
+// file has an Adobe APP14 segment). EmbedJP2 carries a JP2 file under
+// /JPXDecode after reading its boxes (sRGB and greyscale only). EXIFRotation
+// maps a JPEG's EXIF orientation to BuildPage.Rotate; mirrored orientations
+// are ErrMirroredOrientation.
 func EmbedPNG(data []byte) (EncodedImage, float64, error)
 func EmbedPNGLimits(data []byte, lim Limits) (EncodedImage, float64, error)
 func EmbedJPEG(data []byte) (EncodedImage, float64, error)
+func EmbedJP2(data []byte, lim Limits) (EncodedImage, float64, error)
+func EXIFRotation(data []byte) (int, error)
+var ErrMirroredOrientation error
 
 // --- page editing (G4) ---
 //
