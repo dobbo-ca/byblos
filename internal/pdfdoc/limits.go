@@ -232,12 +232,17 @@ func (d *doc) Err() error { return d.limitErr }
 // image-list caps from here.
 func (d *doc) Limits() limits.Limits { return d.lim }
 
-// imageDecodeBytes is an upper bound on a declared image's decoded size:
-// four components at the declared depth, plus a predictor tag byte per row.
-func imageDecodeBytes(w, h, bpc int) int64 {
+// imageDecodeBytes is the decoded size an image dictionary allows: n components
+// at bpc bits, rounded up per row, plus a predictor tag byte per row. A chain of
+// stages filters also gets twice that and 64 bytes, for the encoded bytes
+// between its stages.
+func imageDecodeBytes(w, h, bpc, n, stages int) int64 {
 	if bpc < 1 {
 		bpc = 8
 	}
-	row := (int64(w)*4*int64(bpc)+7)/8 + 1
+	row := (int64(w)*int64(n)*int64(bpc)+7)/8 + 1
+	if stages > 1 {
+		return 2*row*int64(h) + 64
+	}
 	return row * int64(h)
 }

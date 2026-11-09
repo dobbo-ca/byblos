@@ -110,7 +110,7 @@ func renderImages(d pdfdoc.Doc, p *pdfdoc.Page) render.ImageFor {
 		if !ok || !xo.Image {
 			return render.Image{}, false
 		}
-		data, fileType, err := d.RawImage(xo.ID)
+		data, fileType, err := d.RawImage(context.Background(), xo.ID)
 		if err != nil || fileType == "jbig2" || fileType == "jpx" {
 			return render.Image{}, false
 		}

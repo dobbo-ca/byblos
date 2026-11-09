@@ -293,7 +293,7 @@ func censusDoc(doc sample.Doc) (rows []jbig2Row) {
 			continue
 		}
 		placement := s.Images[idx]
-		data, fileType, err := d.RawImage(placement.ID)
+		data, fileType, err := d.RawImage(context.Background(), placement.ID)
 		if err != nil || fileType != "jbig2" {
 			continue
 		}
