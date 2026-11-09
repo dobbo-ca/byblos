@@ -2,6 +2,7 @@ package pdfbuild
 
 import (
 	"encoding/binary"
+	"errors"
 	"math"
 )
 
@@ -12,11 +13,11 @@ type PNGPhys struct {
 	hasMetre, hasAspect bool
 }
 
-// Add reads one pHYs chunk body; one that is too short or has another unit
-// changes nothing.
-func (p *PNGPhys) Add(b []byte) {
+// Add reads one pHYs chunk body, of which only the first 9 bytes count; one
+// with another unit changes nothing. Pillow refuses a body under 9 bytes.
+func (p *PNGPhys) Add(b []byte) error {
 	if len(b) < 9 {
-		return
+		return errors.New("truncated pHYs chunk")
 	}
 	v := [2]uint32{binary.BigEndian.Uint32(b), binary.BigEndian.Uint32(b[4:])}
 	switch b[8] {
@@ -25,6 +26,7 @@ func (p *PNGPhys) Add(b []byte) {
 	case 0:
 		p.aspect, p.hasAspect = v, true
 	}
+	return nil
 }
 
 // Resolution is the resolution img2pdf takes from the chunks, in whole pixels

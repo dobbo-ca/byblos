@@ -17,11 +17,14 @@ package byblos
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"image/color"
 	"image/jpeg"
+	"io"
 	"math"
 	"math/big"
 
@@ -184,7 +187,9 @@ func parsePNG(data []byte) (pngInfo, error) {
 		case "tRNS":
 			info.hasTRNS = true
 		case "pHYs":
-			phys.Add(c.data)
+			if err := phys.Add(c.data); err != nil {
+				return info, err
+			}
 		}
 	}
 	if !sawIHDR {
@@ -238,6 +243,10 @@ func EmbedJPEG(data []byte) (EncodedImage, Resolution, error) {
 		}
 	default:
 		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: EmbedJPEG: unsupported JPEG colour model")
+	}
+	// Pillow reads the version out of a JFIF segment and cannot open the file if it is short.
+	if jpegSegment(data, func(m byte, p []byte) bool { return m == 0xE0 && bytes.HasPrefix(p, []byte("JFIF")) && len(p) < 7 }) != nil {
+		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: EmbedJPEG: JFIF segment is too short")
 	}
 	dpi := jpegDPI(data)
 	if err := dpi.check(); err != nil {
@@ -299,21 +308,42 @@ var ErrMirroredOrientation = errors.New("byblos: EXIF orientation is mirrored")
 // all is 0, 3 is 180, 6 is 90, 8 is 270. Mirrored 2, 4, 5 and 7 are
 // ErrMirroredOrientation; any other value, or one that is not a number, is an
 // error. This is img2pdf's behaviour (checked on testdata/img2pdf), reading the
-// Exif block as Pillow does: the Exif APP1 segments of a JPEG, joined, or the last
-// eXIf chunk of a PNG (found anywhere in data: a caller streaming a PNG may
-// pass the file up to its first IDAT); a block that is malformed, or whose IFD0
+// Exif block as Pillow does: the Exif APP1 segments of a JPEG, joined, or a
+// PNG's last eXIf chunk or tEXt chunk named exif, else its "Raw profile type
+// exif" text (found anywhere in data: a caller streaming a PNG may pass the file
+// up to its first IDAT); with no orientation in it, the tiff:Orientation of the
+// XMP packet (a JPEG's last xap APP1 segment, a PNG's XML:com.adobe.xmp text); a
+// block that is not a TIFF is an error where Pillow raises on it (always for a
+// PNG, for a JPEG only with a JFIF density) and has no tags where it does not; a
+// block that is malformed, or whose IFD0
 // is cut short, is read as far as it goes, and a tag Pillow skips (a type it
 // does not know, an empty value) is absent; the last of a repeated tag wins; the
 // value may be any numeric type, its first element if there are several. It
 // reads the headers only.
 func EXIFRotation(data []byte) (int, error) {
-	f, _ := exifTag(data, 0x0112)
-	if f == nil {
+	b, err := exifBlock(data)
+	if err != nil {
+		return 0, fmt.Errorf("byblos: EXIFRotation: %w", err)
+	}
+	if loadFails(b.tiff) {
+		// Pillow raises when it loads the block, and a JPEG's read at open is
+		// the one that is swallowed (and cached, XMP and all) unless the JFIF
+		// density spared it.
+		if bytes.HasPrefix(data, pngSignature[:]) || jfifDensity(data) != nil {
+			return 0, fmt.Errorf("byblos: EXIFRotation: Exif block is not a TIFF file")
+		}
 		return 0, nil
 	}
-	o, ok := f.num()
-	if !ok {
-		return 0, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
+	var o float64
+	if f := tiffField(b.tiff, 0x0112); f != nil {
+		var ok bool
+		if o, ok = f.num(); !ok {
+			return 0, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
+		}
+	} else if x, ok := xmpOrientation(b.xmp); ok {
+		o = float64(x)
+	} else {
+		return 0, nil
 	}
 	switch o {
 	case 1:
@@ -378,17 +408,52 @@ func (f *exifField) num() (float64, bool) {
 // types are skipped.
 var exifSize = [17]uint8{1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 13: 4, 16: 8}
 
-var exifPrefix = []byte("Exif\x00\x00")
+// exifData is what Pillow's getexif works from: the TIFF data of the Exif block
+// (minus any "Exif\0\0" it starts with; exif reports whether there is a block
+// at all) and the XMP packet.
+type exifData struct {
+	tiff, xmp []byte
+	exif      bool
+}
 
-// exifBlock is the TIFF data of data's Exif block as Pillow takes it, minus any
-// "Exif\0\0" it starts with; exif reports whether there is a block at all.
-// A JPEG's is the first Exif APP1 segment, a PNG's the last eXIf chunk.
-func exifBlock(data []byte) (t []byte, exif bool) {
+var (
+	exifPrefix = []byte("Exif\x00\x00")
+	xapPrefix  = []byte("http://ns.adobe.com/xap/1.0/\x00")
+)
+
+// exifBlock finds data's Exif block as Pillow takes it. A JPEG's is the first
+// Exif APP1 segment, its XMP the last xap one. A PNG's is the last of its eXIf
+// chunks and tEXt chunks named exif, else its "Raw profile type exif" text
+// (ImageMagick's), a hex dump, which is an error if it does not parse.
+func exifBlock(data []byte) (d exifData, err error) {
 	if bytes.HasPrefix(data, pngSignature[:]) {
 		chunks, _ := walkPNGChunks(data)
+		var raw []byte
 		for _, c := range chunks {
 			if c.typ == "eXIf" {
-				t, exif = c.data, true
+				d.tiff, d.exif = c.data, true
+				continue
+			}
+			k, v, ok, err := pngText(c)
+			if err != nil {
+				return d, err
+			}
+			switch {
+			case !ok:
+			case k == "exif" && c.typ == "tEXt":
+				d.tiff, d.exif = v, true
+			case k == "Raw profile type exif":
+				raw = v
+			case k == "XML:com.adobe.xmp":
+				d.xmp = v
+			}
+		}
+		if !d.exif && raw != nil {
+			d.exif = true
+			if lines := bytes.Split(raw, []byte("\n")); len(lines) > 3 {
+				if d.tiff, err = fromHex(bytes.Join(lines[3:], nil)); err != nil {
+					return d, err
+				}
 			}
 		}
 	} else {
@@ -397,33 +462,146 @@ func exifBlock(data []byte) (t []byte, exif bool) {
 		// segments cannot make a copy of itself; a real block is under 64 KiB.
 		jpegSegment(data, func(m byte, p []byte) bool {
 			if m == 0xE1 && bytes.HasPrefix(p, exifPrefix) {
-				if !exif {
-					t, exif = p[6:], true
-				} else if len(t) < 1<<20 {
-					t = append(t[:len(t):len(t)], p[6:]...)
+				if !d.exif {
+					d.tiff, d.exif = p[6:], true
+				} else if len(d.tiff) < 1<<20 {
+					d.tiff = append(d.tiff[:len(d.tiff):len(d.tiff)], p[6:]...)
 				}
+			} else if m == 0xE1 && bytes.HasPrefix(p, xapPrefix) {
+				d.xmp = p[len(xapPrefix):]
 			}
 			return false
 		})
 	}
-	for bytes.HasPrefix(t, exifPrefix) {
-		t = t[6:]
+	for bytes.HasPrefix(d.tiff, exifPrefix) {
+		d.tiff = d.tiff[6:]
 	}
-	return t, exif
+	return d, nil
 }
 
-// exifTag finds tag in IFD0 of data's Exif block, loaded as Pillow loads it
+// pngText is the key and value Pillow's PngStream gives a tEXt, zTXt or iTXt
+// chunk (ok is false for a chunk it ignores), or its error.
+func pngText(c pngChunk) (k string, v []byte, ok bool, err error) {
+	key, v, found := bytes.Cut(c.data, []byte{0})
+	switch c.typ {
+	case "zTXt":
+		if len(v) > 0 && v[0] != 0 {
+			return "", nil, false, fmt.Errorf("unknown compression method %d in zTXt chunk", v[0])
+		}
+		if len(v) > 0 {
+			v = v[1:]
+		}
+		v, err = inflateText(v)
+	case "iTXt":
+		// compression flag and method, language, translated key, text
+		var parts [][]byte
+		if len(v) >= 2 {
+			parts = bytes.SplitN(v[2:], []byte{0}, 3)
+		}
+		if !found || len(parts) < 3 {
+			return "", nil, false, nil
+		}
+		if v[0] != 0 {
+			if v[1] != 0 {
+				return "", nil, false, nil
+			}
+			parts[2], err = inflateText(parts[2])
+		}
+		v = parts[2]
+	case "tEXt":
+	default:
+		return "", nil, false, nil
+	}
+	return string(key), v, len(key) > 0, err
+}
+
+// inflateText is Pillow's _safe_zlib_decompress for text: nothing if the data
+// is corrupt, what there is if it is cut short, an error past a MiB.
+func inflateText(b []byte) ([]byte, error) {
+	zr, err := zlib.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, nil
+	}
+	out, err := io.ReadAll(io.LimitReader(zr, 1<<20+1))
+	switch {
+	case len(out) > 1<<20:
+		return nil, fmt.Errorf("decompressed text is too large")
+	case err != nil && err != io.ErrUnexpectedEOF:
+		return nil, nil
+	}
+	return out, nil
+}
+
+// fromHex is Python's bytes.fromhex: pairs of hex digits, ASCII white space
+// allowed between pairs.
+func fromHex(s []byte) ([]byte, error) {
+	var out []byte
+	for i := 0; i < len(s); {
+		if bytes.IndexByte([]byte(" \t\n\r\v\f"), s[i]) >= 0 {
+			i++
+			continue
+		}
+		var b [1]byte
+		if i+2 > len(s) {
+			return nil, fmt.Errorf("Raw profile type exif is not hex")
+		}
+		if _, err := hex.Decode(b[:], s[i:i+2]); err != nil {
+			return nil, fmt.Errorf("Raw profile type exif is not hex")
+		}
+		out, i = append(out, b[0]), i+2
+	}
+	return out, nil
+}
+
+// xmpOrientation is the digit Pillow takes from an XMP packet: the first
+// tiff:Orientation=" or tiff:Orientation> that a digit follows.
+func xmpOrientation(x []byte) (int, bool) {
+	for p := []byte("tiff:Orientation"); ; {
+		i := bytes.Index(x, p)
+		if i < 0 {
+			return 0, false
+		}
+		x = x[i+len(p):]
+		r := bytes.TrimPrefix(x, []byte(`="`))
+		if len(r) == len(x) {
+			r = bytes.TrimPrefix(x, []byte(">"))
+		}
+		if len(r) < len(x) && len(r) > 0 && r[0] >= '0' && r[0] <= '9' {
+			return int(r[0] - '0'), true
+		}
+	}
+}
+
+// loadFails reports whether Pillow raises when it loads t as an Exif block: it
+// is not empty and has no TIFF header (or BigTIFF's) with room for its offset.
+func loadFails(t []byte) bool {
+	if len(t) == 0 {
+		return false
+	}
+	if len(t) < 8 || t[0] != t[1] || (t[0] != 'I' && t[0] != 'M') || t[2]&t[3] != 0 || t[2]|t[3] != 0x2a && t[2]|t[3] != 0x2b {
+		return true
+	}
+	return t[2]|t[3] == 0x2b && len(t) < 16
+}
+
+// exifTag finds tag in IFD0 of data's Exif block (see tiffField); exif reports
+// whether there is a block at all.
+func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
+	d, _ := exifBlock(data)
+	return tiffField(d.tiff, tag), d.exif
+}
+
+// tiffField finds tag in IFD0 of the Exif block t, loaded as Pillow loads it
 // (img2pdf and the JPEG resolution both go through it): a block without a
 // TIFF header or with IFD0 out of range has no tags; entries are read in order
 // and the last of a repeated tag wins; an entry of a type Pillow does not know
 // or with no values is skipped; an entry whose values lie outside the block
-// ends the read, keeping the tags before it, as does an IFD0 cut short. exif
-// reports whether there is a block at all; f is nil when the tag is absent.
-func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
-	t, exif := exifBlock(data)
+// ends the read, keeping the tags before it, as does an IFD0 cut short. f is
+// nil when the tag is absent.
+func tiffField(t []byte, tag uint16) (f *exifField) {
 	// The second pair is 0x002a or 0x2a00 (Pillow accepts either order); BigTIFF is not read.
 	if len(t) < 8 || t[0] != t[1] || (t[0] != 'I' && t[0] != 'M') || t[2]|t[3] != 0x2a || t[2]&t[3] != 0 {
-		return nil, exif
+		return nil
 	}
 	var bo binary.ByteOrder = binary.BigEndian
 	if t[0] == 'I' {
@@ -431,7 +609,7 @@ func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 	}
 	ifd := uint64(bo.Uint32(t[4:]))
 	if ifd+2 > uint64(len(t)) {
-		return nil, exif
+		return nil
 	}
 	n := bo.Uint16(t[ifd:])
 	for e := ifd + 2; n > 0 && e+12 <= uint64(len(t)); e, n = e+12, n-1 {
@@ -451,7 +629,7 @@ func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 			f = &exifField{typ, val[:uint64(exifSize[typ])*uint64(count)], bo}
 		}
 	}
-	return f, exif
+	return f
 }
 
 // EmbedJP2 lifts a JP2 file under /JPXDecode, verbatim, after reading its
@@ -575,19 +753,25 @@ func jp2PerInch(num, den uint16, exp byte) float64 {
 	return math.RoundToEven(f)
 }
 
-// jpegDPI is the resolution Pillow reads from a JPEG, rounded as img2pdf
-// rounds it: the density of the last JFIF segment in inches or centimetres,
-// else (with an Exif block present) the Exif XResolution in ResolutionUnit, 72
-// when the block lacks them or they do not parse, else zero. Pillow takes the
-// vertical resolution from XResolution too.
-func jpegDPI(data []byte) Resolution {
-	var jfif []byte
+// jfifDensity is the last JFIF segment whose units are inches or centimetres,
+// the one Pillow takes a density from; nil if none.
+func jfifDensity(data []byte) (jfif []byte) {
 	jpegSegment(data, func(m byte, p []byte) bool {
 		if m == 0xE0 && bytes.HasPrefix(p, []byte("JFIF")) && len(p) >= 12 && (p[7] == 1 || p[7] == 2) {
 			jfif = p
 		}
 		return false
 	})
+	return jfif
+}
+
+// jpegDPI is the resolution Pillow reads from a JPEG, rounded as img2pdf
+// rounds it: the density of the last JFIF segment in inches or centimetres,
+// else (with an Exif block present) the Exif XResolution in ResolutionUnit, 72
+// when the block lacks them or they do not parse, else zero. Pillow takes the
+// vertical resolution from XResolution too.
+func jpegDPI(data []byte) Resolution {
+	jfif := jfifDensity(data)
 	if jfif != nil {
 		x, y := float64(binary.BigEndian.Uint16(jfif[8:])), float64(binary.BigEndian.Uint16(jfif[10:]))
 		if jfif[7] == 2 {

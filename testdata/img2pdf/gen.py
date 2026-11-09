@@ -2,7 +2,7 @@
 # oracle the in-process ingest must match, spec row 9): the small input
 # fixtures and oracle.json, what img2pdf made of each. Manual, never run in CI.
 #   docker run --rm -v "$PWD":/w -w /w kleio-toolchain-test:dev python3 testdata/img2pdf/gen.py
-import hashlib, io, json, struct, subprocess, tempfile, os, zlib
+import hashlib, io, json, re, struct, subprocess, tempfile, os, zlib
 import img2pdf, pikepdf
 from PIL import Image
 
@@ -152,6 +152,38 @@ for mode, pre in (("RGB", ""), ("RGBA", "rgba-")):
     new[pre + "png-x0.png"] = png_with(img, phys(0, 11811, 1))
     new[pre + "png-exif6.png"] = png_with(img, (b"eXIf", tiff([(0x112, 3, 1, S(6))])))
     new[pre + "png-exif2.png"] = png_with(img, (b"eXIf", tiff([(0x112, 3, 1, S(2))])))
+
+
+# XMP orientation, Exif carried in PNG text, and files Pillow refuses.
+XAP = b"http://ns.adobe.com/xap/1.0/\x00"
+xmp = lambda v, elem=False: (b"<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/'>"
+                             + (b"<tiff:Orientation>%d</tiff:Orientation>" if elem else b'<tiff:Orientation="%d"/>') % v + b"</rdf:Description></x:xmpmeta>")
+rawprofile = lambda ex: b"\nexif\n%8d\n" % len(ex) + b"\n".join(ex.hex().encode()[i:i + 72] for i in range(0, 2 * len(ex), 72)) + b"\n"
+o6 = tiff([(0x112, 3, 1, S(6))])
+new["xmp-attr6.jpg"] = jpg_with(small, jfif(0, 1, 1), app(0xE1, XAP + xmp(6)))
+new["xmp-elem6.jpg"] = jpg_with(small, jfif(0, 1, 1), app(0xE1, XAP + xmp(6, True)))
+new["xmp-attr8-300dpi.jpg"] = jpg_with(bigjpg, jfif(1, 300, 300), app(0xE1, XAP + xmp(8)))
+new["xmp-attr2.jpg"] = jpg_with(small, jfif(0, 1, 1), app(0xE1, XAP + xmp(2)))
+new["xmp-attr9.jpg"] = jpg_with(small, jfif(0, 1, 1), app(0xE1, XAP + xmp(9)))
+new["xmp6-exif-noorient.jpg"] = jpg_with(small, jfif(0, 1, 1), app(0xE1, b"Exif\0\0" + tiff([(0x131, 2, 4, b"abc\0")])), app(0xE1, XAP + xmp(6)))
+new["xmp6-exif-orient1.jpg"] = jpg_with(small, jfif(0, 1, 1), app(0xE1, b"Exif\0\0" + tiff([(0x112, 3, 1, S(1))])), app(0xE1, XAP + xmp(6)))
+new["exif-bad-header-jfif300.jpg"] = jpg_with(bigjpg, jfif(1, 300, 300), app(0xE1, b"Exif\0\0" + b"X" * 16))
+new["exif-bad-header-xmp6.jpg"] = jpg_with(small, app(0xE1, b"Exif\0\0" + b"X" * 16), app(0xE1, XAP + xmp(6)))
+new["jfif-short.jpg"] = jpg_with(small, app(0xE0, b"JFIF\0"))
+for mode, pre in (("RGB", ""), ("RGBA", "rgba-")):
+    img = big.convert(mode)
+    z = lambda t, v: (b"zTXt", t + b"\0\0" + zlib.compress(v))
+    new[pre + "png-rawprofile-z6.png"] = png_with(img, z(b"Raw profile type exif", rawprofile(b"Exif\0\0" + o6)))
+    new[pre + "png-rawprofile-t6.png"] = png_with(img, (b"tEXt", b"Raw profile type exif\0" + rawprofile(b"Exif\0\0" + o6)))
+    new[pre + "png-rawprofile-nothex.png"] = png_with(img, (b"tEXt", b"Raw profile type exif\0\nexif\n       2\nzz\n"))
+    new[pre + "png-text-exif6.png"] = png_with(img, (b"tEXt", b"exif\0Exif\0\0" + o6))
+    new[pre + "png-text-exif-over-rawprofile.png"] = png_with(img, (b"tEXt", b"Raw profile type exif\0" + rawprofile(o6)), (b"tEXt", b"exif\0" + tiff([(0x112, 3, 1, S(1))])))
+    new[pre + "png-xmp6.png"] = png_with(img, (b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0" + xmp(6)))
+    new[pre + "png-xmp6-zlib.png"] = png_with(img, (b"iTXt", b"XML:com.adobe.xmp\0\1\0\0\0" + zlib.compress(xmp(6, True))))
+    new[pre + "png-xmp2.png"] = png_with(img, (b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0" + xmp(2)))
+    new[pre + "png-exif-bad-header.png"] = png_with(img, (b"eXIf", b"X" * 16))
+    new[pre + "png-phys8.png"] = png_with(img, (b"pHYs", struct.pack(">II", 11811, 11811)))
+    new[pre + "png-phys70.png"] = png_with(img, (b"pHYs", struct.pack(">IIB", 11811, 11811, 1) + b"\0" * 61))
 files.update(new)
 
 out = {}
@@ -172,7 +204,7 @@ for name, data in sorted(files.items()):
             "stream_is_input": im.read_raw_bytes() == data,
         }
     except Exception as e:
-        ent = {"error": str(e).splitlines()[0]}
+        ent = {"error": re.sub(r" <_io\.BytesIO object at 0x[0-9a-f]+>", "", str(e).splitlines()[0])}
     out[name] = ent
 json.dump(out, open(os.path.join(here, "oracle.json"), "w"), indent=1, sort_keys=True)
 print(json.dumps(out, indent=1, sort_keys=True))
