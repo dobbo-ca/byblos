@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"math"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
@@ -170,8 +169,8 @@ var adam7 = [7][4]int{{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0
 // TranscodePNG reads the PNG on r once and returns Flate colour with a Flate
 // /SMask for alpha or tRNS (an 8-bit mask, or the PNG's 16 bits for a 16-bit
 // alpha channel), at the PNG's own depth; palette files stay /Indexed. The
-// resolution is the pHYs chunk's, per axis (x then y), each rounded to a whole
-// number as img2pdf rounds it (0 if none).
+// resolution is the pHYs chunks', per axis (x then y), each rounded to a whole
+// number as img2pdf rounds it (0 if none; see PNGPhys).
 //
 // Limits are applied from the header before anything is allocated: the pixel
 // cap, then the budget for the row buffers and compressors. An Adam7 file needs
@@ -198,7 +197,7 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 	}
 	var w, h, depth, ctype, interlace int
 	var plte, trns []byte
-	var dpiX, dpiY float64
+	var phys PNGPhys
 	haveIHDR := false
 	for c.typ != "IDAT" || c.n == 0 {
 		if err := c.next(); err != nil {
@@ -228,10 +227,11 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 		case "tRNS":
 			trns, err = c.body(256)
 		case "pHYs":
-			var b []byte
-			if b, err = c.body(9); err == nil && len(b) == 9 && b[8] == 1 {
-				dpiX = math.RoundToEven(float64(binary.BigEndian.Uint32(b)) * 0.0254)
-				dpiY = math.RoundToEven(float64(binary.BigEndian.Uint32(b[4:])) * 0.0254)
+			b := make([]byte, min(c.n, 9))
+			if _, err = io.ReadFull(c, b); err == nil {
+				if err = phys.Add(b); err == nil {
+					_, err = io.Copy(io.Discard, c)
+				}
 			}
 		case "IEND":
 			return zero, 0, 0, fmt.Errorf("no IDAT chunk")
@@ -246,6 +246,8 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 			return zero, 0, 0, err
 		}
 	}
+
+	dpiX, dpiY := phys.Resolution()
 
 	// Header checks, before any allocation.
 	channels, okDepth := map[int]int{0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ctype], false
