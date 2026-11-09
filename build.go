@@ -153,6 +153,9 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim Limits, scratch func(n i
 	if err != nil {
 		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: TranscodePNG: %w", err)
 	}
+	if err := (Resolution{x, y}).check(); err != nil {
+		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: TranscodePNG: %w", err)
+	}
 	return img, Resolution{x, y}, nil
 }
 
