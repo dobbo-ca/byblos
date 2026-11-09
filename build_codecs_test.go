@@ -430,6 +430,15 @@ func TestEmbedPageBoxMatchesImg2pdf(t *testing.T) {
 			if err == nil {
 				rotate, err = EXIFRotation(data)
 			}
+			if xmpNonXML[name] { // ambiguous by rule: rotation 0, not img2pdf's
+				if err != nil || rotate != 0 {
+					t.Errorf("rotation %d, %v; want 0, nil (ambiguous)", rotate, err)
+				}
+				if want.Error != "" {
+					return
+				}
+				want.Rotate = 0
+			}
 			if want.Error != "" {
 				if err == nil {
 					t.Errorf("accepted; img2pdf refuses it (%s)", want.Error)
