@@ -27,6 +27,8 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"regexp"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
@@ -378,18 +380,19 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	var o float64
 	f, dup, bad := tiffField(b.tiff, 0x0112, false)
 	x7, _, _ := tiffField(b.tiff, 700, true)
-	x1, ok1, conflict := xmpOrientation(b.xmp)
+	x1, ok1 := xmpOrientation(b.xmp)
+	a1, aok1, _, conflict := xmpScan(b.xmp)
 	var x2 int
 	var ok2 bool
 	n7 := 0
 	carries2 := false
 	for p := x7; p != nil; p = p.prev {
-		v, ok, c := xmpOrientation(p.val)
-		conflict = conflict || c
+		v, c, ok, cf := xmpScan(p.val)
+		conflict = conflict || cf
 		if p == x7 {
-			x2, ok2, carries2 = v, ok, xmpCarries(p.val)
+			x2, ok2, carries2 = v, ok, c
 		}
-		if xmpCarries(p.val) {
+		if c {
 			n7++
 		}
 	}
@@ -403,8 +406,8 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 			if n, ok := f.num(); ok {
 				base = int(n)
 			}
-		} else if ok1 {
-			base = x1
+		} else if aok1 {
+			base = a1
 		}
 		if x2 != base {
 			return Orientation{Ambiguous: true}, nil
@@ -420,7 +423,7 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	} else {
 		return Orientation{}, nil
 	}
-	if ok1 && float64(x1) != o && f != nil {
+	if aok1 && float64(a1) != o && f != nil {
 		return Orientation{Ambiguous: true}, nil
 	}
 	switch o {
@@ -714,19 +717,48 @@ func fromHex(s []byte) ([]byte, error) {
 	return out, nil
 }
 
-// xmpCarries reports whether an XMP packet holds an orientation in any XML
-// form (single quotes, spaces around the =, an element), not only the ones
-// Pillow reads: duplicated orientation metadata is ambiguous whatever its form.
-func xmpCarries(x []byte) bool { return bytes.Contains(x, []byte("tiff:Orientation")) }
+var (
+	xmpComment = regexp.MustCompile(`(?s)<!--.*?-->`)
+	xmpTiffNS  = regexp.MustCompile(`xmlns:([\w.-]+)\s*=\s*["']http://ns\.adobe\.com/tiff/1\.0/["']`)
+)
+
+// xmpScan reads the tiff Orientation of an XMP packet in any XML form (either
+// quote, spaces around the =, an element, any prefix bound to the tiff
+// namespace, comments ignored), not only the ones Pillow reads: carries
+// reports an Orientation attribute or element, v is the first digit that
+// follows one (ok), and conflict a later one with another digit.
+func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
+	x = xmpComment.ReplaceAll(x, nil)
+	names := []string{"tiff"}
+	for _, m := range xmpTiffNS.FindAllSubmatch(x, -1) {
+		names = append(names, regexp.QuoteMeta(string(m[1])))
+	}
+	re := regexp.MustCompile(`(?:^|[^\w.:-])(?:` + strings.Join(names, "|") + `):Orientation(?:\s*=\s*["']?\s*|\s*>\s*)(\d?)`)
+	for _, m := range re.FindAllSubmatch(x, -1) {
+		carries = true
+		if len(m[1]) == 0 {
+			continue
+		}
+		if d := int(m[1][0] - '0'); !ok {
+			v, ok = d, true
+		} else if d != v {
+			conflict = true
+		}
+	}
+	return v, carries, ok, conflict
+}
+
+// xmpCarries reports whether an XMP packet holds an orientation in any form:
+// duplicated orientation metadata is ambiguous whatever its form.
+func xmpCarries(x []byte) bool { _, c, _, _ := xmpScan(x); return c }
 
 // xmpOrientation is the digit Pillow takes from an XMP packet: the first
-// tiff:Orientation=" or tiff:Orientation> that a digit follows. conflict reports
-// a later one with a different digit.
-func xmpOrientation(x []byte) (v int, ok, conflict bool) {
+// tiff:Orientation=" or tiff:Orientation> that a digit follows.
+func xmpOrientation(x []byte) (v int, ok bool) {
 	for p := []byte("tiff:Orientation"); ; {
 		i := bytes.Index(x, p)
 		if i < 0 {
-			return v, ok, conflict
+			return v, ok
 		}
 		x = x[i+len(p):]
 		r := bytes.TrimPrefix(x, []byte(`="`))
@@ -734,11 +766,7 @@ func xmpOrientation(x []byte) (v int, ok, conflict bool) {
 			r = bytes.TrimPrefix(x, []byte(">"))
 		}
 		if len(r) < len(x) && len(r) > 0 && r[0] >= '0' && r[0] <= '9' {
-			if d := int(r[0] - '0'); !ok {
-				v, ok = d, true
-			} else if d != v {
-				conflict = true
-			}
+			return int(r[0] - '0'), true
 		}
 	}
 }

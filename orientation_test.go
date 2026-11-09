@@ -257,6 +257,12 @@ func TestOrientationDuplicateXMP(t *testing.T) {
 	odd := func(o int) []byte { // a single-quoted attribute with spaces around the =, which Pillow's regex misses
 		return []byte(`<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/' tiff:Orientation = '` + string(rune('0'+o)) + `'/></x:xmpmeta>`)
 	}
+	pref := func(o int) []byte { // a prefix other than tiff, bound to the tiff namespace
+		return []byte(`<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:t="http://ns.adobe.com/tiff/1.0/" t:Orientation="` + string(rune('0'+o)) + `"/></x:xmpmeta>`)
+	}
+	prefPkt := func(o int) []byte { return append(append([]byte(nil), xapPrefix...), pref(o)...) }
+	cmt := []byte(`<x:xmpmeta xmlns:x='adobe:ns:meta/'><!-- tiff:Orientation="3" --></x:xmpmeta>`)
+	cmtPkt := append(append([]byte(nil), xapPrefix...), cmt...)
 	oddPkt := func(o int) []byte { return append(append([]byte(nil), xapPrefix...), odd(o)...) }
 	tag700 := func(a, b []byte) []byte { // IFD0: Orientation 6, then two tag 700 entries
 		const d = 8 + 2 + 3*12 + 4
@@ -272,6 +278,10 @@ func TestOrientationDuplicateXMP(t *testing.T) {
 		{"two-odd-form-disagree", jpegApp1(oddPkt(3), oddPkt(6)), pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", odd(3)), pngTextChunk("zTXt", "XML:com.adobe.xmp", odd(6))), Orientation{Ambiguous: true}},
 		{"two-odd-form-agree", jpegApp1(oddPkt(6), oddPkt(6)), pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", odd(6)), pngTextChunk("zTXt", "XML:com.adobe.xmp", odd(6))), Orientation{Ambiguous: true}},
 		{"exif-two-odd-form", jpegApp1(append(exifPrefix[:6:6], exif6...), oddPkt(3), oddPkt(3)), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", odd(3)), pngTextChunk("zTXt", "XML:com.adobe.xmp", odd(3))), Orientation{Ambiguous: true}},
+		{"two-prefixed-disagree", jpegApp1(prefPkt(3), prefPkt(6)), pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", pref(3)), pngTextChunk("zTXt", "XML:com.adobe.xmp", pref(6))), Orientation{Ambiguous: true}},
+		{"exif-one-prefixed-disagrees", jpegApp1(append(exifPrefix[:6:6], exif6...), prefPkt(3)), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", pref(3))), Orientation{Ambiguous: true}},
+		{"exif-one-odd-form-disagrees", jpegApp1(append(exifPrefix[:6:6], exif6...), oddPkt(3)), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", odd(3))), Orientation{Ambiguous: true}},
+		{"exif-two-comment-only", jpegApp1(append(exifPrefix[:6:6], exif6...), cmtPkt, cmtPkt), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", cmt), pngTextChunk("zTXt", "XML:com.adobe.xmp", cmt)), Orientation{Rotate: 90}},
 		{"two-agree", jpegApp1(xmpPacket(6), xmpPacket(6)), pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(6)), pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(6))), Orientation{Ambiguous: true}},
 		{"one-disagrees-with-exif", jpegApp1(append(exifPrefix[:6:6], exif6...), xmpPacket(3), noOr), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(3)), pngTextChunk("zTXt", "XML:com.adobe.xmp", noXML)), Orientation{Ambiguous: true}},
 		{"tag700-two-without", jpegApp1(append(exifPrefix[:6:6], tag700(noXML, noXML)...)), pngBeforeIDAT(t, pngRaw("eXIf", tag700(noXML, noXML))), Orientation{Rotate: 90}},
