@@ -23,19 +23,25 @@ func TestDCTSOFMustMatchDictionary(t *testing.T) {
 		t.Fatal("SOF0 not found in the PDF")
 	}
 	for _, n := range []int{2000, 10000, 11800} {
-		b := bytes.Clone(pdf.Bytes())
-		copy(b[at+5:], []byte{byte(n >> 8), byte(n), byte(n >> 8), byte(n)})
-		var m0, m1 runtime.MemStats
-		runtime.ReadMemStats(&m0)
-		_, err := ExtractPageRaster(bytes.NewReader(b), 1)
-		_, rerr := RenderPage(bytes.NewReader(b), 1, 64)
-		runtime.ReadMemStats(&m1)
-		if err == nil {
-			t.Errorf("N=%d: ExtractPageRaster accepted a SOF the dictionary contradicts", n)
+		for _, junk := range []bool{false, true} {
+			b := bytes.Clone(pdf.Bytes())
+			copy(b[at+5:], []byte{byte(n >> 8), byte(n), byte(n >> 8), byte(n)})
+			if junk { // decoders skip stray bytes before a marker; so must the check
+				soi := bytes.Index(b, []byte{0xFF, 0xD8})
+				b = append(b[:soi+2], append([]byte{0}, b[soi+2:]...)...)
+			}
+			var m0, m1 runtime.MemStats
+			runtime.ReadMemStats(&m0)
+			_, err := ExtractPageRaster(bytes.NewReader(b), 1)
+			_, rerr := RenderPage(bytes.NewReader(b), 1, 64)
+			runtime.ReadMemStats(&m1)
+			if err == nil {
+				t.Errorf("N=%d: ExtractPageRaster accepted a SOF the dictionary contradicts", n)
+			}
+			if d := m1.TotalAlloc - m0.TotalAlloc; d > 8<<20 {
+				t.Errorf("N=%d: extract+render allocated %d bytes", n, d)
+			}
+			_ = rerr // RenderPage skips the image and carries on
 		}
-		if d := m1.TotalAlloc - m0.TotalAlloc; d > 8<<20 {
-			t.Errorf("N=%d: extract+render allocated %d bytes", n, d)
-		}
-		_ = rerr // RenderPage skips the image and carries on
 	}
 }

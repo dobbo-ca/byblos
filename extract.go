@@ -600,9 +600,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 			}))
 	default:
 		if bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
-			if info, ok := d.ImageInfo(placement.ID); ok {
-				err = checkDCT(data, info, d.Limits())
-			}
+			err = checkDCT(data, d, placement.ID)
 			if err == nil {
 				img, err = decodeDCT(ctx, data)
 			}
@@ -724,11 +722,14 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 }
 
 // dctFrame reads the first SOF marker's width, height and component count
-// without allocating; ok is false when no SOF precedes the first scan.
+// without allocating; ok is false when no SOF precedes the first scan. Bytes
+// between segments are skipped to the next marker, as image/jpeg and libjpeg do.
 func dctFrame(data []byte) (w, h, n int, ok bool) {
-	for i := 2; i+4 <= len(data) && data[i] == 0xFF; {
+	for i := 2; i+4 <= len(data); {
 		m := data[i+1]
 		switch {
+		case data[i] != 0xFF:
+			i++
 		case m == 0xFF:
 			i++
 		case m == 0 || m == 0x01 || m >= 0xD0 && m <= 0xD8:
@@ -747,16 +748,24 @@ func dctFrame(data []byte) (w, h, n int, ok bool) {
 	return 0, 0, 0, false
 }
 
-// checkDCT refuses a JPEG whose SOF disagrees with its image dictionary, or
-// whose pixels pass lim's cap, before any decoder allocates from the SOF. The
-// cap is a *LimitError; a mismatch is a plain error.
-func checkDCT(data []byte, info pdfdoc.ImageInfo, lim Limits) error {
-	w, h, n, ok := dctFrame(data)
-	if !ok {
+// checkDCT refuses a JPEG whose SOF disagrees with its image dictionary (when
+// the document has one), whose pixels pass the cap, or that has no readable SOF,
+// before any decoder allocates from it. The cap is a *LimitError; the rest are
+// plain errors. Data that is not a JPEG is left to its own decoder.
+func checkDCT(data []byte, d pdfdoc.Doc, id int) error {
+	if !bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
 		return nil
 	}
-	if err := limits.Check("image-pixels", limits.MulSat(int64(w), int64(h)), lim.ImagePixels()); err != nil {
+	w, h, n, ok := dctFrame(data)
+	if !ok {
+		return errors.New("dct: no frame header before the first scan")
+	}
+	if err := limits.Check("image-pixels", limits.MulSat(int64(w), int64(h)), d.Limits().ImagePixels()); err != nil {
 		return err
+	}
+	info, ok := d.ImageInfo(id)
+	if !ok {
+		return nil
 	}
 	want := map[string]int{"DeviceGray": 1, "DeviceRGB": 3, "DeviceCMYK": 4}[info.ColorSpace]
 	if w != info.Width || h != info.Height || want != 0 && n != want {

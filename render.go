@@ -113,7 +113,7 @@ func renderImages(d pdfdoc.Doc, p *pdfdoc.Page) render.ImageFor {
 		if err != nil || fileType == "jbig2" || fileType == "jpx" {
 			return render.Image{}, false
 		}
-		if info, ok := d.ImageInfo(xo.ID); ok && checkDCT(data, info, d.Limits()) != nil {
+		if checkDCT(data, d, xo.ID) != nil {
 			return render.Image{}, false
 		}
 		im, _, err := image.Decode(bytes.NewReader(data))
