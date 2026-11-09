@@ -83,8 +83,8 @@ jobs:
       # Private dobbo-ca Go modules (deflate-go, jpeg-go, jp2k-go, webp-go) are
       # fetched with a short-lived GitHub App token, minted per job. Skipped when
       # the variable is unset, and for fork and Dependabot PRs, which get no
-      # secrets (the action would fail on an empty key). Nothing in go.mod needs
-      # a private copy today, so a skipped mint leaves the job green.
+      # secrets (the action would fail on an empty key). go.mod needs jpeg-go (the DCT decode), so
+      # a skipped mint fails the job on a fork PR, which cannot build here.
       - id: app
         if: ${{ vars.CI_READ_APP_ID != '' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -100,6 +100,7 @@ jobs:
       - name: download private modules
         if: ${{ steps.app.outcome == 'success' }}
         env:
+          GIT_LFS_SKIP_SMUDGE: 1 # the copies keep fixtures in LFS; a smudged zip hashes differently from go.sum
           GIT_CONFIG_COUNT: 4
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/deflate-go.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/dobbo-ca/deflate-go
@@ -253,6 +254,7 @@ jobs:
       - name: download private modules
         if: ${{ steps.app.outcome == 'success' }}
         env:
+          GIT_LFS_SKIP_SMUDGE: 1 # the copies keep fixtures in LFS; a smudged zip hashes differently from go.sum
           GIT_CONFIG_COUNT: 4
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/deflate-go.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/dobbo-ca/deflate-go
