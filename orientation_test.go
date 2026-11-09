@@ -7,6 +7,8 @@ package byblos
 // its oracle.json).
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"os"
 	"strings"
@@ -109,5 +111,68 @@ func TestOrientationTextOverBudgetParks(t *testing.T) {
 	}
 	if _, err := EXIFOrientation(pngBeforeIDAT(t, chunks...), Limits{}); limitNamed(err) != "png-text-bytes" {
 		t.Errorf("err = %v; want *LimitError png-text-bytes", err)
+	}
+}
+
+// tiffOrient is a little-endian TIFF whose IFD0 has one SHORT Orientation
+// entry per value.
+func tiffOrient(vals ...uint16) []byte {
+	b := []byte{'I', 'I', 42, 0, 8, 0, 0, 0}
+	b = binary.LittleEndian.AppendUint16(b, uint16(len(vals)))
+	for _, v := range vals {
+		b = binary.LittleEndian.AppendUint16(b, 0x0112)
+		b = binary.LittleEndian.AppendUint16(b, 3)
+		b = binary.LittleEndian.AppendUint32(b, 1)
+		b = binary.LittleEndian.AppendUint16(b, v)
+		b = append(b, 0, 0)
+	}
+	return append(b, 0, 0, 0, 0)
+}
+
+func pngRaw(typ string, data []byte) []byte {
+	var b bytes.Buffer
+	writeHostileChunk(&b, typ, data)
+	return b.Bytes()
+}
+
+func jpegApp1(payload ...[]byte) []byte {
+	out := []byte{0xff, 0xd8}
+	for _, p := range payload {
+		out = append(out, 0xff, 0xe1, byte((len(p)+2)>>8), byte(len(p)+2))
+		out = append(out, p...)
+	}
+	return append(out, 0xff, 0xd9)
+}
+
+func xmpPacket(o int) []byte {
+	return append(append([]byte(nil), xapPrefix...), `<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/'><tiff:Orientation>`+string(rune('0'+o))+`</tiff:Orientation></rdf:Description></x:xmpmeta>`...)
+}
+
+func exifSeg(vals ...uint16) []byte {
+	return append(append([]byte(nil), exifPrefix...), tiffOrient(vals...)...)
+}
+
+// Repeated orientation metadata is ambiguous whatever the values or the order
+// (img2pdf follows Pillow and rotates by one of them).
+func TestOrientationRepeatedSourcesAreAmbiguous(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"two-xmp-1then6":   jpegApp1(xmpPacket(1), xmpPacket(6)),
+		"two-xmp-6then1":   jpegApp1(xmpPacket(6), xmpPacket(1)),
+		"two-xmp-6then6":   jpegApp1(xmpPacket(6), xmpPacket(6)),
+		"two-exif-6then1":  jpegApp1(exifSeg(6), exifSeg(1)),
+		"two-exif-1then6":  jpegApp1(exifSeg(1), exifSeg(6)),
+		"jpeg-dup-tag":     jpegApp1(exifSeg(1, 6)),
+		"jpeg-dup-tag-6-1": jpegApp1(exifSeg(6, 1)),
+		"jpeg-dup-tag-6-6": jpegApp1(exifSeg(6, 6)),
+		"png-dup-tag":      pngBeforeIDAT(t, pngRaw("eXIf", tiffOrient(1, 6))),
+	} {
+		o, err := EXIFOrientation(data, Limits{})
+		if err != nil || o != (Orientation{Ambiguous: true}) {
+			t.Errorf("%s: got %+v, %v; want rotation 0 and ambiguous", name, o, err)
+		}
+	}
+	// one source each stays Pillow's.
+	if o, err := EXIFOrientation(jpegApp1(exifSeg(6), xmpPacket(6)), Limits{}); err != nil || o != (Orientation{Rotate: 90}) {
+		t.Errorf("single sources: got %+v, %v; want 90", o, err)
 	}
 }

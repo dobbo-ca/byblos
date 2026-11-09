@@ -458,6 +458,9 @@ func TestEmbedPageBoxMatchesImg2pdf(t *testing.T) {
 					break
 				}
 			}
+			if name == "exif-dup-1then6.jpg" || name == "exif-two-segments.jpg" {
+				return // ambiguous: rotation 0 by rule (orientation_test.go)
+			}
 			if got := strings.Contains(d, fmt.Sprintf("/Rotate %d", want.Rotate)); got != (want.Rotate != 0) || (want.Rotate == 0 && strings.Contains(d, "/Rotate")) {
 				t.Errorf("page %s; img2pdf wrote /Rotate %d", d, want.Rotate)
 			}
@@ -474,6 +477,12 @@ func TestEXIFRotationOracleFiles(t *testing.T) {
 			continue
 		}
 		got, err := EXIFRotation(oracleInput(t, name))
+		if name == "exif-dup-1then6.jpg" || name == "exif-two-segments.jpg" { // repeated metadata is ambiguous, rotation 0 (orientation_test.go)
+			if o, err := EXIFOrientation(oracleInput(t, name), Limits{}); err != nil || o != (Orientation{Ambiguous: true}) {
+				t.Errorf("%s: got %+v, %v; want ambiguous", name, o, err)
+			}
+			continue
+		}
 		if want.Error != "" {
 			if err == nil {
 				t.Errorf("%s: got %d; img2pdf refuses (%s)", name, got, want.Error)

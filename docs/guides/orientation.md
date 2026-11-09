@@ -11,7 +11,9 @@ img2pdf makes of them (owner decision 2026-11-09). Ambiguous means the
 orientation metadata is:
 
 - duplicated: more than one eXIf chunk, `exif` tEXt, `Raw profile type exif`
-  text or XMP packet in a PNG;
+  text or XMP packet in a PNG; more than one Exif APP1 segment or xap XMP
+  packet in a JPEG; the Orientation tag (0x0112) twice in one Exif IFD0 (JPEG
+  or PNG), whatever its values;
 - conflicting: the Exif orientation and the XMP orientation differ;
 - placed after the first IDAT (any of those sources);
 - an iTXt chunk (of a key we read) whose language, translated key or text is
@@ -25,4 +27,4 @@ every zTXt and compressed iTXt counts); a zTXt or iTXt keyed `exif` (img2pdf
 raises a TypeError); a block that is not a TIFF; an orientation outside 1-8
 (mirrored 2, 4, 5, 7 are `ErrMirroredOrientation`).
 
-JPEG orientation keeps Pillow's rules unchanged except the Exif/XMP conflict.
+JPEG orientation keeps Pillow's rules unchanged except the ambiguous cases above.

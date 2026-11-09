@@ -376,7 +376,11 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 		return Orientation{}, nil
 	}
 	var o float64
-	if f := tiffField(b.tiff, 0x0112); f != nil {
+	f, dup := tiffField(b.tiff, 0x0112)
+	if dup {
+		return Orientation{Ambiguous: true}, nil
+	}
+	if f != nil {
 		var ok bool
 		if o, ok = f.num(); !ok {
 			return Orientation{}, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
@@ -386,7 +390,7 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	} else {
 		return Orientation{}, nil
 	}
-	if x, ok := xmpOrientation(b.xmp); ok && float64(x) != o && tiffField(b.tiff, 0x0112) != nil {
+	if x, ok := xmpOrientation(b.xmp); ok && float64(x) != o && f != nil {
 		return Orientation{Ambiguous: true}, nil
 	}
 	switch o {
@@ -529,18 +533,22 @@ func exifBlock(data []byte, lim Limits) (d exifData, err error) {
 		// Pillow joins every Exif segment into one block, a later one after the
 		// first's end. ponytail: capped at 1 MiB so a file of nothing but APP1
 		// segments cannot make a copy of itself; a real block is under 64 KiB.
+		nExif, nXMP := 0, 0
 		jpegSegment(data, func(m byte, p []byte) bool {
 			if m == 0xE1 && bytes.HasPrefix(p, exifPrefix) {
+				nExif++
 				if !d.exif {
 					d.tiff, d.exif = p[6:], true
 				} else if len(d.tiff) < 1<<20 {
 					d.tiff = append(d.tiff[:len(d.tiff):len(d.tiff)], p[6:]...)
 				}
 			} else if m == 0xE1 && bytes.HasPrefix(p, xapPrefix) {
+				nXMP++
 				d.xmp = p[len(xapPrefix):]
 			}
 			return false
 		})
+		d.ambiguous = nExif > 1 || nXMP > 1
 	}
 	for bytes.HasPrefix(d.tiff, exifPrefix) {
 		d.tiff = d.tiff[6:]
@@ -696,20 +704,21 @@ func loadFails(t []byte) bool {
 // whether there is a block at all.
 func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 	d, _ := exifBlock(data, Limits{})
-	return tiffField(d.tiff, tag), d.exif
+	f, _ = tiffField(d.tiff, tag)
+	return f, d.exif
 }
 
 // tiffField finds tag in IFD0 of the Exif block t, loaded as Pillow loads it
 // (img2pdf and the JPEG resolution both go through it): a block without a
 // TIFF header or with IFD0 out of range has no tags; entries are read in order
-// and the last of a repeated tag wins; an entry of a type Pillow does not know
+// and the last of a repeated tag wins (dup reports the repeat); an entry of a type Pillow does not know
 // or with no values is skipped; an entry whose values lie outside the block
 // ends the read, keeping the tags before it, as does an IFD0 cut short. f is
 // nil when the tag is absent.
-func tiffField(t []byte, tag uint16) (f *exifField) {
+func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 	// The second pair is 0x002a or 0x2a00 (Pillow accepts either order); BigTIFF is not read.
 	if len(t) < 8 || t[0] != t[1] || (t[0] != 'I' && t[0] != 'M') || t[2]|t[3] != 0x2a || t[2]&t[3] != 0 {
-		return nil
+		return nil, false
 	}
 	var bo binary.ByteOrder = binary.BigEndian
 	if t[0] == 'I' {
@@ -717,7 +726,7 @@ func tiffField(t []byte, tag uint16) (f *exifField) {
 	}
 	ifd := uint64(bo.Uint32(t[4:]))
 	if ifd+2 > uint64(len(t)) {
-		return nil
+		return nil, false
 	}
 	n := bo.Uint16(t[ifd:])
 	for e := ifd + 2; n > 0 && e+12 <= uint64(len(t)); e, n = e+12, n-1 {
@@ -734,10 +743,11 @@ func tiffField(t []byte, tag uint16) (f *exifField) {
 			val = t[off:]
 		}
 		if bo.Uint16(t[e:]) == tag {
+			dup = dup || f != nil
 			f = &exifField{typ, val[:uint64(exifSize[typ])*uint64(count)], bo}
 		}
 	}
-	return f
+	return f, dup
 }
 
 // EmbedJP2 lifts a JP2 file under /JPXDecode, verbatim, after reading its
