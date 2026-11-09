@@ -740,7 +740,7 @@ func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
 			vals = append(vals, s)
 		}
 	}
-	d := xml.NewDecoder(bytes.NewReader(x))
+	d := xml.NewDecoder(bytes.NewReader(bytes.TrimRight(x, "\x00"))) // NUL padding is not part of the XML
 	var buf []byte
 	depth, in := 0, -1 // in: depth of the open Orientation element
 	var err error
@@ -774,13 +774,16 @@ func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
 	}
 	if err != io.EOF {
 		// Not XML (or past the limits): ignored unless it names Orientation, which
-		// is then malformed metadata. The img2pdf corpus holds Pillow's regex form
-		// in such packets (tiff:Orientation="6" with no element around it), so its
-		// digit still counts; digits that differ, or none, are ambiguous.
-		if v, ok, conflict = xmpOrientation(x); ok {
-			return v, true, true, conflict
+		// is then malformed metadata. The img2pdf corpus holds Pillow's regex form in
+		// such packets (tiff:Orientation="6" with no element around it), so its digit
+		// still counts, but only when every mention is in that form and they agree;
+		// any other mention (entity, quotes, spaces) may hide a conflict.
+		n := bytes.Count(x, []byte("Orientation"))
+		if v, ok, conflict = xmpOrientation(x); ok && !conflict &&
+			n == bytes.Count(x, []byte(`tiff:Orientation="`))+bytes.Count(x, []byte("tiff:Orientation>")) {
+			return v, true, true, false
 		}
-		bad := bytes.Contains(x, []byte("Orientation"))
+		bad := n > 0
 		return 0, bad, false, bad
 	}
 	for _, s := range vals {

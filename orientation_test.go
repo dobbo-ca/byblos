@@ -386,6 +386,10 @@ func TestOrientationXMPMalformedConflict(t *testing.T) {
 		{"exif-attrs", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<tiff:Orientation="6"/><tiff:Orientation="3"/>`...)), Orientation{Ambiguous: true}},
 		{"exif-attr-element", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<tiff:Orientation="6"/><tiff:Orientation>3</tiff:Orientation>`...)), Orientation{Ambiguous: true}},
 		{"trailing-nul", jpegApp1(append(xapPrefix[:len(xapPrefix):len(xapPrefix)], valid+"\x00"...)), Orientation{Ambiguous: true}},
+		{"nul-entity-element", jpegApp1(append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='`+ns+`' tiff:Orientation="6"><tiff:Orientation>&#51;</tiff:Orientation></rdf:Description></x:xmpmeta>`+"\x00"...)), Orientation{Ambiguous: true}},
+		{"nul-spaced-element-exif", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='`+ns+`' tiff:Orientation="6"><tiff:Orientation> 3 </tiff:Orientation></rdf:Description></x:xmpmeta>`+"\x00"...)), Orientation{Ambiguous: true}},
+		{"non-xml-mixed-quotes", jpegApp1(append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<tiff:Orientation="6"/><tiff:Orientation='3'/>`...)), Orientation{Ambiguous: true}},
+		{"non-xml-mixed-quotes-exif", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<tiff:Orientation="6"/><tiff:Orientation='3'/>`...)), Orientation{Ambiguous: true}},
 		{"unbound-prefix", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><a tiff:Orientation="3"/></x:xmpmeta>`...)), Orientation{Ambiguous: true}},
 		{"empty-value", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><a xmlns:tiff='`+ns+`' tiff:Orientation=""/></x:xmpmeta>`...)), Orientation{Rotate: 90}},
 	} {
