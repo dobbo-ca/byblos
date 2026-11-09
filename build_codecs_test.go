@@ -421,7 +421,7 @@ func TestEmbedPageBoxMatchesImg2pdf(t *testing.T) {
 			case strings.HasSuffix(name, ".jp2"):
 				img, res, err = EmbedJP2(data, Limits{})
 			case strings.HasPrefix(name, "rgba-"):
-				t.Skip("alpha: TranscodePNG")
+				img, res, err = TranscodePNG(t.Context(), bytes.NewReader(data), Limits{}, nil)
 			case strings.HasSuffix(name, ".png"):
 				img, res, err = EmbedPNG(data)
 			default:

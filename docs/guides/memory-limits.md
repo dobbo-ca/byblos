@@ -39,8 +39,8 @@ allocation. The estimate covers:
   each);
 - the content walk's retained-bytes account of one page (below);
 - decoded non-image streams, up to the per-page total;
-- the streaming page writer's current page;
-- archival-raster bands and PNG transcode rows.
+- PNG transcode rows and its two compressed outputs (below);
+- archival-raster bands.
 
 Not in byblos's budget, because the caller holds them and passes them in:
 
@@ -170,7 +170,7 @@ field, a breach fails the call.
 
 | Cap (field) | Default | Error name | Entry point |
 |---|---|---|---|
-| PNG and `EncodedImage` width x height, and each axis of an `EncodedImage` (`MaxEncodedImagePixels`) | 1<<26 px | `encoded-image-pixels` | `EmbedPNGLimits`, `EmbedJP2`, `BuildPDFLimits` |
+| PNG and `EncodedImage` width x height, and each axis of an `EncodedImage` (`MaxEncodedImagePixels`) | 1<<26 px | `encoded-image-pixels` | `EmbedPNGLimits`, `EmbedJP2`, `TranscodePNG`, `BuildPDFLimits`, `NewBuildWriter` |
 | Text decoded from a PNG's text chunks by `EXIFRotationLimits` (`MaxPNGTextBytes`; every zTXt and compressed iTXt is inflated and counted, only the Exif, XMP and exif ones are kept) | 64 MiB | `png-text-bytes` | `EXIFRotationLimits` |
 | `Downsample` source bounds (`MaxImagePixels`, the image cap above) | 500 000 000 px | `image-pixels` | `DownsampleLimits`, `DownsampleDeclaredBPCLimits` |
 | `RenderPage` canvas, a side (`MaxRasterSide`) and total (`MaxRasterPixels`) | 20 000 px, 1<<26 px | `raster-side`, `raster-pixels` | `RenderPageLimits` |
@@ -223,12 +223,27 @@ caller chose to pass (`context.go:27-35`), and that decision is revisited
 against owner decision D2 (ctx on every band-level and larger entry point)
 when the budget lands.
 
+### PNG transcode and the streaming page writer (2.2)
+
+`TranscodePNG` reserves, from the header and before allocating: 2 x (row + 1)
+bytes of row buffers (a row is the image width at the PNG's bits per pixel), the
+colour and mask rows, and 1 MiB per zlib writer (two with a mask). Its two
+compressed outputs grow under the budget as they are built (twice the bytes held,
+since `append` doubles), and are released on return; the returned image is the
+caller's to account for. An Adam7 file also needs (height + 1) / 2 rows at native
+sample size, the even rows that passes 1 to 6 fill; the caller's `scratch`
+function supplies them, else they are reserved here. The pixel cap
+(`MaxEncodedImagePixels`) is checked first, each axis and the product.
+
+`BuildWriter` holds nothing of its own beyond one number per page object; the
+page being added is the caller's bytes (TranscodePNG's output, for instance),
+so the budget it was built under is the one to size. `MaxPages` caps the pages.
+
 ### Planned
 
 | What | Phase |
 |---|---|
 | Budget reservations for the other entry points' object tables and decoded streams | each stage that calls byblos (2.1 did `InspectDocument`) |
-| Budget reservations for the streaming writer's page and PNG transcode rows | 2.2 |
 | Budget reservations for archival-raster bands | 3.6 |
 | Limit tests of 9A.4 for the other entry points | each stage that calls byblos adds its own (2.1 did `InspectDocument`) |
 | Banded `ExtractPageRaster` and ceiling refusal before allocation (the 1<<26 px design point decides banding, not refusal) | 3.5 |

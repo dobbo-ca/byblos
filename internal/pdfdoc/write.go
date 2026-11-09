@@ -87,7 +87,8 @@ type EncodedImage struct {
 	ColorSpace    ColorSpace
 	Filter        string // e.g. "JBIG2Decode", "FlateDecode", "DCTDecode"
 	DecodeParms   *DecodeParms
-	Decode        []float64 // /Decode; BuildPDF writes it, ReplaceImage refuses it
+	Decode        []float64     // /Decode; BuildPDF writes it, ReplaceImage refuses it
+	SMask         *EncodedImage // BuildPDF writes it, ReplaceImage refuses it
 	Data          []byte
 }
 
@@ -142,8 +143,8 @@ func (img EncodedImage) validate() error {
 	if img.Filter == "" {
 		return fmt.Errorf("no filter named")
 	}
-	if len(img.Decode) > 0 {
-		return fmt.Errorf("a /Decode array is not carried by ReplaceImage")
+	if len(img.Decode) > 0 || img.SMask != nil {
+		return fmt.Errorf("a /Decode array or /SMask is not carried by ReplaceImage")
 	}
 	if len(img.Data) == 0 {
 		return fmt.Errorf("no data")
