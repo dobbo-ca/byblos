@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/png"
 )
@@ -90,8 +91,9 @@ func paletteBitDepth(n int) int {
 
 // pngChunk is one chunk out of walkPNGChunks.
 type pngChunk struct {
-	typ  string
-	data []byte
+	typ   string
+	data  []byte
+	crcOK bool
 }
 
 // walkPNGChunks walks pngData's chunk framing (ISO/IEC 15948), skipping the
@@ -113,7 +115,7 @@ func walkPNGChunks(pngData []byte) ([]pngChunk, error) {
 			return nil, fmt.Errorf("truncated %s chunk", typ)
 		}
 		n := int(length) // safe: length+12 <= len(p), so length fits in an int
-		chunks = append(chunks, pngChunk{typ, p[8 : 8+n]})
+		chunks = append(chunks, pngChunk{typ, p[8 : 8+n], crc32.ChecksumIEEE(p[4:8+n]) == binary.BigEndian.Uint32(p[8+n:])})
 		p = p[8+n+4:]
 		if typ == "IEND" {
 			break

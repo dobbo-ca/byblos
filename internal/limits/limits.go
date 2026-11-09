@@ -96,6 +96,9 @@ type Limits struct {
 	// and of an EncodedImage that BuildPDF writes ("encoded-image-pixels"; for
 	// BuildPDF each axis is also held to it). Default 1<<26.
 	MaxEncodedImagePixels int64
+	// MaxPNGTextBytes caps the text EXIFRotation decodes from one PNG's text
+	// chunks, as Pillow's MAX_TEXT_MEMORY ("png-text-bytes"). Default 64 MiB.
+	MaxPNGTextBytes int64
 	// MaxRasterSide and MaxRasterPixels cap the RenderPage canvas, in pixels a
 	// side ("raster-side", default 20 000) and in total ("raster-pixels",
 	// default 1<<26).
@@ -144,6 +147,7 @@ func (l Limits) InlineImages() int64       { return def(l.MaxInlineImages, l.Pag
 func (l Limits) Unresolved() int64         { return def(l.MaxUnresolved, l.PageStreamBytes()/512) }
 func (l Limits) RetainedBytes() int64      { return def(l.MaxRetainedBytes, 128<<20) }
 func (l Limits) EncodedImagePixels() int64 { return def(l.MaxEncodedImagePixels, 1<<26) }
+func (l Limits) PNGTextBytes() int64       { return def(l.MaxPNGTextBytes, 64<<20) }
 func (l Limits) RasterSide() int64         { return def(l.MaxRasterSide, 20000) }
 func (l Limits) RasterPixels() int64       { return def(l.MaxRasterPixels, 1<<26) }
 func (l Limits) RenderFontBytes() int64    { return def(l.MaxRenderFontBytes, 16<<20) }

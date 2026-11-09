@@ -700,6 +700,7 @@ func EmbedPNGLimits(data []byte, lim Limits) (EncodedImage, Resolution, error)
 func EmbedJPEG(data []byte) (EncodedImage, Resolution, error)
 func EmbedJP2(data []byte, lim Limits) (EncodedImage, Resolution, error)
 func EXIFRotation(data []byte) (int, error)
+func EXIFRotationLimits(data []byte, lim Limits) (int, error)
 var ErrMirroredOrientation error
 
 // --- page editing (G4) ---

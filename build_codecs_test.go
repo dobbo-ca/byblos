@@ -8,6 +8,7 @@ package byblos
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -521,13 +523,84 @@ func FuzzEmbedJP2(f *testing.F) {
 	})
 }
 
+// pngBeforeIDAT is smallPNG with the chunks written before its IDAT.
+func pngBeforeIDAT(t *testing.T, chunks ...[]byte) []byte {
+	t.Helper()
+	d := smallPNG(t)
+	i := bytes.Index(d, []byte("IDAT")) - 4
+	out := append([]byte(nil), d[:i]...)
+	for _, c := range chunks {
+		out = append(out, c...)
+	}
+	return append(out, d[i:]...)
+}
+
+func pngTextChunk(typ, key string, text []byte) []byte {
+	var z bytes.Buffer
+	w := zlib.NewWriter(&z)
+	w.Write(text)
+	w.Close()
+	var b bytes.Buffer
+	writeHostileChunk(&b, typ, append([]byte(key+"\x00\x00"), z.Bytes()...))
+	return b.Bytes()
+}
+
+// A file of zTXt chunks that each inflate to a megabyte must not be inflated
+// in full: unread keys are skipped, and read ones are held to
+// Limits.MaxPNGTextBytes (img2pdf: "Too much memory used in text chunks").
+func TestEXIFRotationPNGTextBomb(t *testing.T) {
+	const n = 200
+	zeros := make([]byte, 1<<20)
+	var other, wanted [][]byte
+	for i := 0; i < n; i++ {
+		other = append(other, pngTextChunk("zTXt", "Comment", zeros))
+		wanted = append(wanted, pngTextChunk("zTXt", "XML:com.adobe.xmp", zeros))
+	}
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	if r, err := EXIFRotation(pngBeforeIDAT(t, other...)); err != nil || r != 0 {
+		t.Errorf("unread keys: %d, %v", r, err)
+	}
+	_, err := EXIFRotationLimits(pngBeforeIDAT(t, wanted...), Limits{MaxPNGTextBytes: 8 << 20})
+	runtime.ReadMemStats(&m1)
+	if limitNamed(err) != "png-text-bytes" {
+		t.Errorf("err = %v; want *LimitError png-text-bytes", err)
+	}
+	if got := m1.TotalAlloc - m0.TotalAlloc; got > 64<<20 {
+		t.Errorf("allocated %d MiB for %d MiB of bomb", got>>20, n)
+	}
+}
+
+// Pillow cannot open a PNG whose pre-IDAT eXIf has a bad CRC.
+func TestEmbedPNGRefusesBadCRCBeforeIDAT(t *testing.T) {
+	var b bytes.Buffer
+	writeHostileChunk(&b, "eXIf", []byte("MM\x00\x2a\x00\x00\x00\x08\x00\x00"))
+	good := pngBeforeIDAT(t, b.Bytes())
+	if _, _, err := EmbedPNG(good); err != nil {
+		t.Fatalf("good CRC: %v", err)
+	}
+	bad := pngBeforeIDAT(t, b.Bytes())
+	bad[bytes.Index(bad, []byte("eXIf"))+4+10+1]++ // a CRC byte of the eXIf chunk
+	if _, _, err := EmbedPNG(bad); err == nil || !strings.Contains(err.Error(), "bad CRC") {
+		t.Errorf("err = %v; want bad CRC", err)
+	}
+}
+
 func FuzzEXIFRotation(f *testing.F) {
 	f.Add([]byte{0xFF, 0xD8, 0xFF, 0xE1, 0, 8, 'E', 'x', 'i', 'f', 0, 0})
 	f.Add([]byte{})
+	f.Add(append(pngSignature[:], pngTextChunk("zTXt", "XML:com.adobe.xmp", []byte("tiff:Orientation=\"6\""))...))
+	f.Add(append(pngSignature[:], pngTextChunk("iTXt", "Raw profile type exif", []byte("\n\n\n4d4d002a"))...))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		jpegDPI(data)
-		if r, err := EXIFRotation(data); err == nil && r != 0 && r != 90 && r != 180 && r != 270 {
+		var m0, m1 runtime.MemStats
+		runtime.ReadMemStats(&m0)
+		if r, err := EXIFRotationLimits(data, Limits{MaxPNGTextBytes: 1 << 20}); err == nil && r != 0 && r != 90 && r != 180 && r != 270 {
 			t.Fatalf("rotation %d", r)
+		}
+		runtime.ReadMemStats(&m1)
+		if got := m1.TotalAlloc - m0.TotalAlloc; got > 64<<20+16*uint64(len(data)) {
+			t.Fatalf("allocated %d bytes for %d", got, len(data))
 		}
 	})
 }

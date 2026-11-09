@@ -168,7 +168,15 @@ func parsePNG(data []byte) (pngInfo, error) {
 	}
 	sawIHDR := false
 	var phys pdfbuild.PNGPhys
+	sawIDAT := false
 	for _, c := range chunks {
+		// Pillow cannot open a file with a bad CRC on a chunk before the first
+		// IDAT (TranscodePNG refuses it too); one after is never read.
+		if c.typ == "IDAT" {
+			sawIDAT = true
+		} else if !sawIDAT && !c.crcOK {
+			return info, fmt.Errorf("%s chunk: bad CRC", c.typ)
+		}
 		switch c.typ {
 		case "IHDR":
 			if len(c.data) != 13 {
@@ -321,7 +329,16 @@ var ErrMirroredOrientation = errors.New("byblos: EXIF orientation is mirrored")
 // value may be any numeric type, its first element if there are several. It
 // reads the headers only.
 func EXIFRotation(data []byte) (int, error) {
-	b, err := exifBlock(data)
+	return EXIFRotationLimits(data, Limits{})
+}
+
+// EXIFRotationLimits is EXIFRotation under lim. A PNG whose Exif and XMP text
+// chunks inflate to more than lim.MaxPNGTextBytes together (with its tEXt
+// chunks) is refused as a *LimitError named png-text-bytes, as img2pdf refuses
+// it ("Too much memory used in text chunks"). Other text chunks are not
+// inflated. It takes no ctx: it reads one in-memory file's headers.
+func EXIFRotationLimits(data []byte, lim Limits) (int, error) {
+	b, err := exifBlock(data, lim)
 	if err != nil {
 		return 0, fmt.Errorf("byblos: EXIFRotation: %w", err)
 	}
@@ -425,16 +442,17 @@ var (
 // Exif APP1 segment, its XMP the last xap one. A PNG's is the last of its eXIf
 // chunks and tEXt chunks named exif, else its "Raw profile type exif" text
 // (ImageMagick's), a hex dump, which is an error if it does not parse.
-func exifBlock(data []byte) (d exifData, err error) {
+func exifBlock(data []byte, lim Limits) (d exifData, err error) {
 	if bytes.HasPrefix(data, pngSignature[:]) {
 		chunks, _ := walkPNGChunks(data)
 		var raw []byte
+		text := textBudget{max: lim.PNGTextBytes()}
 		for _, c := range chunks {
 			if c.typ == "eXIf" {
 				d.tiff, d.exif = c.data, true
 				continue
 			}
-			k, v, ok, err := pngText(c)
+			k, v, ok, err := pngText(c, &text)
 			if err != nil {
 				return d, err
 			}
@@ -481,17 +499,23 @@ func exifBlock(data []byte) (d exifData, err error) {
 
 // pngText is the key and value Pillow's PngStream gives a tEXt, zTXt or iTXt
 // chunk (ok is false for a chunk it ignores), or its error.
-func pngText(c pngChunk) (k string, v []byte, ok bool, err error) {
+func pngText(c pngChunk, text *textBudget) (k string, v []byte, ok bool, err error) {
 	key, v, found := bytes.Cut(c.data, []byte{0})
+	// Only these two compressed texts are read (exifBlock), so only they are
+	// inflated.
+	skip := string(key) != "Raw profile type exif" && string(key) != "XML:com.adobe.xmp"
 	switch c.typ {
 	case "zTXt":
+		if skip {
+			return "", nil, false, nil
+		}
 		if len(v) > 0 && v[0] != 0 {
 			return "", nil, false, fmt.Errorf("unknown compression method %d in zTXt chunk", v[0])
 		}
 		if len(v) > 0 {
 			v = v[1:]
 		}
-		v, err = inflateText(v)
+		v, err = inflateText(v, text)
 	case "iTXt":
 		// compression flag and method, language, translated key, text
 		var parts [][]byte
@@ -502,31 +526,50 @@ func pngText(c pngChunk) (k string, v []byte, ok bool, err error) {
 			return "", nil, false, nil
 		}
 		if v[0] != 0 {
-			if v[1] != 0 {
+			if skip || v[1] != 0 {
 				return "", nil, false, nil
 			}
-			parts[2], err = inflateText(parts[2])
+			parts[2], err = inflateText(parts[2], text)
+		} else {
+			err = text.add(len(parts[2]))
 		}
 		v = parts[2]
 	case "tEXt":
+		err = text.add(len(v))
 	default:
 		return "", nil, false, nil
 	}
 	return string(key), v, len(key) > 0, err
 }
 
+// textBudget is Pillow's text_memory: what a file's text chunks may hold.
+type textBudget struct{ used, max int64 }
+
+func (t *textBudget) add(n int) error {
+	if err := limits.Check("png-text-bytes", t.used+int64(n), t.max); err != nil {
+		return err
+	}
+	t.used += int64(n)
+	return nil
+}
+
 // inflateText is Pillow's _safe_zlib_decompress for text: nothing if the data
-// is corrupt, what there is if it is cut short, an error past a MiB.
-func inflateText(b []byte) ([]byte, error) {
+// is corrupt, what there is if it is cut short, an error past a MiB or past
+// what is left of the file's text budget. It reads no more than that, so a
+// bomb is never inflated.
+func inflateText(b []byte, text *textBudget) ([]byte, error) {
 	zr, err := zlib.NewReader(bytes.NewReader(b))
 	if err != nil {
 		return nil, nil
 	}
-	out, err := io.ReadAll(io.LimitReader(zr, 1<<20+1))
-	switch {
-	case len(out) > 1<<20:
+	out, err := io.ReadAll(io.LimitReader(zr, min(1<<20, text.max-text.used)+1))
+	if len(out) > 1<<20 {
 		return nil, fmt.Errorf("decompressed text is too large")
-	case err != nil && err != io.ErrUnexpectedEOF:
+	}
+	if err := text.add(len(out)); err != nil {
+		return nil, err
+	}
+	if err != nil && err != io.ErrUnexpectedEOF {
 		return nil, nil
 	}
 	return out, nil
@@ -587,7 +630,7 @@ func loadFails(t []byte) bool {
 // exifTag finds tag in IFD0 of data's Exif block (see tiffField); exif reports
 // whether there is a block at all.
 func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
-	d, _ := exifBlock(data)
+	d, _ := exifBlock(data, Limits{})
 	return tiffField(d.tiff, tag), d.exif
 }
 
