@@ -228,12 +228,10 @@ func TestOrientationConflictsAreAmbiguous(t *testing.T) {
 		0x0f, 0x01, 2, 0, 100, 0, 0, 0, 0xf0, 0xff, 0, 0,
 		0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0}
 	for name, data := range map[string][]byte{
-		"jpeg-xmp-disagree":    jpegApp1(xmp2('1', '6')),
-		"png-xmp-disagree":     pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", xmp2('1', '6')[len(xapPrefix):])),
-		"jpeg-outside-then-6":  jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], outsideThenOrient...)),
-		"png-outside-then-6":   pngBeforeIDAT(t, pngRaw("eXIf", outsideThenOrient)),
-		"jpeg-tag700-repeated": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffTag(700, 1, 1)...)),
-		"png-tag700-repeated":  pngBeforeIDAT(t, pngRaw("eXIf", tiffTag(700, 1, 1))),
+		"jpeg-xmp-disagree":   jpegApp1(xmp2('1', '6')),
+		"png-xmp-disagree":    pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", xmp2('1', '6')[len(xapPrefix):])),
+		"jpeg-outside-then-6": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], outsideThenOrient...)),
+		"png-outside-then-6":  pngBeforeIDAT(t, pngRaw("eXIf", outsideThenOrient)),
 	} {
 		o, err := EXIFOrientation(data, Limits{})
 		if err != nil || o != (Orientation{Ambiguous: true}) {
@@ -246,6 +244,37 @@ func TestOrientationConflictsAreAmbiguous(t *testing.T) {
 	}
 	if o, err := EXIFOrientation(jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffTag(700, 1)...)), Limits{}); err != nil || o != (Orientation{}) {
 		t.Errorf("single tag 700: got %+v, %v; want 0", o, err)
+	}
+}
+
+// Duplicated XMP is ambiguous only when two packets carry an orientation: two
+// without one, next to a valid Orientation=6, are Pillow's and img2pdf's 90.
+func TestOrientationDuplicateXMP(t *testing.T) {
+	noOr := append(append([]byte(nil), xapPrefix...), `<x:xmpmeta xmlns:x='adobe:ns:meta/'></x:xmpmeta>`...)
+	xml := func(o int) []byte { return xmpPacket(o)[len(xapPrefix):] }
+	noXML := noOr[len(xapPrefix):]
+	exif6 := tiffOrient(6)
+	tag700 := func(a, b []byte) []byte { // IFD0: Orientation 6, then two tag 700 entries
+		const d = 8 + 2 + 3*12 + 4
+		return ifd0(append(append([]byte(nil), a...), b...), ent(0x112, 3, 1, 6), ent(700, 1, uint32(len(a)), d), ent(700, 1, uint32(len(b)), d+uint32(len(a))))
+	}
+	for _, c := range []struct {
+		name      string
+		jpeg, png []byte
+		want      Orientation
+	}{
+		{"two-without-orientation", jpegApp1(append(exifPrefix[:6:6], exif6...), noOr, noOr), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", noXML), pngTextChunk("zTXt", "XML:com.adobe.xmp", noXML)), Orientation{Rotate: 90}},
+		{"two-disagree", jpegApp1(xmpPacket(1), xmpPacket(6)), pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(1)), pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(6))), Orientation{Ambiguous: true}},
+		{"two-agree", jpegApp1(xmpPacket(6), xmpPacket(6)), pngBeforeIDAT(t, pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(6)), pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(6))), Orientation{Ambiguous: true}},
+		{"one-disagrees-with-exif", jpegApp1(append(exifPrefix[:6:6], exif6...), xmpPacket(3), noOr), pngBeforeIDAT(t, pngRaw("eXIf", exif6), pngTextChunk("zTXt", "XML:com.adobe.xmp", xml(3)), pngTextChunk("zTXt", "XML:com.adobe.xmp", noXML)), Orientation{Ambiguous: true}},
+		{"tag700-two-without", jpegApp1(append(exifPrefix[:6:6], tag700(noXML, noXML)...)), pngBeforeIDAT(t, pngRaw("eXIf", tag700(noXML, noXML))), Orientation{Rotate: 90}},
+		{"tag700-two-disagree", jpegApp1(append(exifPrefix[:6:6], tag700(xml(1), xml(6))...)), pngBeforeIDAT(t, pngRaw("eXIf", tag700(xml(1), xml(6)))), Orientation{Ambiguous: true}},
+	} {
+		for kind, data := range map[string][]byte{"jpeg": c.jpeg, "png": c.png} {
+			if o, err := EXIFOrientation(data, Limits{}); err != nil || o != c.want {
+				t.Errorf("%s/%s: got %+v, %v; want %+v", c.name, kind, o, err, c.want)
+			}
+		}
 	}
 }
 
