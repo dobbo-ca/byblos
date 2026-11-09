@@ -731,14 +731,14 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 // against the image dictionary, then the decode's memory from byblos's budget.
 // The cap is a *LimitError, a budget held until ctx ends wraps ErrMemoryLimit,
 // and the rest are plain errors. Any other raster reserves the 4 bytes a pixel
-// image.Decode allocates for it, from its header.
+// image.Decode allocates for it, from its header, and the bytes it decodes.
 func reserveDCT(ctx context.Context, data []byte, d pdfdoc.Doc, id int) (dct.Frame, func(), error) {
 	if !bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
 		cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 		if err != nil { // image.Decode reports it
 			return dct.Frame{}, func() {}, nil
 		}
-		release, err := limits.Reserve(ctx, 4*limits.MulSat(int64(cfg.Width), int64(cfg.Height)))
+		release, err := limits.Reserve(ctx, 4*limits.MulSat(int64(cfg.Width), int64(cfg.Height))+int64(len(data)))
 		return dct.Frame{}, release, err
 	}
 	dictPixels, n := int64(-1), 0

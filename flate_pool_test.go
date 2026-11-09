@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"encoding/ascii85"
 	"errors"
 	"fmt"
+	"math/rand"
 	"runtime/debug"
 	"testing"
 	"time"
@@ -145,5 +147,92 @@ func TestFlateSoftMaskPastItsDictionaryIsRefused(t *testing.T) {
 	var le *LimitError
 	if !errors.As(err, &le) || le.Name != "image-bytes" || le.Max != 110 {
 		t.Errorf("err = %v; want *LimitError image-bytes at 110", err)
+	}
+}
+
+// pdfcpu's PNG output and RawImage's copy of it are as big as the decoded
+// pixels when they do not compress: noise that fits stays in the pool, and
+// noise that does not is refused, where a smooth page of the same size ran on.
+func TestFlateNoiseStaysInPool(t *testing.T) {
+	if raceDetector() {
+		t.Skip("the race detector inflates the heap")
+	}
+	const pool = 64 << 20
+	defer debug.SetGCPercent(debug.SetGCPercent(5))
+	for _, c := range []struct {
+		side int
+		fits bool
+	}{{1950, false}, {1600, true}} {
+		t.Run(fmt.Sprint(c.side), func(t *testing.T) {
+			noise := make([]byte, c.side*c.side*3)
+			rand.New(rand.NewSource(1)).Read(noise)
+			var z bytes.Buffer
+			zw, _ := zlib.NewWriterLevel(&z, zlib.BestSpeed)
+			zw.Write(noise)
+			zw.Close()
+			pdf := pdfFile([]string{catalog, pages1,
+				"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+				"<< /Length 30 >>\nstream\nq 612 0 0 792 0 0 cm /Im0 Do Q\nendstream",
+				fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", c.side, c.side, z.Len(), z.Bytes())}, "", 0)
+			defer SetMemoryLimit(SetMemoryLimit(pool))
+			var err error
+			peak := peakHeap(func() { _, err = ExtractPageRaster(bytes.NewReader(pdf), 1) })
+			var le *LimitError
+			if c.fits && err != nil || !c.fits && (!errors.As(err, &le) || le.Name != "memory-budget") {
+				t.Errorf("err = %v; fits = %v", err, c.fits)
+			}
+			if peak > pool {
+				t.Errorf("peak %d MiB > the %d MiB pool", peak>>20, pool>>20)
+			}
+		})
+	}
+}
+
+// A soft mask is held to its own dictionary whatever its last filter is: this
+// one declares 10x10 and is a Flate stage around 20 000 bytes of ASCII85 text.
+func TestFlateSoftMaskA85PastItsDictionaryIsRefused(t *testing.T) {
+	var a85 bytes.Buffer
+	w := ascii85.NewEncoder(&a85)
+	w.Write(make([]byte, 16_000))
+	w.Close()
+	a85.WriteString("~>")
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	zw.Write(a85.Bytes())
+	zw.Close()
+	img := zeros(t, 1_001_000)
+	pdf := pdfFile([]string{catalog, pages1,
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+		"<< /Length 30 >>\nstream\nq 612 0 0 792 0 0 cm /Im0 Do Q\nendstream",
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width 1000 /Height 1000 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 6 0 R /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(img), img),
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width 10 /Height 10 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter [/FlateDecode /ASCII85Decode] /Length %d >>\nstream\n%s\nendstream", z.Len(), z.Bytes())}, "", 0)
+	_, err := ExtractPageRaster(bytes.NewReader(pdf), 1)
+	var le *LimitError
+	if !errors.As(err, &le) || le.Name != "image-bytes" || le.Max != 284 {
+		t.Errorf("err = %v; want *LimitError image-bytes at 284", err)
+	}
+}
+
+// An Indexed sample is one index, not the base space's components: a 2400x2400
+// 8-bit image fits a 64 MiB pool with its ordinary palette, and a palette that
+// inflates past 256 entries is refused.
+func TestFlateIndexed(t *testing.T) {
+	const s = 2400
+	pdf := func(lut []byte) []byte {
+		img := zeros(t, s*(s+1))
+		return pdfFile([]string{catalog, pages1,
+			"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+			"<< /Length 30 >>\nstream\nq 612 0 0 792 0 0 cm /Im0 Do Q\nendstream",
+			fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace [/Indexed /DeviceRGB 255 6 0 R] /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", s, s, len(img), img),
+			fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(lut), lut)}, "", 0)
+	}
+	defer SetMemoryLimit(SetMemoryLimit(64 << 20))
+	if _, err := ExtractPageRaster(bytes.NewReader(pdf(zeros(t, 768))), 1); err != nil {
+		t.Errorf("ordinary palette: %v", err)
+	}
+	_, err := ExtractPageRaster(bytes.NewReader(pdf(zeros(t, 1<<20))), 1)
+	var le *LimitError
+	if !errors.As(err, &le) || le.Name != "image-bytes" || le.Max != 768 {
+		t.Errorf("err = %v; want *LimitError image-bytes at 768", err)
 	}
 }
