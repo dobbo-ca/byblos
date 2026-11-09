@@ -428,6 +428,8 @@ type ImageRef struct {
     PlacementDeg  float64         // Placement's rotation, signed, degrees CCW: atan2(b, a)
     Width, Height int             // pixel dimensions
     Bitonal       bool
+    ColorSpace    string          // /ColorSpace when a bare name ("DeviceRGB"), else ""
+    BPC           int             // /BitsPerComponent, 0 when absent
     Filter        string          // declared codec, e.g. "JBIG2Decode"; "" when none
     ObjNr         int             // the image XObject's object number, and the handle
                                   // ReplaceImages takes. Per-OBJECT: one raster painted
