@@ -1,0 +1,218 @@
+{
+ "xmp-attr6.jpg": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "xmp-elem6.jpg": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "xmp-attr8.jpg": {
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 270
+ },
+ "xmp-attr2.jpg": {
+  "error": "ExifOrientationError: Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pd"
+ },
+ "xmp-attr9.jpg": {
+  "error": "ExifOrientationError: Invalid rotation (9): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvali"
+ },
+ "xmp6-exif-noorient.jpg": {
+  "mediabox": [
+   0.0,
+   0.0,
+   48.0,
+   36.0
+  ],
+  "rotate": 90
+ },
+ "exifbad-jfif300.jpg": {
+  "error": "SyntaxError: not a TIFF file (header b'XXXXXXXX' not valid)"
+ },
+ "exifbad-nojfif.jpg": {
+  "mediabox": [
+   0.0,
+   0.0,
+   48.0,
+   36.0
+  ],
+  "rotate": 0
+ },
+ "exif-rat12-2.jpg": {
+  "mediabox": [
+   0.0,
+   0.0,
+   48.0,
+   36.0
+  ],
+  "rotate": 90
+ },
+ "jfif-short.jpg": {
+  "error": "ImageOpenError: cannot read input image (not jpeg2000). PIL: error reading image: cannot identif"
+ },
+ "png-rawprof-z6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "png-rawprof-t6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "png-text-exif6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "png-xmp6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "png-xmp2.png": {
+  "error": "ExifOrientationError: Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pd"
+ },
+ "png-exif-badhdr.png": {
+  "error": "SyntaxError: not a TIFF file (header b'XXXXXXXX' not valid)"
+ },
+ "png-exif-afteridat6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "png-phys8.png": {
+  "error": "ValueError: Truncated pHYs chunk"
+ },
+ "png-phys70.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0
+ },
+ "png-phys-unit1-then-unit0.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0
+ },
+ "png-aspect-big.png": {
+  "error": "ValueError: Page size must be between 3 and 14400 PDF units"
+ },
+ "rgba-png-rawprof-z6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-png-rawprof-t6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-png-text-exif6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-png-xmp6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-png-xmp2.png": {
+  "error": "ExifOrientationError: Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pd"
+ },
+ "rgba-png-exif-badhdr.png": {
+  "error": "SyntaxError: not a TIFF file (header b'XXXXXXXX' not valid)"
+ },
+ "rgba-png-exif-afteridat6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-png-phys8.png": {
+  "error": "ValueError: Truncated pHYs chunk"
+ },
+ "rgba-png-phys70.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0
+ },
+ "rgba-png-phys-unit1-then-unit0.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0
+ },
+ "rgba-png-aspect-big.png": {
+  "error": "ValueError: Page size must be between 3 and 14400 PDF units"
+ }
+}

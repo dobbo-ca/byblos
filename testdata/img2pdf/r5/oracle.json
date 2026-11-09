@@ -1,0 +1,218 @@
+{
+ "pre-exif6-post-exif1.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "pre-exif1-post-exif6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "pre-exifnoor-post-xmp6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "pre-exifnoor-post-text-exif6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "ztxt-exif6.png": {
+  "error": "TypeError: startswith first arg must be str or a tuple of str, not bytes"
+ },
+ "itxt-exif6.png": {
+  "error": "TypeError: startswith first arg must be str or a tuple of str, not bytes"
+ },
+ "xmp6-then-text-empty.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "text-xmp-noor-then-itxt-badutf8-6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "xmp6-then-itxt-corrupt-zlib.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "itxt-rawprof-badlang6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "post-badtype-then-exif6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "post-exif6-badcrc.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "pre-exif6-badcrc.png": {
+  "error": "ImageOpenError: cannot read input image (not jpeg2000). PIL: error reading image: cannot identif"
+ },
+ "ztxt-comment-1mib.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "rgba-pre-exif6-post-exif1.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-pre-exif1-post-exif6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "rgba-pre-exifnoor-post-xmp6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "rgba-pre-exifnoor-post-text-exif6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "rgba-ztxt-exif6.png": {
+  "error": "TypeError: startswith first arg must be str or a tuple of str, not bytes"
+ },
+ "rgba-itxt-exif6.png": {
+  "error": "TypeError: startswith first arg must be str or a tuple of str, not bytes"
+ },
+ "rgba-xmp6-then-text-empty.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-text-xmp-noor-then-itxt-badutf8-6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "rgba-xmp6-then-itxt-corrupt-zlib.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-itxt-rawprof-badlang6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ },
+ "rgba-post-badtype-then-exif6.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-post-exif6-badcrc.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90
+ },
+ "rgba-pre-exif6-badcrc.png": {
+  "error": "ImageOpenError: cannot read input image (not jpeg2000). PIL: error reading image: cannot identif"
+ },
+ "rgba-ztxt-comment-1mib.png": {
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0
+ }
+}

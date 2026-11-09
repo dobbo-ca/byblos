@@ -546,8 +546,7 @@ func pngTextChunk(typ, key string, text []byte) []byte {
 }
 
 // A file of zTXt chunks that each inflate to a megabyte must not be inflated
-// in full: unread keys are skipped, and read ones are held to
-// Limits.MaxPNGTextBytes (img2pdf: "Too much memory used in text chunks").
+// in full: every key is held to Limits.MaxPNGTextBytes (img2pdf: "Too much memory used in text chunks").
 func TestEXIFRotationPNGTextBomb(t *testing.T) {
 	const n = 200
 	zeros := make([]byte, 1<<20)
@@ -558,8 +557,8 @@ func TestEXIFRotationPNGTextBomb(t *testing.T) {
 	}
 	var m0, m1 runtime.MemStats
 	runtime.ReadMemStats(&m0)
-	if r, err := EXIFRotation(pngBeforeIDAT(t, other...)); err != nil || r != 0 {
-		t.Errorf("unread keys: %d, %v", r, err)
+	if _, err := EXIFRotation(pngBeforeIDAT(t, other...)); limitNamed(err) != "png-text-bytes" {
+		t.Errorf("unread keys: err = %v; want *LimitError png-text-bytes", err)
 	}
 	_, err := EXIFRotationLimits(pngBeforeIDAT(t, wanted...), Limits{MaxPNGTextBytes: 8 << 20})
 	runtime.ReadMemStats(&m1)

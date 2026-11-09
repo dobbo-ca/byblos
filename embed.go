@@ -27,6 +27,7 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"unicode/utf8"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfbuild"
@@ -338,43 +339,69 @@ func EXIFRotation(data []byte) (int, error) {
 // it ("Too much memory used in text chunks"). Other text chunks are not
 // inflated. It takes no ctx: it reads one in-memory file's headers.
 func EXIFRotationLimits(data []byte, lim Limits) (int, error) {
+	o, err := EXIFOrientation(data, lim)
+	return o.Rotate, err
+}
+
+// Orientation is EXIFOrientation's result. Ambiguous means the file's
+// orientation metadata cannot be trusted (see EXIFOrientation) and Rotate is 0;
+// kleio records it as ingest.orientation=ambiguous.
+type Orientation struct {
+	Rotate    int
+	Ambiguous bool
+}
+
+// EXIFOrientation is EXIFRotationLimits with the ambiguity reported. A
+// well-formed file gets img2pdf's rotation. Where its orientation metadata is
+// duplicated (several eXIf chunks, Exif texts or XMP packets in a PNG),
+// conflicting (the Exif and the XMP orientation differ), placed after a PNG's
+// IDAT, or a PNG iTXt that is not valid UTF-8, the rotation is 0 and Ambiguous
+// is set, whatever img2pdf makes of it. A defect img2pdf refuses stays an error
+// (a bad CRC before the IDAT, a zTXt or iTXt named exif, text past the budget).
+func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	b, err := exifBlock(data, lim)
 	if err != nil {
-		return 0, fmt.Errorf("byblos: EXIFRotation: %w", err)
+		return Orientation{}, fmt.Errorf("byblos: EXIFRotation: %w", err)
+	}
+	if b.ambiguous {
+		return Orientation{Ambiguous: true}, nil
 	}
 	if loadFails(b.tiff) {
 		// Pillow raises when it loads the block, and a JPEG's read at open is
 		// the one that is swallowed (and cached, XMP and all) unless the JFIF
 		// density spared it.
 		if bytes.HasPrefix(data, pngSignature[:]) || jfifDensity(data) != nil {
-			return 0, fmt.Errorf("byblos: EXIFRotation: Exif block is not a TIFF file")
+			return Orientation{}, fmt.Errorf("byblos: EXIFRotation: Exif block is not a TIFF file")
 		}
-		return 0, nil
+		return Orientation{}, nil
 	}
 	var o float64
 	if f := tiffField(b.tiff, 0x0112); f != nil {
 		var ok bool
 		if o, ok = f.num(); !ok {
-			return 0, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
+			return Orientation{}, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
 		}
 	} else if x, ok := xmpOrientation(b.xmp); ok {
 		o = float64(x)
 	} else {
-		return 0, nil
+		return Orientation{}, nil
+	}
+	if x, ok := xmpOrientation(b.xmp); ok && float64(x) != o && tiffField(b.tiff, 0x0112) != nil {
+		return Orientation{Ambiguous: true}, nil
 	}
 	switch o {
 	case 1:
-		return 0, nil
+		return Orientation{}, nil
 	case 3:
-		return 180, nil
+		return Orientation{Rotate: 180}, nil
 	case 6:
-		return 90, nil
+		return Orientation{Rotate: 90}, nil
 	case 8:
-		return 270, nil
+		return Orientation{Rotate: 270}, nil
 	case 2, 4, 5, 7:
-		return 0, ErrMirroredOrientation
+		return Orientation{}, ErrMirroredOrientation
 	default:
-		return 0, fmt.Errorf("byblos: EXIFRotation: invalid orientation %v", o)
+		return Orientation{}, fmt.Errorf("byblos: EXIFRotation: invalid orientation %v", o)
 	}
 }
 
@@ -431,6 +458,7 @@ var exifSize = [17]uint8{1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 1
 type exifData struct {
 	tiff, xmp []byte
 	exif      bool
+	ambiguous bool // see EXIFOrientation
 }
 
 var (
@@ -447,25 +475,48 @@ func exifBlock(data []byte, lim Limits) (d exifData, err error) {
 		chunks, _ := walkPNGChunks(data)
 		var raw []byte
 		text := textBudget{max: lim.PNGTextBytes()}
+		sawIDAT, nExif, nXMP := false, 0, 0
 		for _, c := range chunks {
+			// Pillow cannot open a file with a bad CRC before the first IDAT.
+			if c.typ == "IDAT" {
+				sawIDAT = true
+			} else if !sawIDAT && !c.crcOK {
+				return d, fmt.Errorf("%s chunk: bad CRC", c.typ)
+			}
 			if c.typ == "eXIf" {
 				d.tiff, d.exif = c.data, true
+				nExif++
+				d.ambiguous = d.ambiguous || sawIDAT
 				continue
 			}
 			k, v, ok, err := pngText(c, &text)
-			if err != nil {
+			if err == errBadUTF8 {
+				d.ambiguous = true
+				continue
+			} else if err != nil {
 				return d, err
 			}
 			switch {
 			case !ok:
+				continue
 			case k == "exif" && c.typ == "tEXt":
 				d.tiff, d.exif = v, true
+				nExif++
+			case k == "exif":
+				// Pillow hands img2pdf a str where it wants bytes.
+				return d, fmt.Errorf("%s chunk named exif", c.typ)
 			case k == "Raw profile type exif":
 				raw = v
+				nExif++
 			case k == "XML:com.adobe.xmp":
 				d.xmp = v
+				nXMP++
+			default:
+				continue
 			}
+			d.ambiguous = d.ambiguous || sawIDAT
 		}
+		d.ambiguous = d.ambiguous || nExif > 1 || nXMP > 1
 		if !d.exif && raw != nil {
 			d.exif = true
 			if lines := bytes.Split(raw, []byte("\n")); len(lines) > 3 {
@@ -501,21 +552,18 @@ func exifBlock(data []byte, lim Limits) (d exifData, err error) {
 // chunk (ok is false for a chunk it ignores), or its error.
 func pngText(c pngChunk, text *textBudget) (k string, v []byte, ok bool, err error) {
 	key, v, found := bytes.Cut(c.data, []byte{0})
-	// Only these two compressed texts are read (exifBlock), so only they are
-	// inflated.
-	skip := string(key) != "Raw profile type exif" && string(key) != "XML:com.adobe.xmp"
+	// Only these texts are read (exifBlock); the others are inflated to be
+	// counted against the budget, and dropped.
+	keep := string(key) == "Raw profile type exif" || string(key) == "XML:com.adobe.xmp" || string(key) == "exif"
 	switch c.typ {
 	case "zTXt":
-		if skip {
-			return "", nil, false, nil
-		}
 		if len(v) > 0 && v[0] != 0 {
 			return "", nil, false, fmt.Errorf("unknown compression method %d in zTXt chunk", v[0])
 		}
 		if len(v) > 0 {
 			v = v[1:]
 		}
-		v, err = inflateText(v, text)
+		v, err = inflateText(v, text, keep)
 	case "iTXt":
 		// compression flag and method, language, translated key, text
 		var parts [][]byte
@@ -526,21 +574,28 @@ func pngText(c pngChunk, text *textBudget) (k string, v []byte, ok bool, err err
 			return "", nil, false, nil
 		}
 		if v[0] != 0 {
-			if skip || v[1] != 0 {
+			if v[1] != 0 {
 				return "", nil, false, nil
 			}
-			parts[2], err = inflateText(parts[2], text)
+			parts[2], err = inflateText(parts[2], text, keep)
 		} else {
 			err = text.add(len(parts[2]))
 		}
 		v = parts[2]
+		// Pillow ignores an iTXt that is not UTF-8.
+		if err == nil && keep && !(utf8.Valid(parts[0]) && utf8.Valid(parts[1]) && utf8.Valid(v)) {
+			err = errBadUTF8
+		}
 	case "tEXt":
 		err = text.add(len(v))
 	default:
 		return "", nil, false, nil
 	}
-	return string(key), v, len(key) > 0, err
+	return string(key), v, len(key) > 0 && keep, err
 }
+
+// errBadUTF8 is pngText's note that an iTXt it would read is not UTF-8.
+var errBadUTF8 = errors.New("iTXt is not UTF-8")
 
 // textBudget is Pillow's text_memory: what a file's text chunks may hold.
 type textBudget struct{ used, max int64 }
@@ -557,16 +612,26 @@ func (t *textBudget) add(n int) error {
 // is corrupt, what there is if it is cut short, an error past a MiB or past
 // what is left of the file's text budget. It reads no more than that, so a
 // bomb is never inflated.
-func inflateText(b []byte, text *textBudget) ([]byte, error) {
+func inflateText(b []byte, text *textBudget, keep bool) ([]byte, error) {
 	zr, err := zlib.NewReader(bytes.NewReader(b))
 	if err != nil {
 		return nil, nil
 	}
-	out, err := io.ReadAll(io.LimitReader(zr, min(1<<20, text.max-text.used)+1))
-	if len(out) > 1<<20 {
+	lr := io.LimitReader(zr, min(1<<20, text.max-text.used)+1)
+	var out []byte
+	n := 0
+	if keep {
+		out, err = io.ReadAll(lr)
+		n = len(out)
+	} else {
+		var n64 int64
+		n64, err = io.Copy(io.Discard, lr)
+		n = int(n64)
+	}
+	if n > 1<<20 {
 		return nil, fmt.Errorf("decompressed text is too large")
 	}
-	if err := text.add(len(out)); err != nil {
+	if err := text.add(n); err != nil {
 		return nil, err
 	}
 	if err != nil && err != io.ErrUnexpectedEOF {

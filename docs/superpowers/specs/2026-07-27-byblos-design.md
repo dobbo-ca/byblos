@@ -693,7 +693,9 @@ func BuildPDFLimits(ctx context.Context, w io.Writer, pages []BuildPage, lim Lim
 // file has an Adobe APP14 segment). EmbedJP2 carries a JP2 file under
 // /JPXDecode after reading its boxes (sRGB and greyscale only). EXIFRotation
 // maps a JPEG's or PNG's EXIF orientation to BuildPage.Rotate; mirrored orientations
-// are ErrMirroredOrientation.
+// are ErrMirroredOrientation. EXIFOrientation also reports Ambiguous, set (with
+// Rotate 0) when the orientation metadata is duplicated, conflicting, after a
+// PNG's IDAT or not UTF-8 (docs/guides/orientation.md).
 type Resolution struct{ X, Y float64 }
 func EmbedPNG(data []byte) (EncodedImage, Resolution, error)
 func EmbedPNGLimits(data []byte, lim Limits) (EncodedImage, Resolution, error)
@@ -701,6 +703,8 @@ func EmbedJPEG(data []byte) (EncodedImage, Resolution, error)
 func EmbedJP2(data []byte, lim Limits) (EncodedImage, Resolution, error)
 func EXIFRotation(data []byte) (int, error)
 func EXIFRotationLimits(data []byte, lim Limits) (int, error)
+type Orientation struct{ Rotate int; Ambiguous bool }
+func EXIFOrientation(data []byte, lim Limits) (Orientation, error)
 var ErrMirroredOrientation error
 
 // --- page editing (G4) ---
