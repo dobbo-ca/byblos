@@ -170,7 +170,8 @@ field, a breach fails the call.
 
 | Cap (field) | Default | Error name | Entry point |
 |---|---|---|---|
-| PNG and `EncodedImage` width x height, and each axis of an `EncodedImage` (`MaxEncodedImagePixels`) | 1<<26 px | `encoded-image-pixels` | `EmbedPNGLimits`, `BuildPDFLimits` |
+| PNG and `EncodedImage` width x height, and each axis of an `EncodedImage` (`MaxEncodedImagePixels`) | 1<<26 px | `encoded-image-pixels` | `EmbedPNGLimits`, `EmbedJP2`, `BuildPDFLimits` |
+| Text decoded from a PNG's text chunks by `EXIFRotationLimits` (`MaxPNGTextBytes`; every zTXt and compressed iTXt is inflated and counted, only the Exif, XMP and exif ones are kept) | 64 MiB | `png-text-bytes` | `EXIFRotationLimits` |
 | `Downsample` source bounds (`MaxImagePixels`, the image cap above) | 500 000 000 px | `image-pixels` | `DownsampleLimits`, `DownsampleDeclaredBPCLimits` |
 | `RenderPage` canvas, a side (`MaxRasterSide`) and total (`MaxRasterPixels`) | 20 000 px, 1<<26 px | `raster-side`, `raster-pixels` | `RenderPageLimits` |
 | Flattened path points (`MaxPathPoints`) | 1<<21 | `path-points` | `RenderPageLimits` |

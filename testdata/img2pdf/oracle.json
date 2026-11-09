@@ -1,0 +1,1116 @@
+{
+ "cmyk-noadobe.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceCMYK",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "cmyk.jp2": {
+  "error": "only sRGB and greyscale color space is supported, got 12"
+ },
+ "cmyk.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceCMYK",
+  "decode": [
+   1.0,
+   0.0,
+   1.0,
+   0.0,
+   1.0,
+   0.0,
+   1.0,
+   0.0
+  ],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "dpi-300x150.jp2": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/JPXDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   17.28
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "dpi-300x150.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   17.28
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "dpi-300x150.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   17.28
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "exif-0.jpg": {
+  "error": "Invalid rotation (0): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-1.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-2.jpg": {
+  "error": "Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-3.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 180,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-4.jpg": {
+  "error": "Unsupported flipped rotation mode (4): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-5.jpg": {
+  "error": "Unsupported flipped rotation mode (5): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-6.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-7.jpg": {
+  "error": "Unsupported flipped rotation mode (7): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-8.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 270,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-9.jpg": {
+  "error": "Invalid rotation (9): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "exif-bad-header-jfif300.jpg": {
+  "error": "not a TIFF file (header b'XXXXXXXX' not valid)"
+ },
+ "exif-bad-header-xmp6.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-bad-header.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-bad-offset-after.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-bad-offset-first.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-dpi-300.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "exif-dpi-cm.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   13.606299,
+   10.204724
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "exif-dup-1then6.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-dup-6then1.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-float.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-ifd-outside.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-long.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-rational.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-sbyte.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-short0.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-short2.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-short3-outside.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-slong.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-sshort.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-two-segments.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "exif-unknown-type.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "gray.jp2": {
+  "bpc": 8,
+  "colorspace": "/DeviceGray",
+  "decode": [],
+  "filter": "/JPXDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "jfif-300x0.jpg": {
+  "error": "division by zero"
+ },
+ "jfif-short.jpg": {
+  "error": "cannot read input image (not jpeg2000). PIL: error reading image: cannot identify image file"
+ },
+ "jfif-two-0then300.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "jfif-two-300then0.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "jfif-two-72then300.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "jp2-3.5.jp2": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/JPXDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   864.0,
+   648.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "jp2-hden0.jp2": {
+  "error": "division by zero"
+ },
+ "jp2-hnum0.jp2": {
+  "error": "division by zero"
+ },
+ "jp2-resc12.jp2": {
+  "error": "unpack requires a buffer of 10 bytes"
+ },
+ "png-aspect-1x1.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-aspect-1x3.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-aspect-2x1.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   18.0,
+   27.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-exif-bad-header.png": {
+  "error": "not a TIFF file (header b'XXXXXXXX' not valid)"
+ },
+ "png-exif2.png": {
+  "error": "Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "png-exif6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-phys70.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-phys8.png": {
+  "error": "Truncated pHYs chunk"
+ },
+ "png-rawprofile-nothex.png": {
+  "error": "non-hexadecimal number found in fromhex() arg at position 0"
+ },
+ "png-rawprofile-t6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-rawprofile-z6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-text-exif-over-rawprofile.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-text-exif6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-x0.png": {
+  "error": "division by zero"
+ },
+ "png-xmp2.png": {
+  "error": "Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "png-xmp6-zlib.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "png-xmp6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgb.jp2": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/JPXDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "rgba-300x150.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   17.28
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-72.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   48.0,
+   36.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-aspect-1x1.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-aspect-1x3.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   9.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-aspect-2x1.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   18.0,
+   27.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-exif-bad-header.png": {
+  "error": "not a TIFF file (header b'XXXXXXXX' not valid)"
+ },
+ "rgba-png-exif2.png": {
+  "error": "Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "rgba-png-exif6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-phys70.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-phys8.png": {
+  "error": "Truncated pHYs chunk"
+ },
+ "rgba-png-rawprofile-nothex.png": {
+  "error": "non-hexadecimal number found in fromhex() arg at position 0"
+ },
+ "rgba-png-rawprofile-t6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-rawprofile-z6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-text-exif-over-rawprofile.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 0,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-text-exif6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-x0.png": {
+  "error": "division by zero"
+ },
+ "rgba-png-xmp2.png": {
+  "error": "Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "rgba-png-xmp6-zlib.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "rgba-png-xmp6.png": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/FlateDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   36.0,
+   27.0
+  ],
+  "rotate": 90,
+  "stream_is_input": false,
+  "width": 48
+ },
+ "xmp-attr2.jpg": {
+  "error": "Unsupported flipped rotation mode (2): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "xmp-attr6.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "xmp-attr8-300dpi.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 36,
+  "mediabox": [
+   0.0,
+   0.0,
+   11.52,
+   8.64
+  ],
+  "rotate": 270,
+  "stream_is_input": true,
+  "width": 48
+ },
+ "xmp-attr9.jpg": {
+  "error": "Invalid rotation (9): use --rotation=ifvalid or rotation=img2pdf.Rotation.ifvalid to ignore"
+ },
+ "xmp-elem6.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   12.0,
+   9.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "xmp6-exif-noorient.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 90,
+  "stream_is_input": true,
+  "width": 16
+ },
+ "xmp6-exif-orient1.jpg": {
+  "bpc": 8,
+  "colorspace": "/DeviceRGB",
+  "decode": [],
+  "filter": "/DCTDecode",
+  "height": 12,
+  "mediabox": [
+   0.0,
+   0.0,
+   16.0,
+   12.0
+  ],
+  "rotate": 0,
+  "stream_is_input": true,
+  "width": 16
+ }
+}

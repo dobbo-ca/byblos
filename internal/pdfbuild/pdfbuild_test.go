@@ -205,11 +205,11 @@ func TestValidatePage(t *testing.T) {
 			name: "DCTDecode unsupported colour space",
 			page: Page{Image: pdfdoc.EncodedImage{
 				Width: 2, Height: 1, BPC: 8,
-				ColorSpace: pdfdoc.ColorSpace{Name: "DeviceCMYK"},
+				ColorSpace: pdfdoc.ColorSpace{Name: "Lab"},
 				Filter:     "DCTDecode",
 				Data:       []byte{0xff, 0xd8},
 			}, WidthPt: 612, HeightPt: 792},
-			wantErr: "only DeviceGray/DeviceRGB",
+			wantErr: "only DeviceGray/DeviceRGB/DeviceCMYK",
 		},
 		{
 			name: "JBIG2Decode bad BPC",

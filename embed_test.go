@@ -65,7 +65,7 @@ func TestEmbedPNGGrayscaleRoundTripsThroughBuildPDF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmbedPNG: %v", err)
 	}
-	if dpi != 0 {
+	if dpi != (Resolution{}) {
 		t.Errorf("dpi = %v; want 0 (source PNG declares no pHYs chunk)", dpi)
 	}
 	if enc.Width != w || enc.Height != h || enc.BPC != 8 || enc.ColorSpace.Name != "DeviceGray" || enc.Filter != "FlateDecode" {
@@ -149,8 +149,8 @@ func TestEmbedPNGDeclaresDPIFromPHYs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmbedPNG: %v", err)
 	}
-	if dpi < 299 || dpi > 301 {
-		t.Errorf("dpi = %v; want ~300", dpi)
+	if dpi != (Resolution{300, 300}) {
+		t.Errorf("dpi = %v; want 300 (11811 px/m = 299.9994, as img2pdf rounds it)", dpi)
 	}
 }
 
@@ -302,7 +302,7 @@ func TestEmbedJPEGCarriesTheSourceBytesVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmbedJPEG: %v", err)
 	}
-	if dpi != 0 {
+	if dpi != (Resolution{}) {
 		t.Errorf("dpi = %v; want 0 (Go's jpeg writer emits no JFIF APP0 segment at all)", dpi)
 	}
 	if enc.Width != w || enc.Height != h || enc.BPC != 8 || enc.ColorSpace.Name != "DeviceGray" || enc.Filter != "DCTDecode" {
@@ -321,10 +321,10 @@ func TestEmbedJPEGCarriesTheSourceBytesVerbatim(t *testing.T) {
 	}
 }
 
-// TestJFIFDPIReadsTheDeclaredDensity builds a JFIF APP0 segment by hand,
+// TestJPEGDPIReadsTheDeclaredDensity builds a JFIF APP0 segment by hand,
 // since Go's own jpeg.Encode never emits one (see the comment above), and
-// checks jfifDPI reads both unit specifiers.
-func TestJFIFDPIReadsTheDeclaredDensity(t *testing.T) {
+// checks jpegDPI reads both unit specifiers.
+func TestJPEGDPIReadsTheDeclaredDensity(t *testing.T) {
 	jfif := func(units byte, density uint16) []byte {
 		seg := make([]byte, 14) // JFIF\0(5) + version(2) + units(1) + x/y density(4) + thumbnail w/h(2)
 		copy(seg, "JFIF\x00")
@@ -340,14 +340,14 @@ func TestJFIFDPIReadsTheDeclaredDensity(t *testing.T) {
 		buf.Write(seg)
 		return buf.Bytes()
 	}
-	if dpi := jfifDPI(jfif(1, 300)); dpi != 300 {
-		t.Errorf("units=1 (dpi) density=300: jfifDPI = %v; want 300", dpi)
+	if dpi := jpegDPI(jfif(1, 300)); dpi != (Resolution{300, 300}) {
+		t.Errorf("units=1 (dpi) density=300: jpegDPI = %v; want 300", dpi)
 	}
-	if dpi := jfifDPI(jfif(2, 100)); dpi < 253 || dpi > 255 {
-		t.Errorf("units=2 (dots/cm) density=100: jfifDPI = %v; want ~254", dpi)
+	if dpi := jpegDPI(jfif(2, 100)); dpi != (Resolution{254, 254}) {
+		t.Errorf("units=2 (dots/cm) density=100: jpegDPI = %v; want 254", dpi)
 	}
-	if dpi := jfifDPI(jfif(0, 4)); dpi != 0 {
-		t.Errorf("units=0 (aspect ratio only): jfifDPI = %v; want 0", dpi)
+	if dpi := jpegDPI(jfif(0, 4)); dpi != (Resolution{}) {
+		t.Errorf("units=0 (aspect ratio only): jpegDPI = %v; want 0", dpi)
 	}
 }
 

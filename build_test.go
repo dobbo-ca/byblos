@@ -419,12 +419,6 @@ func TestBuildPDFRejectsUnsupportedInput(t *testing.T) {
 			Filter:     "CCITTFaxDecode",
 			Data:       []byte{0x00},
 		}, DPI: 300}}},
-		{"jpx", []BuildPage{{Image: EncodedImage{
-			Width: 8, Height: 8, BPC: 8,
-			ColorSpace: ColorSpace{Name: "DeviceRGB"},
-			Filter:     "JPXDecode",
-			Data:       []byte{0x00},
-		}, DPI: 300}}},
 		{"lzw", []BuildPage{{Image: EncodedImage{
 			Width: 8, Height: 8, BPC: 8,
 			ColorSpace: ColorSpace{Name: "DeviceGray"},
@@ -441,12 +435,6 @@ func TestBuildPDFRejectsUnsupportedInput(t *testing.T) {
 			Width: 8, Height: 8, BPC: 8,
 			ColorSpace: ColorSpace{Name: "DeviceGray"},
 			Filter:     "JBIG2Decode",
-			Data:       []byte{0x00},
-		}, DPI: 300}}},
-		{"dct-cmyk", []BuildPage{{Image: EncodedImage{
-			Width: 8, Height: 8, BPC: 8,
-			ColorSpace: ColorSpace{Name: "DeviceCMYK"},
-			Filter:     "DCTDecode",
 			Data:       []byte{0x00},
 		}, DPI: 300}}},
 		{"no-pages", nil},
@@ -469,15 +457,6 @@ func TestBuildPDFRejectsUnsupportedInput(t *testing.T) {
 			Filter:     "FlateDecode",
 			Data:       flateEncode(t, make([]byte, 100000)),
 		}, WidthPt: 1, HeightPt: 1000}}},
-		// flate-bpc16: byblos has no producer for 16-bit-per-component data,
-		// and internal/pdfdoc's reader panics reading it back, so pdfbuild
-		// must reject it rather than write a file its own reader crashes on.
-		{"flate-bpc16", []BuildPage{{Image: EncodedImage{
-			Width: 8, Height: 8, BPC: 16,
-			ColorSpace: ColorSpace{Name: "DeviceGray"},
-			Filter:     "FlateDecode",
-			Data:       flateEncode(t, make([]byte, 128)),
-		}, DPI: 300}}},
 		// indexed-short-lookup and indexed-bad-base: an /Indexed space whose
 		// palette does not match its own declaration. Writing either produces
 		// a /ColorSpace array a reader cannot resolve; internal/pdfdoc's write
