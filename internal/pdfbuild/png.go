@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
@@ -167,8 +168,9 @@ var adam7 = [7][4]int{{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0
 
 // TranscodePNG reads the PNG on r once and returns Flate colour with a Flate
 // /SMask for alpha or tRNS (an 8-bit mask, or the PNG's 16 bits for a 16-bit
-// alpha channel), at the PNG's own depth; palette files stay /Indexed. The DPI
-// is the pHYs chunk's (0 if none).
+// alpha channel), at the PNG's own depth; palette files stay /Indexed. The
+// resolution is the pHYs chunk's, per axis (x then y), each rounded to a whole
+// number as img2pdf rounds it (0 if none).
 //
 // Limits are applied from the header before anything is allocated: the pixel
 // cap, then the budget for the row buffers and compressors. An Adam7 file needs
@@ -179,37 +181,39 @@ var adam7 = [7][4]int{{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0
 // the budget while it is built, and is released when the call returns: the
 // returned bytes are the caller's to account for.
 //
-// Every chunk's CRC is checked as it is read. Files stdlib image/png refuses
-// are refused. Cancellation is checked between rows.
-func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch func(int64) ([]byte, error)) (pdfdoc.EncodedImage, float64, error) {
+// The file is read on to IEND with every chunk's CRC checked, and inflated data
+// past the last row is refused, as image/png does: a missing IEND, a bad CRC
+// after the image or extra pixel data is an error. Cancellation is checked
+// between rows.
+func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch func(int64) ([]byte, error)) (pdfdoc.EncodedImage, float64, float64, error) {
 	var zero pdfdoc.EncodedImage
 	c := &chunkReader{br: bufio.NewReaderSize(r, 32<<10)}
 	var sig [8]byte
 	if _, err := io.ReadFull(c.br, sig[:]); err != nil || !bytes.Equal(sig[:], pngSignature) {
-		return zero, 0, fmt.Errorf("not a PNG file")
+		return zero, 0, 0, fmt.Errorf("not a PNG file")
 	}
 	var w, h, depth, ctype, interlace int
 	var plte, trns []byte
-	var dpi float64
+	var dpiX, dpiY float64
 	haveIHDR := false
 	for c.typ != "IDAT" || c.n == 0 {
 		if err := c.next(); err != nil {
-			return zero, 0, err
+			return zero, 0, 0, err
 		}
 		if !haveIHDR && c.typ != "IHDR" {
-			return zero, 0, fmt.Errorf("first chunk is %s, not IHDR", c.typ)
+			return zero, 0, 0, fmt.Errorf("first chunk is %s, not IHDR", c.typ)
 		}
 		var err error
 		switch c.typ {
 		case "IHDR":
 			var b []byte
 			if haveIHDR || c.n != 13 {
-				return zero, 0, fmt.Errorf("bad IHDR chunk")
+				return zero, 0, 0, fmt.Errorf("bad IHDR chunk")
 			}
 			if b, err = c.body(13); err == nil {
 				uw, uh := binary.BigEndian.Uint32(b), binary.BigEndian.Uint32(b[4:])
 				if uw == 0 || uh == 0 || uw > 1<<31-1 || uh > 1<<31-1 {
-					return zero, 0, fmt.Errorf("IHDR declares %dx%d", uw, uh)
+					return zero, 0, 0, fmt.Errorf("IHDR declares %dx%d", uw, uh)
 				}
 				w, h, depth, ctype, interlace, haveIHDR = int(uw), int(uh), int(b[8]), int(b[9]), int(b[12]), true
 			}
@@ -222,16 +226,17 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 		case "pHYs":
 			var b []byte
 			if b, err = c.body(9); err == nil && len(b) == 9 && b[8] == 1 {
-				dpi = float64(binary.BigEndian.Uint32(b)) * 0.0254
+				dpiX = math.RoundToEven(float64(binary.BigEndian.Uint32(b)) * 0.0254)
+				dpiY = math.RoundToEven(float64(binary.BigEndian.Uint32(b[4:])) * 0.0254)
 			}
 		case "IEND":
-			return zero, 0, fmt.Errorf("no IDAT chunk")
+			return zero, 0, 0, fmt.Errorf("no IDAT chunk")
 		case "IDAT":
 		default:
 			_, err = io.Copy(io.Discard, c)
 		}
 		if err != nil {
-			return zero, 0, err
+			return zero, 0, 0, err
 		}
 	}
 
@@ -244,22 +249,22 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 		okDepth = depth == 8 || depth == 16
 	}
 	if channels == 0 || !okDepth || interlace > 1 {
-		return zero, 0, fmt.Errorf("colour type %d at %d bits, interlace %d, is not a PNG", ctype, depth, interlace)
+		return zero, 0, 0, fmt.Errorf("colour type %d at %d bits, interlace %d, is not a PNG", ctype, depth, interlace)
 	}
 	if err := limits.Check("encoded-image-pixels", int64(max(w, h)), lim.EncodedImagePixels()); err != nil {
-		return zero, 0, err
+		return zero, 0, 0, err
 	}
 	if err := limits.Check("encoded-image-pixels", limits.MulSat(int64(w), int64(h)), lim.EncodedImagePixels()); err != nil {
-		return zero, 0, err
+		return zero, 0, 0, err
 	}
 	hasAlphaChannel := ctype == 4 || ctype == 6
 	switch {
 	case hasAlphaChannel && trns != nil:
-		return zero, 0, fmt.Errorf("tRNS on a colour type with alpha")
+		return zero, 0, 0, fmt.Errorf("tRNS on a colour type with alpha")
 	case ctype == 3 && (plte == nil || len(plte)/3 > 1<<depth || len(trns) > len(plte)/3):
-		return zero, 0, fmt.Errorf("palette missing or too long for %d bits", depth)
+		return zero, 0, 0, fmt.Errorf("palette missing or too long for %d bits", depth)
 	case ctype == 0 && trns != nil && len(trns) != 2, ctype == 2 && trns != nil && len(trns) != 6:
-		return zero, 0, fmt.Errorf("tRNS of %d bytes for colour type %d", len(trns), ctype)
+		return zero, 0, 0, fmt.Errorf("tRNS of %d bytes for colour type %d", len(trns), ctype)
 	}
 
 	bitsPP := channels * depth
@@ -287,7 +292,7 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 	}
 	release, err := limits.Reserve(ctx, held)
 	if err != nil {
-		return zero, 0, err
+		return zero, 0, 0, err
 	}
 	defer release()
 	var even []byte
@@ -295,16 +300,16 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 		if scratch == nil {
 			even = make([]byte, scratchBytes)
 		} else if even, err = scratch(scratchBytes); err != nil {
-			return zero, 0, err
+			return zero, 0, 0, err
 		} else if int64(len(even)) < scratchBytes {
-			return zero, 0, fmt.Errorf("scratch is %d bytes, %d needed", len(even), scratchBytes)
+			return zero, 0, 0, fmt.Errorf("scratch is %d bytes, %d needed", len(even), scratchBytes)
 		}
 		clear(even[:scratchBytes])
 	}
 
 	zr, err := zlib.NewReader(idat{c})
 	if err != nil {
-		return zero, 0, fmt.Errorf("IDAT: %w", noEOF(err))
+		return zero, 0, 0, fmt.Errorf("IDAT: %w", noEOF(err))
 	}
 	colorOut, maskOut := &sink{ctx: ctx}, &sink{ctx: ctx}
 	defer colorOut.release()
@@ -390,7 +395,7 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 				err = emit(row)
 			}
 			if err != nil {
-				return zero, 0, err
+				return zero, 0, 0, err
 			}
 		}
 	} else {
@@ -404,7 +409,7 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 			for j := 0; j < ph; j++ {
 				row, err := readRow(n)
 				if err != nil {
-					return zero, 0, err
+					return zero, 0, 0, err
 				}
 				dst := even[(p[1]+j*p[3])/2*rowBytes:][:rowBytes]
 				for i := 0; i < pw; i++ {
@@ -423,22 +428,38 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 			if y%2 == 0 {
 				row = even[y/2*rowBytes:][:rowBytes]
 			} else if row, err = readRow(rowBytes); err != nil {
-				return zero, 0, err
+				return zero, 0, 0, err
 			}
 			if err := emit(row); err != nil {
-				return zero, 0, err
+				return zero, 0, 0, err
 			}
 		}
 	}
-	// Past the last row: the zlib trailer, and a bad CRC on the chunk it ended in.
-	if _, err := zr.Read(make([]byte, 1)); err != nil && err != io.EOF {
-		return zero, 0, fmt.Errorf("IDAT: %w", noEOF(err))
+	// Past the last row: the zlib stream must end there (its trailer is checked),
+	// then every chunk up to IEND is read and its CRC checked, as image/png does.
+	var one [1]byte
+	if n, err := zr.Read(one[:]); n != 0 || err != io.EOF {
+		if err == nil || err == io.EOF {
+			err = fmt.Errorf("more pixel data than the image holds")
+		}
+		return zero, 0, 0, fmt.Errorf("IDAT: %w", noEOF(err))
 	}
-	if c.bad != nil {
-		return zero, 0, c.bad
+	for {
+		if _, err := io.Copy(io.Discard, c); err != nil { // the rest of this chunk, and its CRC
+			return zero, 0, 0, err
+		}
+		if c.bad != nil {
+			return zero, 0, 0, c.bad
+		}
+		if c.typ == "IEND" {
+			break
+		}
+		if err := c.next(); err != nil {
+			return zero, 0, 0, err
+		}
 	}
 	if err := cz.Close(); err != nil {
-		return zero, 0, err
+		return zero, 0, 0, err
 	}
 	img := pdfdoc.EncodedImage{Width: w, Height: h, BPC: depth, Filter: "FlateDecode", Data: colorOut.buf}
 	switch ctype {
@@ -451,7 +472,7 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 	}
 	if hasMask {
 		if err := mz.Close(); err != nil {
-			return zero, 0, err
+			return zero, 0, 0, err
 		}
 		bpc := 8
 		if hasAlphaChannel {
@@ -459,5 +480,5 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 		}
 		img.SMask = &pdfdoc.EncodedImage{Width: w, Height: h, BPC: bpc, ColorSpace: pdfdoc.ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: maskOut.buf}
 	}
-	return img, dpi, nil
+	return img, dpiX, dpiY, nil
 }

@@ -133,7 +133,8 @@ func pageBox(p BuildPage) (float64, float64, error) {
 // TranscodePNG turns a PNG that EmbedPNG cannot carry (alpha, tRNS, Adam7,
 // 16-bit) into an EncodedImage for BuildPDF: Flate colour at the PNG's depth
 // with a Flate /SMask for alpha or tRNS, read from r once and a row at a time.
-// It also returns the DPI the pHYs chunk declares (0 if none). See
+// It also returns the resolution the pHYs chunk declares, rounded per axis as
+// img2pdf rounds it (zero if none). See
 // internal/pdfbuild.TranscodePNG for the rules; in short:
 //
 // lim's pixel cap (MaxEncodedImagePixels) is checked against the IHDR before
@@ -145,14 +146,14 @@ func pageBox(p BuildPage) (float64, float64, error) {
 // output grows under the budget and is released on return; the returned bytes
 // are the caller's to account for.
 //
-// Every chunk's CRC is checked; files the standard library's image/png refuses
-// are refused. ctx is checked between rows.
-func TranscodePNG(ctx context.Context, r io.Reader, lim Limits, scratch func(n int64) ([]byte, error)) (EncodedImage, float64, error) {
-	img, dpi, err := pdfbuild.TranscodePNG(ctx, r, lim, scratch)
+// The file is read on to IEND with every chunk's CRC checked, and inflated data
+// past the last row is refused, as image/png does. ctx is checked between rows.
+func TranscodePNG(ctx context.Context, r io.Reader, lim Limits, scratch func(n int64) ([]byte, error)) (EncodedImage, Resolution, error) {
+	img, x, y, err := pdfbuild.TranscodePNG(ctx, r, lim, scratch)
 	if err != nil {
-		return EncodedImage{}, 0, fmt.Errorf("byblos: TranscodePNG: %w", err)
+		return EncodedImage{}, Resolution{}, fmt.Errorf("byblos: TranscodePNG: %w", err)
 	}
-	return img, dpi, nil
+	return img, Resolution{x, y}, nil
 }
 
 // BuildWriter writes a PDF one page at a time (BuildPDF over a slice holds

@@ -32,7 +32,10 @@ type pngSpec struct {
 	sample        func(x, y, c int) uint16
 	splitIDATAt   int // bytes of the zlib stream in the first IDAT chunk; 0 = one chunk
 	corruptCRC    bool
-	truncateAfter int // keep this many bytes of the zlib stream; 0 = all
+	truncateAfter int    // keep this many bytes of the zlib stream; 0 = all
+	extraRaw      int    // bytes of pixel data past the last row
+	trailer       []byte // chunks between the last IDAT and IEND
+	noIEND        bool
 }
 
 func (s pngSpec) channels() int {
@@ -147,7 +150,7 @@ func (s pngSpec) file(t testing.TB) []byte {
 	}
 	var z bytes.Buffer
 	zw := zlib.NewWriter(&z)
-	_, _ = zw.Write(raw)
+	_, _ = zw.Write(append(raw, make([]byte, s.extraRaw)...))
 	_ = zw.Close()
 	zs := z.Bytes()
 	if s.truncateAfter > 0 {
@@ -177,6 +180,10 @@ func (s pngSpec) file(t testing.TB) []byte {
 		idat[len(idat)-1] ^= 0xFF
 	}
 	out = append(out, idat...)
+	out = append(out, s.trailer...)
+	if s.noIEND {
+		return out
+	}
 	return append(out, chunk("IEND", nil)...)
 }
 
@@ -264,7 +271,7 @@ func nrgba64(c color.Color) color.NRGBA64 {
 	return color.NRGBA64Model.Convert(c).(color.NRGBA64)
 }
 
-func transcode(t testing.TB, file []byte, lim Limits, scratch func(int64) ([]byte, error)) (EncodedImage, float64, error) {
+func transcode(t testing.TB, file []byte, lim Limits, scratch func(int64) ([]byte, error)) (EncodedImage, Resolution, error) {
 	t.Helper()
 	return TranscodePNG(context.Background(), bytes.NewReader(file), lim, scratch)
 }
@@ -318,7 +325,7 @@ func TestTranscodePNGMatchesStdlib(t *testing.T) {
 					if err != nil {
 						t.Fatalf("TranscodePNG: %v", err)
 					}
-					if dpi < 71.9 || dpi > 72.1 { // pHYs 2835 px/m
+					if dpi != (Resolution{72, 72}) { // pHYs 2835 px/m is 72.009, which img2pdf rounds
 						t.Errorf("dpi = %v", dpi)
 					}
 					if img.Width != s.w || img.Height != s.h || img.Filter != "FlateDecode" || img.DecodeParms != nil {
@@ -513,6 +520,35 @@ func TestTranscodePNGRefusesDamage(t *testing.T) {
 	cancel()
 	if _, _, err := TranscodePNG(ctx, bytes.NewReader(full), Limits{}, nil); !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled ctx: %v", err)
+	}
+}
+
+// TestTranscodePNGRefusesWhatStdlibRefuses holds the documented contract: a file
+// image/png refuses (a missing IEND, a bad CRC after the image, more inflated
+// data than the image holds) is refused.
+func TestTranscodePNGRefusesWhatStdlibRefuses(t *testing.T) {
+	good := pngSpec{w: 2, h: 2, ctype: 6, depth: 8, sample: basicSample(8, 1)}
+	badCRC := func(typ string) []byte { c := chunk(typ, []byte("k\x00v")); c[len(c)-1] ^= 0xFF; return c }
+	for name, mod := range map[string]func(*pngSpec){
+		"no-iend":             func(s *pngSpec) { s.noIEND = true },
+		"extra-pixel-data":    func(s *pngSpec) { s.extraRaw = 9 },
+		"bad-crc-after-image": func(s *pngSpec) { s.trailer = badCRC("tEXt") },
+		"bad-crc-iend":        func(s *pngSpec) { s.noIEND, s.trailer = true, badCRC("IEND") },
+	} {
+		s := good
+		mod(&s)
+		file := s.file(t)
+		if _, err := png.Decode(bytes.NewReader(file)); err == nil {
+			t.Fatalf("%s: stdlib accepts the file", name)
+		}
+		if _, _, err := transcode(t, file, Limits{}, nil); err == nil {
+			t.Errorf("%s: accepted; stdlib refuses it", name)
+		}
+	}
+	s := good
+	s.trailer = chunk("tEXt", []byte("k\x00v")) // a good chunk after the image is fine
+	if _, _, err := transcode(t, s.file(t), Limits{}, nil); err != nil {
+		t.Errorf("good trailer chunk: %v", err)
 	}
 }
 

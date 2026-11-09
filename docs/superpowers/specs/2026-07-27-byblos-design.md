@@ -711,7 +711,7 @@ var ErrMirroredOrientation error
 // /SMask for alpha or tRNS (Adam7 de-interlaced, 16-bit kept). scratch, if not
 // nil, supplies the even-rows buffer an interlaced file needs. BuildWriter
 // writes a PDF page by page: AddPage puts each page on the writer as it is added.
-func TranscodePNG(ctx context.Context, r io.Reader, lim Limits, scratch func(n int64) ([]byte, error)) (EncodedImage, float64, error)
+func TranscodePNG(ctx context.Context, r io.Reader, lim Limits, scratch func(n int64) ([]byte, error)) (EncodedImage, Resolution, error)
 type BuildWriter struct{}
 func NewBuildWriter(w io.Writer, lim Limits) *BuildWriter
 func (bw *BuildWriter) AddPage(ctx context.Context, p BuildPage) error
