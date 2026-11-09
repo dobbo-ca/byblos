@@ -377,16 +377,22 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	}
 	var o float64
 	f, dup, bad := tiffField(b.tiff, 0x0112, false)
-	x7, xmpDup, _ := tiffField(b.tiff, 700, true)
+	x7, _, _ := tiffField(b.tiff, 700, true)
 	x1, ok1, conflict := xmpOrientation(b.xmp)
 	var x2 int
 	var ok2 bool
-	if x7 != nil {
-		var c2 bool
-		x2, ok2, c2 = xmpOrientation(x7.val)
-		conflict = conflict || c2
+	n7 := 0
+	for p := x7; p != nil; p = p.prev {
+		v, ok, c := xmpOrientation(p.val)
+		conflict = conflict || c
+		if p == x7 {
+			x2, ok2 = v, ok
+		}
+		if ok {
+			n7++
+		}
 	}
-	if dup || bad || xmpDup || conflict {
+	if dup || bad || n7 > 1 || n7 == 1 && !ok2 || conflict {
 		return Orientation{Ambiguous: true}, nil
 	}
 	if ok2 {
@@ -435,9 +441,10 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 // exifField is one IFD0 entry of an Exif block: typ is its TIFF type and val the
 // bytes of its values.
 type exifField struct {
-	typ uint16
-	val []byte
-	bo  binary.ByteOrder
+	typ  uint16
+	val  []byte
+	bo   binary.ByteOrder
+	prev *exifField // the entry of the same tag before this one, if it was read
 }
 
 // num is f's first value as the number Pillow hands img2pdf, which compares it with the
@@ -486,7 +493,23 @@ type exifData struct {
 	tiff, xmp []byte
 	exif      bool
 	ambiguous bool // see EXIFOrientation
+	xmpOri    int  // XMP packets that carry an orientation
+	xmpLast   bool // the last packet (xmp) is one of them
 }
+
+// addXMP records one XMP packet. xmp is the last; only packets that carry an
+// orientation count towards ambiguity (xmpAmbiguous).
+func (d *exifData) addXMP(v []byte) {
+	_, d.xmpLast, _ = xmpOrientation(v)
+	if d.xmpLast {
+		d.xmpOri++
+	}
+	d.xmp = v
+}
+
+// xmpAmbiguous: two packets carry an orientation, or one does and a later
+// packet (the one Pillow reads) does not.
+func (d *exifData) xmpAmbiguous() bool { return d.xmpOri > 1 || d.xmpOri == 1 && !d.xmpLast }
 
 var (
 	exifPrefix = []byte("Exif\x00\x00")
@@ -502,7 +525,7 @@ func exifBlock(data []byte, lim Limits) (d exifData, err error) {
 		chunks, _ := walkPNGChunks(data)
 		var raw []byte
 		text := textBudget{max: lim.PNGTextBytes()}
-		sawIDAT, nExif, nXMP := false, 0, 0
+		sawIDAT, nExif := false, 0
 		for _, c := range chunks {
 			// Pillow cannot open a file with a bad CRC before the first IDAT.
 			if c.typ == "IDAT" {
@@ -536,14 +559,13 @@ func exifBlock(data []byte, lim Limits) (d exifData, err error) {
 				raw = v
 				nExif++
 			case k == "XML:com.adobe.xmp":
-				d.xmp = v
-				nXMP++
+				d.addXMP(v)
 			default:
 				continue
 			}
 			d.ambiguous = d.ambiguous || sawIDAT
 		}
-		d.ambiguous = d.ambiguous || nExif > 1 || nXMP > 1
+		d.ambiguous = d.ambiguous || nExif > 1 || d.xmpAmbiguous()
 		if !d.exif && raw != nil {
 			d.exif = true
 			if lines := bytes.Split(raw, []byte("\n")); len(lines) > 3 {
@@ -556,7 +578,7 @@ func exifBlock(data []byte, lim Limits) (d exifData, err error) {
 		// Pillow joins every Exif segment into one block, a later one after the
 		// first's end. ponytail: capped at 1 MiB so a file of nothing but APP1
 		// segments cannot make a copy of itself; a real block is under 64 KiB.
-		nExif, nXMP := 0, 0
+		nExif := 0
 		jpegSegment(data, func(m byte, p []byte) bool {
 			if m == 0xE1 && bytes.HasPrefix(p, exifPrefix) {
 				nExif++
@@ -566,12 +588,11 @@ func exifBlock(data []byte, lim Limits) (d exifData, err error) {
 					d.tiff = append(d.tiff[:len(d.tiff):len(d.tiff)], p[6:]...)
 				}
 			} else if m == 0xE1 && bytes.HasPrefix(p, xapPrefix) {
-				nXMP++
-				d.xmp = p[len(xapPrefix):]
+				d.addXMP(p[len(xapPrefix):])
 			}
 			return false
 		})
-		d.ambiguous = nExif > 1 || nXMP > 1
+		d.ambiguous = nExif > 1 || d.xmpAmbiguous()
 	}
 	for bytes.HasPrefix(d.tiff, exifPrefix) {
 		d.tiff = d.tiff[6:]
@@ -792,7 +813,7 @@ func tiffField(t []byte, tag uint16, lost bool) (f *exifField, dup, bad bool) {
 			val = t[off:]
 		}
 		if match {
-			f = &exifField{typ, val[:uint64(exifSize[typ])*uint64(count)], bo}
+			f = &exifField{typ, val[:uint64(exifSize[typ])*uint64(count)], bo, f}
 		}
 	}
 	return f, dup, bad
