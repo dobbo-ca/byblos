@@ -152,6 +152,18 @@ func exifSeg(vals ...uint16) []byte {
 	return append(append([]byte(nil), exifPrefix...), tiffOrient(vals...)...)
 }
 
+// tiffDup is a little-endian TIFF whose IFD0 holds Orientation SHORT=6 and then a
+// second 0x0112 entry of the given type, count and value/offset.
+func tiffDup(typ uint16, count, val uint32) []byte {
+	b := []byte{'I', 'I', 42, 0, 8, 0, 0, 0, 2, 0}
+	b = append(b, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0)
+	b = append(b, 0x12, 0x01)
+	b = binary.LittleEndian.AppendUint16(b, typ)
+	b = binary.LittleEndian.AppendUint32(b, count)
+	b = binary.LittleEndian.AppendUint32(b, val)
+	return append(b, 0, 0, 0, 0)
+}
+
 // Repeated orientation metadata is ambiguous whatever the values or the order
 // (img2pdf follows Pillow and rotates by one of them).
 func TestOrientationRepeatedSourcesAreAmbiguous(t *testing.T) {
@@ -165,6 +177,12 @@ func TestOrientationRepeatedSourcesAreAmbiguous(t *testing.T) {
 		"jpeg-dup-tag-6-1": jpegApp1(exifSeg(6, 1)),
 		"jpeg-dup-tag-6-6": jpegApp1(exifSeg(6, 6)),
 		"png-dup-tag":      pngBeforeIDAT(t, pngRaw("eXIf", tiffOrient(1, 6))),
+		// a repeat Pillow would skip (unknown type, no values, values outside the block) still counts.
+		"jpeg-dup-badtype": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffDup(99, 1, 0)...)),
+		"jpeg-dup-count0":  jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffDup(3, 0, 0)...)),
+		"jpeg-dup-outside": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffDup(3, 100, 0xfff0)...)),
+		"png-dup-badtype":  pngBeforeIDAT(t, pngRaw("eXIf", tiffDup(99, 1, 0))),
+		"png-dup-count0":   pngBeforeIDAT(t, pngRaw("eXIf", tiffDup(3, 0, 0))),
 	} {
 		o, err := EXIFOrientation(data, Limits{})
 		if err != nil || o != (Orientation{Ambiguous: true}) {

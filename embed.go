@@ -711,7 +711,7 @@ func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 // tiffField finds tag in IFD0 of the Exif block t, loaded as Pillow loads it
 // (img2pdf and the JPEG resolution both go through it): a block without a
 // TIFF header or with IFD0 out of range has no tags; entries are read in order
-// and the last of a repeated tag wins (dup reports the repeat); an entry of a type Pillow does not know
+// and the last of a repeated tag wins (dup reports any repeated entry of tag, skipped or not); an entry of a type Pillow does not know
 // or with no values is skipped; an entry whose values lie outside the block
 // ends the read, keeping the tags before it, as does an IFD0 cut short. f is
 // nil when the tag is absent.
@@ -729,7 +729,11 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 		return nil, false
 	}
 	n := bo.Uint16(t[ifd:])
+	seen := false
 	for e := ifd + 2; n > 0 && e+12 <= uint64(len(t)); e, n = e+12, n-1 {
+		if bo.Uint16(t[e:]) == tag {
+			dup, seen = dup || seen, true // a repeat counts even if Pillow would skip the entry
+		}
 		typ, count := bo.Uint16(t[e+2:]), bo.Uint32(t[e+4:])
 		if int(typ) >= len(exifSize) || exifSize[typ] == 0 || count == 0 {
 			continue
@@ -743,7 +747,6 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 			val = t[off:]
 		}
 		if bo.Uint16(t[e:]) == tag {
-			dup = dup || f != nil
 			f = &exifField{typ, val[:uint64(exifSize[typ])*uint64(count)], bo}
 		}
 	}
