@@ -12,6 +12,7 @@ import (
 	"compress/zlib"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -34,7 +35,7 @@ type chunkReader struct {
 	crc uint32
 	n   int64 // body bytes left in the current chunk
 	typ string
-	bad error // a CRC mismatch seen while reading a body: the reader above may never read on to see it
+	bad error // a CRC mismatch seen while reading a body: the reader above may never read on to see it; only a chunk before the first IDAT is held to it
 }
 
 func (c *chunkReader) next() error {
@@ -181,10 +182,13 @@ var adam7 = [7][4]int{{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0
 // the budget while it is built, and is released when the call returns: the
 // returned bytes are the caller's to account for.
 //
-// The file is read on to IEND with every chunk's CRC checked, and inflated data
-// past the last row is refused, as image/png does: a missing IEND, a bad CRC
-// after the image or extra pixel data is an error. Cancellation is checked
-// between rows.
+// The file is read as far as Pillow reads it for img2pdf, and no further: the
+// CRC of every chunk before the first IDAT is checked, but not an IDAT's, and
+// once the last row is out nothing after it is looked at. Inflated data past the
+// last row is ignored (as is a zlib trailer cut short, so a missing IEND, a bad
+// CRC after the image and extra pixel data are all accepted, as img2pdf accepts
+// them); a bad zlib checksum on a stream that ends with the last row is an
+// error. Cancellation is checked between rows.
 func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch func(int64) ([]byte, error)) (pdfdoc.EncodedImage, float64, float64, error) {
 	var zero pdfdoc.EncodedImage
 	c := &chunkReader{br: bufio.NewReaderSize(r, 32<<10)}
@@ -234,6 +238,9 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 		case "IDAT":
 		default:
 			_, err = io.Copy(io.Discard, c)
+		}
+		if err == nil {
+			err = c.bad
 		}
 		if err != nil {
 			return zero, 0, 0, err
@@ -435,28 +442,11 @@ func TranscodePNG(ctx context.Context, r io.Reader, lim limits.Limits, scratch f
 			}
 		}
 	}
-	// Past the last row: the zlib stream must end there (its trailer is checked),
-	// then every chunk up to IEND is read and its CRC checked, as image/png does.
+	// Past the last row: more inflated data, or a zlib trailer cut short, is
+	// ignored, as Pillow ignores it; a stream that ends here must check out.
 	var one [1]byte
-	if n, err := zr.Read(one[:]); n != 0 || err != io.EOF {
-		if err == nil || err == io.EOF {
-			err = fmt.Errorf("more pixel data than the image holds")
-		}
-		return zero, 0, 0, fmt.Errorf("IDAT: %w", noEOF(err))
-	}
-	for {
-		if _, err := io.Copy(io.Discard, c); err != nil { // the rest of this chunk, and its CRC
-			return zero, 0, 0, err
-		}
-		if c.bad != nil {
-			return zero, 0, 0, c.bad
-		}
-		if c.typ == "IEND" {
-			break
-		}
-		if err := c.next(); err != nil {
-			return zero, 0, 0, err
-		}
+	if n, err := zr.Read(one[:]); n == 0 && err != nil && err != io.EOF && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return zero, 0, 0, fmt.Errorf("IDAT: %w", err)
 	}
 	if err := cz.Close(); err != nil {
 		return zero, 0, 0, err

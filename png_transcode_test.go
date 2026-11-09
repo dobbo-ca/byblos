@@ -34,8 +34,11 @@ type pngSpec struct {
 	corruptCRC    bool
 	truncateAfter int    // keep this many bytes of the zlib stream; 0 = all
 	extraRaw      int    // bytes of pixel data past the last row
+	pre           []byte // chunks between pHYs and the first IDAT
 	trailer       []byte // chunks between the last IDAT and IEND
 	noIEND        bool
+	dropTail      int // bytes cut from the end of the zlib stream
+	badAdler      bool
 }
 
 func (s pngSpec) channels() int {
@@ -156,6 +159,10 @@ func (s pngSpec) file(t testing.TB) []byte {
 	if s.truncateAfter > 0 {
 		zs = zs[:s.truncateAfter]
 	}
+	zs = zs[:len(zs)-s.dropTail]
+	if s.badAdler {
+		zs[len(zs)-1] ^= 1
+	}
 	ihdr := binary.BigEndian.AppendUint32(binary.BigEndian.AppendUint32(nil, uint32(s.w)), uint32(s.h))
 	il := byte(0)
 	if s.interlaced {
@@ -171,6 +178,7 @@ func (s pngSpec) file(t testing.TB) []byte {
 		out = append(out, chunk("tRNS", s.trns)...)
 	}
 	out = append(out, chunk("pHYs", []byte{0, 0, 0x0B, 0x13, 0, 0, 0x0B, 0x13, 1})...)
+	out = append(out, s.pre...)
 	if n := s.splitIDATAt; n > 0 && n < len(zs) {
 		out = append(out, chunk("IDAT", zs[:n])...)
 		zs = zs[n:]
@@ -502,8 +510,10 @@ func TestTranscodePNGRefusesDamage(t *testing.T) {
 			s.truncateAfter = 20
 			return s.file(t)
 		}(),
-		"bad-crc": func() []byte { s := good; s.corruptCRC = true; return s.file(t) }(),
-		"no-idat": append(append([]byte(nil), full[:33]...), chunk("IEND", nil)...),
+		"bad-crc-before-image":         func() []byte { s := good; s.pre = badCRC("tEXt"); return s.file(t) }(),
+		"bad-crc-unknown-before-image": func() []byte { s := good; s.pre = badCRC("zzZz"); return s.file(t) }(),
+		"bad-adler":                    func() []byte { s := good; s.badAdler = true; return s.file(t) }(),
+		"no-idat":                      append(append([]byte(nil), full[:33]...), chunk("IEND", nil)...),
 		"bad-depth": func() []byte {
 			s := good
 			s.depth = 4 // RGBA does not allow 4 bits
@@ -523,33 +533,48 @@ func TestTranscodePNGRefusesDamage(t *testing.T) {
 	}
 }
 
-// TestTranscodePNGRefusesWhatStdlibRefuses holds the documented contract: a file
-// image/png refuses (a missing IEND, a bad CRC after the image, more inflated
-// data than the image holds) is refused.
-func TestTranscodePNGRefusesWhatStdlibRefuses(t *testing.T) {
+// TestTranscodePNGAcceptsWhatImg2pdfAccepts holds the contract set by Pillow's
+// reading, which img2pdf inherits: once the last row is out nothing after it is
+// looked at, and an IDAT's CRC is not checked, so a file img2pdf converts is
+// transcoded to the same bytes as its clean twin even though image/png refuses it.
+func TestTranscodePNGAcceptsWhatImg2pdfAccepts(t *testing.T) {
 	good := pngSpec{w: 2, h: 2, ctype: 6, depth: 8, sample: basicSample(8, 1)}
-	badCRC := func(typ string) []byte { c := chunk(typ, []byte("k\x00v")); c[len(c)-1] ^= 0xFF; return c }
+	want, _, err := transcode(t, good.file(t), Limits{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, mod := range map[string]func(*pngSpec){
-		"no-iend":             func(s *pngSpec) { s.noIEND = true },
-		"extra-pixel-data":    func(s *pngSpec) { s.extraRaw = 9 },
-		"bad-crc-after-image": func(s *pngSpec) { s.trailer = badCRC("tEXt") },
-		"bad-crc-iend":        func(s *pngSpec) { s.noIEND, s.trailer = true, badCRC("IEND") },
+		"no-iend":              func(s *pngSpec) { s.noIEND = true },
+		"truncated-iend":       func(s *pngSpec) { s.noIEND, s.trailer = true, chunk("IEND", nil)[:8] },
+		"extra-pixel-data":     func(s *pngSpec) { s.extraRaw = 9 },
+		"bad-crc-after-image":  func(s *pngSpec) { s.trailer = badCRC("tEXt") },
+		"bad-crc-iend":         func(s *pngSpec) { s.noIEND, s.trailer = true, badCRC("IEND") },
+		"bad-crc-idat":         func(s *pngSpec) { s.corruptCRC = true },
+		"three-bytes-after":    func(s *pngSpec) { s.noIEND, s.trailer = true, []byte{0, 0, 0} },
+		"zlib-trailer-cut":     func(s *pngSpec) { s.dropTail = 2 },
+		"zlib-trailer-missing": func(s *pngSpec) { s.dropTail = 4 },
 	} {
 		s := good
 		mod(&s)
 		file := s.file(t)
-		if _, err := png.Decode(bytes.NewReader(file)); err == nil {
-			t.Fatalf("%s: stdlib accepts the file", name)
+		if name != "zlib-trailer-cut" && name != "zlib-trailer-missing" && name != "three-bytes-after" && name != "bad-crc-idat" {
+			if _, err := png.Decode(bytes.NewReader(file)); err == nil {
+				t.Fatalf("%s: stdlib accepts the file", name)
+			}
 		}
-		if _, _, err := transcode(t, file, Limits{}, nil); err == nil {
-			t.Errorf("%s: accepted; stdlib refuses it", name)
+		got, _, err := transcode(t, file, Limits{}, nil)
+		if err != nil {
+			t.Errorf("%s: %v; img2pdf converts it", name, err)
+		} else if !bytes.Equal(got.Data, want.Data) {
+			t.Errorf("%s: transcoded to other bytes than the clean file", name)
 		}
 	}
-	s := good
-	s.trailer = chunk("tEXt", []byte("k\x00v")) // a good chunk after the image is fine
-	if _, _, err := transcode(t, s.file(t), Limits{}, nil); err != nil {
-		t.Errorf("good trailer chunk: %v", err)
-	}
+}
+
+func badCRC(typ string) []byte {
+	c := chunk(typ, []byte("k\x00v"))
+	c[len(c)-1] ^= 0xFF
+	return c
 }
 
 // --- streaming page writer -----------------------------------------------------
