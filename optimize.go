@@ -130,9 +130,10 @@ func OptimizeContext(ctx context.Context, w io.Writer, r io.ReadSeeker, opts Opt
 	return OptimizeLimits(ctx, w, r, opts, Limits{})
 }
 
-// OptimizeLimits is OptimizeContext under lim, which bounds the content walk
-// of the RecompressJPEG pass (q-depth, form-depth, form-invocations and the
-// rest) as a *LimitError.
+// OptimizeLimits is OptimizeContext under lim: the input is opened under the
+// parse caps whatever opts are set, the Linearize re-open uses them too, and
+// the RecompressJPEG pass adds the content-walk caps (q-depth, form-depth,
+// form-invocations and the rest). A breach is a *LimitError.
 func OptimizeLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, opts OptimizeOptions, lim Limits) error {
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -149,6 +150,12 @@ func OptimizeLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, opts Opti
 		return fmt.Errorf("byblos: optimize: read: %w", err)
 	}
 	in := origIn
+
+	// Gate every option on the parse caps: pdfdoc.Optimize below is pdfcpu
+	// alone and enforces none of them.
+	if _, err := pdfdoc.OpenLimits(context.Background(), bytes.NewReader(origIn), lim); err != nil {
+		return fmt.Errorf("byblos: optimize: %w", err)
+	}
 
 	// applied maps a 0-based page index to the "jpeg-recompress-<quality>"
 	// entries it earned. It is built from the ORIGINAL bytes, but discarded
@@ -255,7 +262,7 @@ func OptimizeLimits(ctx context.Context, w io.Writer, r io.ReadSeeker, opts Opti
 		// correctness requirement for the born-digital path, not a size
 		// optimization, so there is nothing to trade.
 		var out bytes.Buffer
-		if err := pdfdoc.Linearize(bytes.NewReader(candidate.Bytes()), &out); err != nil {
+		if err := pdfdoc.Linearize(bytes.NewReader(candidate.Bytes()), &out, lim); err != nil {
 			return fmt.Errorf("byblos: optimize: %w", err)
 		}
 		if _, err := w.Write(out.Bytes()); err != nil {

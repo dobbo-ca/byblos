@@ -185,3 +185,27 @@ func TestStampTextLayerLimitsRefusesByName(t *testing.T) {
 		t.Errorf("StampTextLayerLimits: err = %v; want *LimitError objects", err)
 	}
 }
+
+// Every Optimize option opens the input under the caps, and the Linearize
+// re-open keeps a raised cap.
+func TestOptimizeLimitsParseCapsApplyToEveryOption(t *testing.T) {
+	in := contentPDF("q Q")
+	for _, o := range []OptimizeOptions{{}, {Linearize: true}} {
+		err := OptimizeLimits(context.Background(), io.Discard, bytes.NewReader(in), o, Limits{MaxObjects: 1})
+		if limitNamed(err) != "objects" {
+			t.Errorf("%+v: err = %v; want *LimitError objects", o, err)
+		}
+	}
+}
+
+func TestBuildFromPagesLimitsRefusesByName(t *testing.T) {
+	pages := []PageSource{{Source: bytes.NewReader(contentPDF("q Q")), Page: 1}}
+	if err := BuildFromPagesLimits(context.Background(), io.Discard, pages, Limits{}); err != nil {
+		t.Fatalf("defaults: %v", err)
+	}
+	pages = []PageSource{{Source: bytes.NewReader(contentPDF("q Q")), Page: 1}}
+	err := BuildFromPagesLimits(context.Background(), io.Discard, pages, Limits{MaxObjects: 1})
+	if limitNamed(err) != "objects" {
+		t.Errorf("BuildFromPagesLimits: err = %v; want *LimitError objects", err)
+	}
+}

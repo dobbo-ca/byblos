@@ -226,10 +226,13 @@ func rasterSize(box content.Box, scale float64, lim limits.Limits) (w, h int, fw
 	if v := math.Ceil(max(fw, fh)); v > float64(lim.RasterSide()) {
 		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-side", Got: satInt64(v), Max: lim.RasterSide()}
 	}
-	if v := math.Ceil(fw * fh); v > float64(lim.RasterPixels()) {
-		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-pixels", Got: satInt64(v), Max: lim.RasterPixels()}
+	cw, ch := math.Ceil(fw), math.Ceil(fh)
+	// The canvas is cw x ch, not fw*fh, and image.NewRGBA panics when
+	// cw*ch*4 overflows int, which a caller-raised cap can admit.
+	if p := cw * ch; p > float64(lim.RasterPixels()) || p*4 >= 0x1p62 {
+		return 0, 0, 0, 0, &limits.LimitError{Name: "raster-pixels", Got: satInt64(p), Max: lim.RasterPixels()}
 	}
-	return int(math.Ceil(fw)), int(math.Ceil(fh)), fw, fh, nil
+	return int(cw), int(ch), fw, fh, nil
 }
 
 // satInt64 converts v to int64, saturating: float64(MaxInt64) is 2^63, itself

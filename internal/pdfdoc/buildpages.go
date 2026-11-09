@@ -67,10 +67,12 @@ package pdfdoc
 // 60. A caller must content-address an export rather than rewrite a key.
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
 
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -100,7 +102,7 @@ type PageSource struct {
 //
 // It writes nothing to w unless the whole document was built.
 func BuildFromPages(w io.Writer, pages []PageSource) error {
-	return BuildFromPagesWithProperties(w, pages, nil)
+	return BuildFromPagesWithProperties(w, pages, nil, limits.Limits{})
 }
 
 // BuildFromPagesWithProperties is BuildFromPages, with properties merged into
@@ -133,13 +135,13 @@ func BuildFromPages(w io.Writer, pages []PageSource) error {
 // already claimed by carryInfo's allowlist or by the /Producer stamp is
 // silently overwritten by properties, last-write-wins; nothing today passes
 // one of those keys here.
-func BuildFromPagesWithProperties(w io.Writer, pages []PageSource, properties map[string]string) (err error) {
+func BuildFromPagesWithProperties(w io.Writer, pages []PageSource, properties map[string]string, lim limits.Limits) (err error) {
 	defer catchPanic("build from pages", &err)
 
 	if err := ValidatePages(pages); err != nil {
 		return err
 	}
-	sources, err := openSources(pages)
+	sources, err := openSources(pages, lim)
 	if err != nil {
 		return err
 	}
@@ -229,13 +231,13 @@ func ValidatePages(pages []PageSource) error {
 // same document" means by handing back the same reader. A dynamic type that is
 // not comparable panics on the map insert; catchPanic in BuildFromPages turns
 // that into ErrMalformed rather than taking the process down.
-func openSources(pages []PageSource) (map[io.ReadSeeker]*doc, error) {
+func openSources(pages []PageSource, lim limits.Limits) (map[io.ReadSeeker]*doc, error) {
 	out := map[io.ReadSeeker]*doc{}
 	for i, p := range pages {
 		if _, done := out[p.Source]; done {
 			continue
 		}
-		opened, err := Open(p.Source)
+		opened, err := OpenLimits(context.Background(), p.Source, lim)
 		if err != nil {
 			return nil, fmt.Errorf("byblos/pdfdoc: build from pages: page %d source: %w", i+1, err)
 		}

@@ -142,8 +142,12 @@ returns an error wrapping `ErrPassword`.
 | Retained bytes | One account per page walk (`Limits.MaxRetainedBytes`, `retained-bytes`, permanent). Everything the walk keeps is charged to it before it is kept: each `Paint` (192 bytes), `TextShow` (152) plus the length of its font name (`Tf` copies the name on every call), image and inline-image `Placement` (136), plus a 32-byte clip box when the record has a clip; plus, for a `Paint`, the length of each colour's space name and 8 bytes per colour component of both its fill and stroke (`cs`, `sc` and the colour operators build these fresh on every walk of a form); each unresolved `Do` name (16 plus its length), each image placement's name length; and a text string's length unless it aliases the stream. A string with no escape is a slice of the buffer being walked, so every draw of one form shares the form's one decoded buffer and costs only its record; an escaped or hex string is a fresh copy and is charged. Sizes are `unsafe.Sizeof`, not measurements; slice growth slack is in the margin of the share below, not in the charge. Default 128 MiB, which holds the record caps at their maximum (65 536 text shows and 262 144 paints, about 66 MiB). Under a budget it is reserved with the document: a fifth of what the table and file leave, so the decode slot is a fifth smaller than before, and a page needing more is refused (300 MiB holds the maximum). It is the walk's cost per page only; so are the resource scopes a form `Do` appends, which `Page` resets (a `Page.Scope` is valid until the next `Page` call), so they never grow with the page count; the document-level lists `InspectDocument` keeps (the image records of all pages) stay under the `images` cap and the image-record reservation below. Before it, a 4.6 KB file drawing a form of one 1 MiB string 4096 times held 1 GB live at 32 MiB, and 300 000 paints plus 70 000 text shows kept about 110 MiB whatever the budget. |
 | Image records | `InspectDocument` records every image of every page until it returns, 144 bytes each (`TestImageRecordBytes`). Under a budget the records are reserved: an eighth of what the table and file leave, and the images and inline images of all pages together are held to half of that count each, so pages sharing one content stream cannot reach the unlowered 524 288 (75 MB) under a 32 MiB budget; about 14 500 each there. Past it, `*LimitError{images}`. Each record also keeps its `/Decode` numbers: a direct array is part of the image's own dictionary, which the parse cap already counts, and an indirect array is converted once per object (`numberArray`) and shared by every image naming it, so K images over one M-entry array hold one 8*M copy, not K. Before that, 1 000 images over one 100 000-entry array held 770 MiB at a 300 MiB budget. |
 
-The caps are checked in `Open`, so every entry point that parses a document
-enforces them with their defaults. Only `InspectDocument` reserves from the
+The caps are checked in `Open`, so every entry point that opens a document
+through it enforces them, at their defaults or at the `Limits` its `...Limits`
+form takes. `ReadProvenance`, `WriteProvenance` and the rewrite inside
+`Optimize` parse through pdfcpu directly and enforce only pdfcpu's own caps
+(the fork's, below); `OptimizeLimits` runs an `OpenLimits` gate first, so the
+byblos caps still apply to its input. Only `InspectDocument` reserves from the
 budget; the others reserve nothing yet (see Planned).
 
 ### The pdfcpu fork
@@ -166,7 +170,7 @@ constant, so nothing changes for a caller that passes `Limits{}`. A breach is a
 permanent `*LimitError` with the name shown, checked from the header or the
 page box before the allocation it guards. The content-walk caps reach the walk
 through the `Limits` of `InspectDocument`, `ExtractPageRasterLimits` and
-`OptimizeLimits` (its JPEG pass); the other entry points that walk a page use
+`OptimizeLimits` (its JPEG pass); `BuildFromPagesLimits` opens every source under the parse caps; the other entry points that walk a page use
 the defaults. `InspectDocument` keeps a q-depth, form-depth or form-invocations
 breach at the default a page diagnostic, as before; once the caller sets the
 field, a breach fails the call.
@@ -215,7 +219,7 @@ that already meets the "refuse before allocating" rule end to end.
 `ExtractPageRasterContext` (`extract.go:437`), `OptimizeContext`
 (`optimize.go:129`), `StampTextLayerContext` (`stamp.go:185`, `StampTextLayerLimits` for caps),
 `BuildPDFContext` (`build.go:70`), `BuildFromPagesContext`
-(`editpages.go:143`), `ReplaceImagesContext` (`substitute.go:99`),
+(`editpages.go:143`, `BuildFromPagesLimits` for caps), `ReplaceImagesContext` (`substitute.go:99`),
 `RecordExtractionContext` (`provenance.go:450`, `RecordExtractionLimits` for caps), `WriteProvenanceContext`
 (`provenance.go:366`), `ReadProvenanceContext` (`provenance.go:531`) and
 `RenderPageContext` (`render.go:50`). `Sauvola`, `QuantizePNG`,

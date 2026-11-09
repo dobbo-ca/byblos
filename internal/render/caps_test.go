@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/limits"
 )
 
@@ -61,5 +62,22 @@ func TestRasterSizeHugeScaleRefused(t *testing.T) {
 	var le *limits.LimitError
 	if errors.As(err, &le) && le.Got <= le.Max {
 		t.Errorf("Got = %d, want > Max %d", le.Got, le.Max)
+	}
+}
+
+// A caller-raised cap must not turn into an image.NewRGBA panic, and the cap
+// compares the canvas actually allocated: ceil(w)*ceil(h).
+func TestRasterSizeRaisedCapsAndCanvas(t *testing.T) {
+	big := limits.Limits{MaxRasterSide: math.MaxInt64, MaxRasterPixels: math.MaxInt64}
+	for _, b := range []content.Box{{URX: 2e9, URY: 2e9}, {URX: 9.2e18, URY: 1}} {
+		_, _, _, _, err := rasterSize(b, 1, big)
+		if got := limitName(err); got != "raster-pixels" {
+			t.Errorf("box %+v: err = %v; want *LimitError raster-pixels", b, err)
+		}
+	}
+	// 8191.5 x 8192.4 is under 1<<26 by area but allocates 8192 x 8193 px.
+	_, _, _, _, err := rasterSize(content.Box{URX: 8191.5, URY: 8192.4}, 1, limits.Limits{})
+	if got := limitName(err); got != "raster-pixels" {
+		t.Errorf("err = %v; want *LimitError raster-pixels", err)
 	}
 }

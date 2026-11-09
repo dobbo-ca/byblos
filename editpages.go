@@ -141,6 +141,13 @@ func BuildFromPages(w io.Writer, pages []PageSource) error {
 // reference bug a second WRITE pass caused. Budget for the whole build. A
 // cancelled call writes nothing to w. See context.go.
 func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource) error {
+	return BuildFromPagesLimits(ctx, w, pages, Limits{})
+}
+
+// BuildFromPagesLimits is BuildFromPagesContext with every source opened under
+// lim; a source past a cap fails the call as a *LimitError. It reserves nothing
+// from the memory budget.
+func BuildFromPagesLimits(ctx context.Context, w io.Writer, pages []PageSource, lim Limits) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
@@ -185,7 +192,7 @@ func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource)
 		return err
 	}
 	var built bytes.Buffer
-	if err := pdfdoc.BuildFromPagesWithProperties(&built, adjusted, map[string]string{provenanceKey: string(data)}); err != nil {
+	if err := pdfdoc.BuildFromPagesWithProperties(&built, adjusted, map[string]string{provenanceKey: string(data)}, lim); err != nil {
 		return fmt.Errorf("byblos: BuildFromPages: %w", err)
 	}
 	if err := checkContext(ctx); err != nil {

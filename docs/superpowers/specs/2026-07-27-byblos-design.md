@@ -721,6 +721,7 @@ type StraightenSpec = pdfdoc.StraightenSpec
 
 func BuildFromPages(w io.Writer, pages []PageSource) error
 func BuildFromPagesContext(ctx context.Context, w io.Writer, pages []PageSource) error
+func BuildFromPagesLimits(ctx context.Context, w io.Writer, pages []PageSource, lim Limits) error
 
 // ValidatePages is the half of BuildFromPages' refusal that needs no document
 // (gap G2): non-empty sequence, every page has a Source, every Rotate is one
