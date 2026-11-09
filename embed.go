@@ -28,7 +28,6 @@ import (
 	"io"
 	"math"
 	"math/big"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -381,46 +380,29 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	var o float64
 	f, dup, bad := tiffField(b.tiff, 0x0112, false)
 	x7, _, _ := tiffField(b.tiff, 700, true)
-	var x2 int
-	n7 := 0
-	carries2, bad7 := false, false
+	// The packets of the file and of IFD0 tag 700 (which Pillow never reads,
+	// but a reader of the whole file does) follow one rule.
+	n, V, badX := b.xmpN, b.xmpV, b.xmpBad
 	for p := x7; p != nil; p = p.prev {
-		v, c, ok := xmpNormal(p.val)
-		bad7 = bad7 || c && !ok
-		if p == x7 {
-			x2, carries2 = v, c
-		}
-		if c {
-			n7++
+		if v, c, ok := xmpNormal(p.val); c && ok {
+			n, V = n+1, v
+		} else if c {
+			badX = true
 		}
 	}
-	if dup || bad || n7 > 1 || n7 == 1 && !carries2 || bad7 {
+	if dup || bad || n > 1 || badX {
 		return Orientation{Ambiguous: true}, nil
-	}
-	if carries2 {
-		// Pillow never reads the XMP in IFD0 tag 700, but a reader of the whole file does.
-		base := 1
-		if f != nil {
-			if n, ok := f.num(); ok {
-				base = int(n)
-			}
-		} else if b.xmpLast {
-			base = b.xmpV
-		}
-		if x2 != base {
-			return Orientation{Ambiguous: true}, nil
-		}
 	}
 	if f != nil {
 		var ok bool
 		if o, ok = f.num(); !ok {
 			return Orientation{}, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
 		}
-		if b.xmpLast && float64(b.xmpV) != o {
+		if n == 1 && float64(V) != o {
 			return Orientation{Ambiguous: true}, nil
 		}
-	} else if b.xmpLast {
-		o = float64(b.xmpV)
+	} else if n == 1 {
+		o = float64(V)
 	} else {
 		return Orientation{}, nil
 	}
@@ -495,28 +477,27 @@ type exifData struct {
 	tiff, xmp []byte
 	exif      bool
 	ambiguous bool // see EXIFOrientation
-	xmpOri    int  // XMP packets that carry an orientation
-	xmpLast   bool // the last packet (xmp) is one of them
+	xmpN      int  // normal XMP packets that carry an orientation
 	xmpBad    bool // a packet that carries an orientation is not normal
-	xmpV      int  // the last packet's orientation, when it is normal
+	xmpV      int  // the orientation of the last normal one
 }
 
-// addXMP records one XMP packet. xmp is the last; only packets that carry an
-// orientation count towards ambiguity (xmpAmbiguous).
+// addXMP records one XMP packet. xmp is the last; a packet without
+// "Orientation" is ignored (see xmpNormal).
 func (d *exifData) addXMP(v []byte) {
-	var normal bool
-	d.xmpV, d.xmpLast, normal = xmpNormal(v)
-	if d.xmpLast {
-		d.xmpOri++
-		d.xmpBad = d.xmpBad || !normal
+	x, carries, normal := xmpNormal(v)
+	if normal {
+		d.xmpN++
+		d.xmpV = x
+	} else if carries {
+		d.xmpBad = true
 	}
 	d.xmp = v
 }
 
-// xmpAmbiguous: a packet that carries is not normal, two packets carry, or one does and a later
-// packet (the one Pillow reads) does not.
+// xmpAmbiguous: a packet that carries is not normal, or two are.
 func (d *exifData) xmpAmbiguous() bool {
-	return d.xmpBad || d.xmpOri > 1 || d.xmpOri == 1 && !d.xmpLast
+	return d.xmpBad || d.xmpN > 1
 }
 
 var (
@@ -725,6 +706,7 @@ const (
 	xmpTiffNS     = "http://ns.adobe.com/tiff/1.0/"
 	xmpMaxTokens  = 1 << 17 // the packet is already capped; this bounds the work per packet
 	xmpMaxNesting = 1024
+	xmlSpace      = " \t\r\n" // XML whitespace; strings.TrimSpace also strips NBSP and the like
 )
 
 // xmpNormal applies the closed XMP rule to one packet. A packet whose bytes do
@@ -738,7 +720,7 @@ func xmpNormal(x []byte) (v int, carries, normal bool) {
 		return 0, false, false
 	}
 	vals := map[string]bool{}
-	d := xml.NewDecoder(bytes.NewReader(bytes.TrimRight(x, "\x00"))) // NUL padding is not part of the XML
+	d := xml.NewDecoder(bytes.NewReader(x))
 	var buf []byte
 	depth, in := 0, -1 // in: depth of the open Orientation element
 	var err error
@@ -752,7 +734,7 @@ func xmpNormal(x []byte) (v int, carries, normal bool) {
 			depth++
 			for _, a := range t.Attr {
 				if a.Name.Space == xmpTiffNS && a.Name.Local == "Orientation" {
-					vals[strings.TrimSpace(a.Value)] = true
+					vals[strings.Trim(a.Value, xmlSpace)] = true
 				}
 			}
 			if in < 0 && t.Name.Space == xmpTiffNS && t.Name.Local == "Orientation" {
@@ -764,7 +746,7 @@ func xmpNormal(x []byte) (v int, carries, normal bool) {
 			}
 		case xml.EndElement:
 			if depth == in {
-				vals[strings.TrimSpace(string(buf))] = true
+				vals[strings.Trim(string(buf), xmlSpace)] = true
 				in = -1
 			}
 			depth--
@@ -774,22 +756,23 @@ func xmpNormal(x []byte) (v int, carries, normal bool) {
 		return 0, true, false
 	}
 	for s := range vals {
-		v, err = strconv.Atoi(s)
+		if len(s) == 1 {
+			v = int(s[0]) - '0'
+		}
 	}
-	if p, ok, _ := xmpOrientation(x); err != nil || v < 1 || v > 8 || ok && p != v {
+	if p, ok := xmpOrientation(x); v < 1 || v > 8 || ok && p != v {
 		return 0, true, false
 	}
 	return v, true, true
 }
 
 // xmpOrientation is the digit Pillow takes from an XMP packet: the first
-// tiff:Orientation=" or tiff:Orientation> that a digit follows. conflict reports
-// a later one with a different digit.
-func xmpOrientation(x []byte) (v int, ok, conflict bool) {
+// tiff:Orientation=" or tiff:Orientation> that a digit follows.
+func xmpOrientation(x []byte) (v int, ok bool) {
 	for p := []byte("tiff:Orientation"); ; {
 		i := bytes.Index(x, p)
 		if i < 0 {
-			return v, ok, conflict
+			return v, ok
 		}
 		x = x[i+len(p):]
 		r := bytes.TrimPrefix(x, []byte(`="`))
@@ -797,11 +780,7 @@ func xmpOrientation(x []byte) (v int, ok, conflict bool) {
 			r = bytes.TrimPrefix(x, []byte(">"))
 		}
 		if len(r) < len(x) && len(r) > 0 && r[0] >= '0' && r[0] <= '9' {
-			if d := int(r[0] - '0'); !ok {
-				v, ok = d, true
-			} else if d != v {
-				conflict = true
-			}
+			return int(r[0] - '0'), true
 		}
 	}
 }

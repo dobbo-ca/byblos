@@ -88,8 +88,7 @@ func TestOrientationRound4MatchesImg2pdf(t *testing.T) {
 var r5Ambiguous = map[string]bool{
 	"pre-exif6-post-exif1.png": true, "pre-exif1-post-exif6.png": true,
 	"pre-exifnoor-post-xmp6.png": true, "pre-exifnoor-post-text-exif6.png": true,
-	"xmp6-then-text-empty.png": true, "text-xmp-noor-then-itxt-badutf8-6.png": true,
-	"xmp6-then-itxt-corrupt-zlib.png": true, "itxt-rawprof-badlang6.png": true,
+	"text-xmp-noor-then-itxt-badutf8-6.png": true, "itxt-rawprof-badlang6.png": true,
 	"post-badtype-then-exif6.png": true, "post-exif6-badcrc.png": true,
 }
 
@@ -343,7 +342,7 @@ func TestOrientationTag700XMPAndMalformedOrientation(t *testing.T) {
 		{"orient6-outside-tag700-agrees", ifd0(xmp("6"), orient6, outside, ent(700, 1, uint32(len(xmp("6"))), dataOff)), Orientation{Rotate: 90}},
 		{"orient6-tag700-agrees", ifd0(xmp("6"), orient6, ent(700, 1, uint32(len(xmp("6"))), 8+2+2*12+4)), Orientation{Rotate: 90}},
 		{"orient6-tag700-says3", ifd0(xmp("3"), orient6, ent(700, 1, uint32(len(xmp("3"))), 8+2+2*12+4)), Orientation{Ambiguous: true}},
-		{"no-orient-tag700-says6", ifd0(xmp("6"), ent(700, 1, uint32(len(xmp("6"))), 8+2+12+4)), Orientation{Ambiguous: true}},
+		{"no-orient-tag700-says6", ifd0(xmp("6"), ent(700, 1, uint32(len(xmp("6"))), 8+2+12+4)), Orientation{Rotate: 90}},
 		{"orient-itself-outside", ifd0(nil, ent(0x112, 3, 3, 0xfff0)), Orientation{Ambiguous: true}},
 	} {
 		for kind, data := range map[string][]byte{
@@ -416,6 +415,10 @@ func TestOrientationXMPMalformedConflict(t *testing.T) {
 // The closed XMP rule's attack forms: a value Pillow's regex cannot see (padded,
 // an entity), a packet cut off after a conflicting element, and deep nesting.
 func TestOrientationXMPClosedRule(t *testing.T) {
+	tag700 := func(v int) []byte {
+		x := []byte(`<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/' tiff:Orientation='` + string(rune(48+v)) + `'/></x:xmpmeta>`)
+		return ifd0(x, ent(700, 1, uint32(len(x)), 8+2+12+4))
+	}
 	const ns = `http://ns.adobe.com/tiff/1.0/`
 	pk := func(body string) []byte {
 		return append(append([]byte(nil), xapPrefix...), `<x:xmpmeta xmlns:x='adobe:ns:meta/'>`+body+`</x:xmpmeta>`...)
@@ -444,6 +447,13 @@ func TestOrientationXMPClosedRule(t *testing.T) {
 		{"nested-70-agrees", jpegApp1(nest(70)), Orientation{Rotate: 90}},
 		{"nested-70-agrees-exif6", jpegApp1(exif6, nest(70)), Orientation{Rotate: 90}},
 		{"nested-over-bound", jpegApp1(nest(xmpMaxNesting + 2)), Orientation{Ambiguous: true}},
+		{"second-packet-without-word-ignored", jpegApp1(desc(`tiff:Orientation='6'`, ``), pk(`<a/>`)), Orientation{Rotate: 90}},
+		{"second-packet-without-word-ignored-exif6", jpegApp1(exif6, desc(`tiff:Orientation='6'`, ``), pk(`<a/>`)), Orientation{Rotate: 90}},
+		{"nul-padded", jpegApp1(append(desc(`tiff:Orientation='6'`, ``), 0, 0)), Orientation{Ambiguous: true}},
+		{"plus-6", jpegApp1(desc(`tiff:Orientation='+6'`, ``)), Orientation{Ambiguous: true}},
+		{"zero-padded-6", jpegApp1(desc(`tiff:Orientation='06'`, ``)), Orientation{Ambiguous: true}},
+		{"nbsp-6", jpegApp1(desc(`tiff:Orientation='&#160;6'`, ``)), Orientation{Ambiguous: true}},
+		{"tag700-and-packet", jpegApp1(append(exifPrefix[:6:6], tag700(6)...), desc(`tiff:Orientation='6'`, ``)), Orientation{Ambiguous: true}},
 	} {
 		if o, err := EXIFOrientation(c.jpeg, Limits{}); err != nil || o != c.want {
 			t.Errorf("%s: got %+v, %v; want %+v", c.name, o, err, c.want)
