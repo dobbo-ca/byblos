@@ -1258,3 +1258,15 @@ func pdfimagesPNG(t *testing.T, pdf []byte) image.Image {
 	}
 	return im
 }
+
+// A box derived from DPI is the image at its own resolution, so the image fills
+// it, as img2pdf draws it. With DPIY != DPI the derived box has a different
+// aspect from the pixels; fit-centering would leave bands (byblos main: 11.52x8.64
+// on an 11.52x17.28 page).
+func TestBuildPDFDerivedBoxIsFilled(t *testing.T) {
+	img := flateGrayImage(t, 100, 100, 1)
+	out := buildOrFatal(t, []BuildPage{{Image: img, DPI: 300, DPIY: 150}})
+	if want := "q 24 0 0 48 0 0 cm"; !bytes.Contains(out, []byte(want)) {
+		t.Errorf("content stream lacks %q:\n%s", want, out[:min(len(out), 400)])
+	}
+}
