@@ -236,3 +236,40 @@ func TestFlateIndexed(t *testing.T) {
 		t.Errorf("err = %v; want *LimitError image-bytes at 768", err)
 	}
 }
+
+// pdfcpu renders DeviceGray and Indexed as RGB, so the PNG it encodes is 3
+// bytes a pixel though the dictionary says 1: noise must still stay in the pool.
+func TestFlateGrayNoiseStaysInPool(t *testing.T) {
+	if raceDetector() {
+		t.Skip("the race detector inflates the heap")
+	}
+	const pool = 64 << 20
+	defer debug.SetGCPercent(debug.SetGCPercent(5))
+	for _, c := range []struct {
+		side int
+		fits bool
+	}{{2300, false}, {1500, true}} {
+		t.Run(fmt.Sprint(c.side), func(t *testing.T) {
+			noise := make([]byte, c.side*c.side)
+			rand.New(rand.NewSource(1)).Read(noise)
+			var z bytes.Buffer
+			zw, _ := zlib.NewWriterLevel(&z, zlib.BestSpeed)
+			zw.Write(noise)
+			zw.Close()
+			pdf := pdfFile([]string{catalog, pages1,
+				"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+				"<< /Length 30 >>\nstream\nq 612 0 0 792 0 0 cm /Im0 Do Q\nendstream",
+				fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", c.side, c.side, z.Len(), z.Bytes())}, "", 0)
+			defer SetMemoryLimit(SetMemoryLimit(pool))
+			var err error
+			peak := peakHeap(func() { _, err = ExtractPageRaster(bytes.NewReader(pdf), 1) })
+			var le *LimitError
+			if c.fits && err != nil || !c.fits && (!errors.As(err, &le) || le.Name != "memory-budget") {
+				t.Errorf("err = %v; fits = %v", err, c.fits)
+			}
+			if peak > pool {
+				t.Errorf("peak %d MiB > the %d MiB pool", peak>>20, pool>>20)
+			}
+		})
+	}
+}

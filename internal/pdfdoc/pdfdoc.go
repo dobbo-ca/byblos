@@ -1393,12 +1393,14 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	// budget of its own: take its memory from byblos's, before it allocates. Its
 	// decode buffer grows by doubling and is copied (DecodeBytes), and the
 	// raster it renders is 4 bytes a pixel. The PNG it encodes it to and the copy
-	// RawImage reads out of it are each about the decoded size when the pixels do
-	// not compress. A soft mask is decoded too, under the size its own dictionary
+	// RawImage reads out of it are each as big as the decoded size or the
+	// raster's 4 bytes a pixel (gray and indexed render as RGB, or RGBA with a
+	// mask), whichever is more, when the pixels do not compress. A soft mask is decoded too, under the size its own dictionary
 	// allows, so a stream that lies about it is refused.
 	if !codec {
 		sm, smCap := d.softMask(sd, info)
-		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+2*declared+limits.DecodeBytes(smCap)+4*limits.MulSat(int64(info.Width), int64(info.Height)))
+		px := limits.MulSat(int64(info.Width), int64(info.Height))
+		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+2*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px)
 		if err != nil {
 			return nil, "", err
 		}
