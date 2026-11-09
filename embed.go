@@ -377,7 +377,8 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	}
 	var o float64
 	f, dup := tiffField(b.tiff, 0x0112)
-	if dup {
+	_, xmpDup := tiffField(b.tiff, 700)
+	if _, _, conflict := xmpOrientation(b.xmp); dup || xmpDup || conflict {
 		return Orientation{Ambiguous: true}, nil
 	}
 	if f != nil {
@@ -385,12 +386,12 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 		if o, ok = f.num(); !ok {
 			return Orientation{}, fmt.Errorf("byblos: EXIFRotation: orientation entry is not a number")
 		}
-	} else if x, ok := xmpOrientation(b.xmp); ok {
+	} else if x, ok, _ := xmpOrientation(b.xmp); ok {
 		o = float64(x)
 	} else {
 		return Orientation{}, nil
 	}
-	if x, ok := xmpOrientation(b.xmp); ok && float64(x) != o && f != nil {
+	if x, ok, _ := xmpOrientation(b.xmp); ok && float64(x) != o && f != nil {
 		return Orientation{Ambiguous: true}, nil
 	}
 	switch o {
@@ -670,12 +671,13 @@ func fromHex(s []byte) ([]byte, error) {
 }
 
 // xmpOrientation is the digit Pillow takes from an XMP packet: the first
-// tiff:Orientation=" or tiff:Orientation> that a digit follows.
-func xmpOrientation(x []byte) (int, bool) {
+// tiff:Orientation=" or tiff:Orientation> that a digit follows. conflict reports
+// a later one with a different digit.
+func xmpOrientation(x []byte) (v int, ok, conflict bool) {
 	for p := []byte("tiff:Orientation"); ; {
 		i := bytes.Index(x, p)
 		if i < 0 {
-			return 0, false
+			return v, ok, conflict
 		}
 		x = x[i+len(p):]
 		r := bytes.TrimPrefix(x, []byte(`="`))
@@ -683,7 +685,11 @@ func xmpOrientation(x []byte) (int, bool) {
 			r = bytes.TrimPrefix(x, []byte(">"))
 		}
 		if len(r) < len(x) && len(r) > 0 && r[0] >= '0' && r[0] <= '9' {
-			return int(r[0] - '0'), true
+			if d := int(r[0] - '0'); !ok {
+				v, ok = d, true
+			} else if d != v {
+				conflict = true
+			}
 		}
 	}
 }
@@ -711,7 +717,7 @@ func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 // tiffField finds tag in IFD0 of the Exif block t, loaded as Pillow loads it
 // (img2pdf and the JPEG resolution both go through it): a block without a
 // TIFF header or with IFD0 out of range has no tags; entries are read in order
-// and the last of a repeated tag wins (dup reports any repeated entry of tag, skipped or not); an entry of a type Pillow does not know
+// and the last of a repeated tag wins (dup reports any repeated entry of tag, skipped or not, or one lost after an entry with values outside the block); an entry of a type Pillow does not know
 // or with no values is skipped; an entry whose values lie outside the block
 // ends the reading of values, keeping the tags before it, but not the scan for
 // repeats of tag, which runs over every entry the block holds (an entry cut
@@ -742,6 +748,7 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 			break
 		}
 		if stop {
+			dup = dup || match // an entry after one with values outside the block is lost to Pillow
 			continue
 		}
 		typ, count := bo.Uint16(t[e+2:]), bo.Uint32(t[e+4:])
