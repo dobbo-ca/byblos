@@ -381,7 +381,7 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	var o float64
 	f, dup, bad := tiffField(b.tiff, 0x0112, false)
 	x7, _, _ := tiffField(b.tiff, 700, true)
-	x1, ok1 := xmpOrientation(b.xmp)
+	x1, ok1, _ := xmpOrientation(b.xmp)
 	a1, c1, aok1, conflict := xmpScan(b.xmp)
 	var x2 int
 	var ok2 bool
@@ -724,14 +724,22 @@ const (
 	xmpMaxNesting = 64
 )
 
+// isTiff: the tiff namespace, or an unbound tiff: prefix (encoding/xml leaves
+// it as the name's Space), which Pillow reads all the same.
+func isTiff(n xml.Name) bool { return n.Space == xmpTiffNS || n.Space == "tiff" }
+
 // xmpScan reads the tiff:Orientation values of an XMP packet with encoding/xml:
 // every attribute and element in the tiff namespace (any prefix, the default
 // namespace included; references decoded, values trimmed). carries reports at
 // least one; v is the first as an integer (ok); conflict is set when the values
-// differ, or the packet is not XML but names Orientation (malformed metadata,
-// which also carries unless Pillow's regex reads a digit from it).
+// differ, or the packet is not XML but names Orientation (malformed metadata).
 func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
 	var vals []string
+	add := func(s string) {
+		if s = strings.TrimSpace(s); s != "" { // no value, no orientation metadata
+			vals = append(vals, s)
+		}
+	}
 	d := xml.NewDecoder(bytes.NewReader(x))
 	var buf []byte
 	depth, in := 0, -1 // in: depth of the open Orientation element
@@ -745,11 +753,11 @@ func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
 		case xml.StartElement:
 			depth++
 			for _, a := range t.Attr {
-				if a.Name.Space == xmpTiffNS && a.Name.Local == "Orientation" {
-					vals = append(vals, strings.TrimSpace(a.Value))
+				if isTiff(a.Name) && a.Name.Local == "Orientation" {
+					add(a.Value)
 				}
 			}
-			if in < 0 && t.Name.Space == xmpTiffNS && t.Name.Local == "Orientation" {
+			if in < 0 && isTiff(t.Name) && t.Name.Local == "Orientation" {
 				in, buf = depth, buf[:0]
 			}
 		case xml.CharData:
@@ -758,17 +766,19 @@ func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
 			}
 		case xml.EndElement:
 			if depth == in {
-				vals, in = append(vals, strings.TrimSpace(string(buf))), -1
+				add(string(buf))
+				in = -1
 			}
 			depth--
 		}
 	}
 	if err != io.EOF {
-		// Not XML (or past the limits): ignored unless it names Orientation. The
-		// img2pdf corpus holds Pillow's regex form in such packets (tiff:Orientation="6"
-		// with no element around it), so that digit still counts, as the lone value.
-		if v, ok = xmpOrientation(x); ok {
-			return v, true, true, false
+		// Not XML (or past the limits): ignored unless it names Orientation, which
+		// is then malformed metadata. The img2pdf corpus holds Pillow's regex form
+		// in such packets (tiff:Orientation="6" with no element around it), so its
+		// digit still counts; digits that differ, or none, are ambiguous.
+		if v, ok, conflict = xmpOrientation(x); ok {
+			return v, true, true, conflict
 		}
 		bad := bytes.Contains(x, []byte("Orientation"))
 		return 0, bad, false, bad
@@ -788,12 +798,13 @@ func xmpScan(x []byte) (v int, carries, ok, conflict bool) {
 func xmpCarries(x []byte) bool { _, c, _, _ := xmpScan(x); return c }
 
 // xmpOrientation is the digit Pillow takes from an XMP packet: the first
-// tiff:Orientation=" or tiff:Orientation> that a digit follows.
-func xmpOrientation(x []byte) (v int, ok bool) {
+// tiff:Orientation=" or tiff:Orientation> that a digit follows. conflict reports
+// a later one with a different digit.
+func xmpOrientation(x []byte) (v int, ok, conflict bool) {
 	for p := []byte("tiff:Orientation"); ; {
 		i := bytes.Index(x, p)
 		if i < 0 {
-			return v, ok
+			return v, ok, conflict
 		}
 		x = x[i+len(p):]
 		r := bytes.TrimPrefix(x, []byte(`="`))
@@ -801,7 +812,11 @@ func xmpOrientation(x []byte) (v int, ok bool) {
 			r = bytes.TrimPrefix(x, []byte(">"))
 		}
 		if len(r) < len(x) && len(r) > 0 && r[0] >= '0' && r[0] <= '9' {
-			return int(r[0] - '0'), true
+			if d := int(r[0] - '0'); !ok {
+				v, ok = d, true
+			} else if d != v {
+				conflict = true
+			}
 		}
 	}
 }

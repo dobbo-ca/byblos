@@ -371,3 +371,26 @@ func TestOrientationXMPParsed(t *testing.T) {
 		}
 	}
 }
+
+// Malformed XMP that names conflicting orientations stays ambiguous, however it fails to parse.
+func TestOrientationXMPMalformedConflict(t *testing.T) {
+	const ns = `http://ns.adobe.com/tiff/1.0/`
+	exif6 := append(exifPrefix[:6:6], tiffOrient(6)...)
+	valid := `<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description xmlns:tiff='` + ns + `' tiff:Orientation="6"><tiff:Orientation>3</tiff:Orientation></rdf:Description></x:xmpmeta>`
+	for _, c := range []struct {
+		name string
+		jpeg []byte
+		want Orientation
+	}{
+		{"no-exif-attrs", jpegApp1(append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<tiff:Orientation="3"/><tiff:Orientation="6"/>`...)), Orientation{Ambiguous: true}},
+		{"exif-attrs", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<tiff:Orientation="6"/><tiff:Orientation="3"/>`...)), Orientation{Ambiguous: true}},
+		{"exif-attr-element", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<tiff:Orientation="6"/><tiff:Orientation>3</tiff:Orientation>`...)), Orientation{Ambiguous: true}},
+		{"trailing-nul", jpegApp1(append(xapPrefix[:len(xapPrefix):len(xapPrefix)], valid+"\x00"...)), Orientation{Ambiguous: true}},
+		{"unbound-prefix", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><a tiff:Orientation="3"/></x:xmpmeta>`...)), Orientation{Ambiguous: true}},
+		{"empty-value", jpegApp1(exif6, append(xapPrefix[:len(xapPrefix):len(xapPrefix)], `<x:xmpmeta xmlns:x='adobe:ns:meta/'><a xmlns:tiff='`+ns+`' tiff:Orientation=""/></x:xmpmeta>`...)), Orientation{Rotate: 90}},
+	} {
+		if o, err := EXIFOrientation(c.jpeg, Limits{}); err != nil || o != c.want {
+			t.Errorf("%s: got %+v, %v; want %+v", c.name, o, err, c.want)
+		}
+	}
+}
