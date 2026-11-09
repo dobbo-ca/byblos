@@ -68,7 +68,7 @@ func TestFlatePagesStayInPool(t *testing.T) {
 		{"cmyk", 2400, 3105, 4, false, false},
 		{"rgb-smask", 2600, 3365, 3, true, false},
 		{"rgb-150dpi", 1275, 1650, 3, false, true},
-		{"rgb-150dpi-smask", 1275, 1650, 3, true, true},
+		{"rgb-smask-small", 1250, 1600, 3, true, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			pdf := flateImagePDF(t, c.w, c.h, c.n, c.sm)
@@ -162,7 +162,7 @@ func TestFlateNoiseStaysInPool(t *testing.T) {
 	for _, c := range []struct {
 		side int
 		fits bool
-	}{{1950, false}, {1600, true}} {
+	}{{1950, false}, {1500, true}} {
 		t.Run(fmt.Sprint(c.side), func(t *testing.T) {
 			noise := make([]byte, c.side*c.side*3)
 			rand.New(rand.NewSource(1)).Read(noise)
@@ -248,7 +248,7 @@ func TestFlateGrayNoiseStaysInPool(t *testing.T) {
 	for _, c := range []struct {
 		side int
 		fits bool
-	}{{2300, false}, {1500, true}} {
+	}{{2300, false}, {1850, false}, {1800, true}, {1500, true}} {
 		t.Run(fmt.Sprint(c.side), func(t *testing.T) {
 			noise := make([]byte, c.side*c.side)
 			rand.New(rand.NewSource(1)).Read(noise)
