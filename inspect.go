@@ -90,8 +90,15 @@ type ImageRef struct {
 	// 2.0. The precedent is Substitutable -- a caller that cannot see a
 	// refusal coming cannot drive the primitive (byb-js5.2).
 	PlacementDeg  float64
-	Width, Height int    // pixel dimensions of the stored raster
-	Bitonal       bool   // 1 bit per component, or an image mask
+	Width, Height int  // pixel dimensions of the stored raster
+	Bitonal       bool // 1 bit per component, or an image mask
+	// ColorSpace is the image dictionary's /ColorSpace when it is a bare name
+	// ("DeviceGray", "DeviceRGB", "DeviceCMYK"), resolved through the cross-
+	// reference table; "" for an array (Indexed, ICCBased, ...), a missing entry
+	// or an inline image. BPC is its /BitsPerComponent, 0 when absent. They let a
+	// caller size a decode before it runs (kleio's planes reservation).
+	ColorSpace    string
+	BPC           int
 	Filter        string // the stored raster's declared codec; "" when it declares none
 	ObjNr         int    // the image XObject's PDF object number
 	Substitutable bool   // ReplaceImages will accept this image; see below
@@ -367,6 +374,8 @@ func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.
 			ref.Width = info.Width
 			ref.Height = info.Height
 			ref.Bitonal = info.BPC == 1 || info.ImageMask
+			ref.ColorSpace = info.ColorSpace
+			ref.BPC = info.BPC
 			ref.Filter = info.Filter
 			ref.ObjNr = info.ObjNr
 			// The four refusals internal/pdfdoc/write.go:205-212 makes, read

@@ -189,7 +189,7 @@ const PerObjectBytes = 1536
 
 // ImageRecordBytes is the heap of one recorded image: unsafe.Sizeof(byblos.ImageRef),
 // held to it by TestImageRecordBytes.
-const ImageRecordBytes = 144
+const ImageRecordBytes = 168
 
 // ObjectTableBytes is the reservation for a document declaring size objects.
 func ObjectTableBytes(size int64) int64 { return size * PerObjectBytes }
