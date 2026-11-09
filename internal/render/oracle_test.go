@@ -199,7 +199,7 @@ func pdfdocImages(d pdfdoc.Doc, p *pdfdoc.Page) ImageFor {
 		if !ok || !xo.Image {
 			return Image{}, false
 		}
-		data, fileType, err := d.RawImage(xo.ID)
+		data, fileType, err := d.RawImage(context.Background(), xo.ID)
 		if err != nil || fileType == "jbig2" || fileType == "jpx" {
 			return Image{}, false
 		}

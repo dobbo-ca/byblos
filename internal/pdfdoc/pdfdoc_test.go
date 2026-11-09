@@ -252,7 +252,7 @@ func TestXObjectMissingName(t *testing.T) {
 
 func TestRawImageReturnsDecodableBytes(t *testing.T) {
 	d := open(t, "scan")
-	data, ft, err := d.RawImage(image0(t, d, 1))
+	data, ft, err := d.RawImage(context.Background(), image0(t, d, 1))
 	if err != nil {
 		t.Fatalf("RawImage() error = %v", err)
 	}
@@ -285,7 +285,7 @@ func TestRawImageIsPerPageWhenRastersAreIdentical(t *testing.T) {
 		t.Fatalf("both pages resolved to id %d; the corpus document is meant to use two objects", id1)
 	}
 	for page, id := range map[int]int{1: id1, 2: id2} {
-		data, ft, err := d.RawImage(id)
+		data, ft, err := d.RawImage(context.Background(), id)
 		if err != nil {
 			t.Fatalf("page %d: RawImage(%d) error = %v", page, id, err)
 		}
@@ -309,7 +309,7 @@ func TestRawImageIsPerPageWhenRastersAreIdentical(t *testing.T) {
 // extract.go decides what to do.
 func TestRawImageReportsJBIG2AsIs(t *testing.T) {
 	d := open(t, "jbig2")
-	data, ft, err := d.RawImage(image0(t, d, 1))
+	data, ft, err := d.RawImage(context.Background(), image0(t, d, 1))
 	if err != nil {
 		t.Fatalf("RawImage() error = %v", err)
 	}
@@ -494,13 +494,13 @@ func TestImageInfoReadsTheDecodeArray(t *testing.T) {
 
 func TestRawImageUnknownID(t *testing.T) {
 	d := open(t, "scan")
-	if _, _, err := d.RawImage(99999); err == nil {
+	if _, _, err := d.RawImage(context.Background(), 99999); err == nil {
 		t.Fatal("RawImage() for an id that was never resolved: want an error, got nil")
 	}
 	// ErrUnsupportedCodec is reserved for a real image in a codec pdfcpu will
 	// not render; an unknown id is a caller mistake and must not be confused
 	// with it.
-	_, _, err := d.RawImage(99999)
+	_, _, err := d.RawImage(context.Background(), 99999)
 	if errors.Is(err, ErrUnsupportedCodec) {
 		t.Errorf("error = %v; want a plain lookup error, not ErrUnsupportedCodec", err)
 	}

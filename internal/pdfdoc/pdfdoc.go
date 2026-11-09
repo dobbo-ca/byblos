@@ -292,8 +292,9 @@ type Doc interface {
 	EncryptInfo() EncryptInfo
 	// RawImage renders an image previously resolved by XObject and returns its
 	// bytes and the file type pdfcpu inferred. The id is the one XObject
-	// returned; an id this document has not resolved is an error.
-	RawImage(id int) (data []byte, fileType string, err error)
+	// returned; an id this document has not resolved is an error. A decode
+	// takes its memory from byblos's budget first, waiting under ctx.
+	RawImage(ctx context.Context, id int) (data []byte, fileType string, err error)
 	// RawImageGlobals returns the JBIG2 page-0 segments an image's
 	// /DecodeParms names in /JBIG2Globals, decoded, and nil when it names
 	// none. See the method for why it is separate from RawImage.
@@ -1323,7 +1324,7 @@ func (d *doc) ImageInfo(id int) (ImageInfo, bool) {
 //     collapses byte-identical image XObjects, so the map ExtractImagesRaw
 //     returns for page 2 of a duplex scan is keyed by page 1's object number.
 //     See the dup-raster corpus document.
-func (d *doc) RawImage(id int) (data []byte, fileType string, err error) {
+func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType string, err error) {
 	// The same shape as RawImageGlobals and renderFont below: this hands an
 	// arbitrary image dict to pdfcpu, which reads entries it does not check
 	// for. pdfcpu's pdfImage does `bpc := *sd.IntEntry("BitsPerComponent")`
@@ -1355,18 +1356,63 @@ func (d *doc) RawImage(id int) (data []byte, fileType string, err error) {
 	if err := limits.Check("image-pixels", int64(info.Width)*int64(info.Height), d.lim.ImagePixels()); err != nil {
 		return nil, "", err
 	}
-	declared := imageDecodeBytes(info.Width, info.Height, info.BPC)
+	last := lastFilter(sd)
+	bpc, n := info.BPC, 4 // four components when the colour space does not say
+	if info.ImageMask {
+		bpc, n = 1, 1
+	} else if last == filter.CCITTFax {
+		n = 1
+	} else if c, err := pdfcpu.ColorSpaceComponents(d.ctx.XRefTable, sd); err == nil && c > 0 {
+		n = c
+		if a := d.indexed(sd); a != nil { // pdfcpu counts the base space; a sample is one index
+			n = 1
+			// The lookup table is a stream pdfcpu inflates when it paints: 256
+			// entries of the base space is all there is.
+			if lut, _, err := d.ctx.XRefTable.DereferenceStreamDict(a[3]); err == nil && lut != nil {
+				if err := lut.DecodeWithLimit(int64(256 * c)); err != nil {
+					if errors.Is(err, filter.ErrDecodeLimitExceeded) {
+						return nil, "", &limits.LimitError{Name: "image-bytes", Got: int64(256*c) + 1, Max: int64(256 * c)}
+					}
+					return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: lookup table: %w", id, err)
+				}
+			}
+		}
+	}
+	declared := imageDecodeBytes(info.Width, info.Height, bpc, n, len(sd.FilterPipeline))
 	// The bound is on pixels. When the last filter is a codec, the layers in
 	// front of it (Flate around DCT) yield compressed bytes, which for a tiny
 	// image outweigh its pixels, so they get a floor.
-	if n := len(sd.FilterPipeline); n > 0 {
-		switch sd.FilterPipeline[n-1].Name {
-		case "DCTDecode", "JPXDecode", "JBIG2Decode":
-			declared = max(declared, 1<<20)
-		}
+	codec := last == "DCTDecode" || last == "JPXDecode" || last == "JBIG2Decode"
+	if codec {
+		declared = max(declared, 1<<20)
 	}
 	if declared <= 0 { // overflow
 		return nil, "", &limits.LimitError{Name: "image-bytes", Got: d.lim.StreamBytes() + 1, Max: d.lim.StreamBytes()}
+	}
+	// pdfcpu decodes everything but a codec's stream itself, and not under any
+	// budget of its own: take its memory from byblos's, before it allocates. Its
+	// decode buffer grows by doubling and is copied (DecodeBytes), and the
+	// raster it renders is 4 bytes a pixel. The PNG it encodes it to and the copy
+	// RawImage reads out of it are each as big as the decoded size or the
+	// raster's 4 bytes a pixel (gray and indexed render as RGB, or RGBA with a
+	// mask), whichever is more, when the pixels do not compress, and a growing
+	// buffer holds its old and new arrays at once: three times, not two. A soft mask is decoded too, under the size its own dictionary
+	// allows, so a stream that lies about it is refused.
+	if !codec {
+		sm, smCap := d.softMask(sd, info)
+		px := limits.MulSat(int64(info.Width), int64(info.Height))
+		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+3*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px)
+		if err != nil {
+			return nil, "", err
+		}
+		defer release()
+		if sm != nil {
+			if err := sm.DecodeWithLimit(smCap); errors.Is(err, filter.ErrDecodeLimitExceeded) {
+				return nil, "", &limits.LimitError{Name: "image-bytes", Got: smCap + 1, Max: smCap}
+			} else if err != nil {
+				return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: soft mask: %w", id, err)
+			}
+		}
 	}
 	lims := &d.ctx.Configuration.Limits
 	saved := lims.MaxDecodeBytes
@@ -1394,6 +1440,49 @@ func (d *doc) RawImage(id int) (data []byte, fileType string, err error) {
 		return nil, "", fmt.Errorf("byblos/pdfdoc: reading image %d: %w", id, err)
 	}
 	return b, im.FileType, nil
+}
+
+// lastFilter is the name of sd's last filter, empty for none.
+func lastFilter(sd *types.StreamDict) string {
+	if n := len(sd.FilterPipeline); n > 0 {
+		return sd.FilterPipeline[n-1].Name
+	}
+	return ""
+}
+
+// indexed is sd's /ColorSpace array when it is an /Indexed one, else nil.
+func (d *doc) indexed(sd *types.StreamDict) types.Array {
+	a, _ := d.deref(sd.Dict["ColorSpace"]).(types.Array)
+	if len(a) < 4 {
+		return nil
+	}
+	if nm, _ := d.deref(a[0]).(types.Name); nm.Value() != "Indexed" {
+		return nil
+	}
+	return a
+}
+
+// softMask is image sd's /SMask stream and the decoded size its own dictionary
+// allows (8-bit gray unless it says otherwise); nil, 0 when there is none. A
+// mask of unusable size is held to the image's.
+func (d *doc) softMask(sd *types.StreamDict, info ImageInfo) (*types.StreamDict, int64) {
+	o, ok := sd.Dict.Find("SMask")
+	if !ok {
+		return nil, 0
+	}
+	sm, _, err := d.ctx.XRefTable.DereferenceStreamDict(o)
+	if err != nil || sm == nil {
+		return nil, 0
+	}
+	w, h := d.intEntry(sm.Dict, "Width"), d.intEntry(sm.Dict, "Height")
+	if w <= 0 || h <= 0 {
+		w, h = info.Width, info.Height
+	}
+	c := imageDecodeBytes(w, h, d.intEntry(sm.Dict, "BitsPerComponent"), 1, len(sm.FilterPipeline))
+	if l := lastFilter(sm); l == filter.DCT || l == filter.JPX || l == filter.JBIG2 { // the stages in front hold the codec's bytes
+		c = max(c, 1<<20)
+	}
+	return sm, c
 }
 
 // reserveCMYKDCT guards the one DCT decode pdfcpu makes itself: a four-component

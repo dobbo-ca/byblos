@@ -495,7 +495,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	}
 
 	placement := scan.Images[idx]
-	data, fileType, err := d.RawImage(placement.ID)
+	data, fileType, err := d.RawImage(ctx, placement.ID)
 	if err != nil {
 		// pdfcpu declines to render some filters by returning a nil reader;
 		// pdfdoc turns that into ErrUnsupportedCodec. That is a divert (the page
@@ -603,15 +603,15 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 				Issue:      capabilityIssue["decode-jpx"],
 			}))
 	default:
-		if bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
-			var f dct.Frame
-			var release func()
-			if f, release, err = reserveDCT(ctx, data, d, placement.ID); err == nil {
+		var f dct.Frame
+		var release func()
+		if f, release, err = reserveDCT(ctx, data, d, placement.ID); err == nil {
+			if bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
 				img, err = decodeDCT(ctx, data, f, d.Limits().ImagePixels())
-				release()
+			} else {
+				img, _, err = image.Decode(bytes.NewReader(data))
 			}
-		} else {
-			img, _, err = image.Decode(bytes.NewReader(data))
+			release()
 		}
 	}
 	if err != nil {
@@ -730,8 +730,17 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 // reserveDCT is dct.Reserve for image id of d under d's pixel cap: the SOF
 // against the image dictionary, then the decode's memory from byblos's budget.
 // The cap is a *LimitError, a budget held until ctx ends wraps ErrMemoryLimit,
-// and the rest are plain errors.
+// and the rest are plain errors. Any other raster reserves the 4 bytes a pixel
+// image.Decode allocates for it, from its header, and the bytes it decodes.
 func reserveDCT(ctx context.Context, data []byte, d pdfdoc.Doc, id int) (dct.Frame, func(), error) {
+	if !bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
+		cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+		if err != nil { // image.Decode reports it
+			return dct.Frame{}, func() {}, nil
+		}
+		release, err := limits.Reserve(ctx, 4*limits.MulSat(int64(cfg.Width), int64(cfg.Height))+int64(len(data)))
+		return dct.Frame{}, release, err
+	}
 	dictPixels, n := int64(-1), 0
 	if info, ok := d.ImageInfo(id); ok {
 		dictPixels = limits.MulSat(int64(info.Width), int64(info.Height))

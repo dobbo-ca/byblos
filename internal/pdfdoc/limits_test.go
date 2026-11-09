@@ -119,7 +119,7 @@ func rawImage(t *testing.T, pdf []byte, lim limits.Limits) error {
 	if !ok {
 		t.Fatal("image not resolved")
 	}
-	_, _, err = d.RawImage(xo.ID)
+	_, _, err = d.RawImage(context.Background(), xo.ID)
 	return err
 }
 

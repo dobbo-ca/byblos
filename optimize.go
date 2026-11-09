@@ -390,7 +390,7 @@ func recompressOneImage(d pdfdoc.Doc, id int, quality int) (bool, error) {
 		return false, nil
 	}
 
-	data, fileType, err := d.RawImage(id)
+	data, fileType, err := d.RawImage(context.Background(), id)
 	if err != nil {
 		if errors.Is(err, pdfdoc.ErrUnsupportedCodec) {
 			return false, nil

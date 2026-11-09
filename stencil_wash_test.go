@@ -238,7 +238,7 @@ func erode(src []bool, w, h, r int) []bool {
 // is dark, which is the convention pdfcpu writes for a stencil; the deep_dark
 // control is what proves it rather than assuming it.
 func stencilMarks(d pdfdoc.Doc, id int) ([]bool, int, int, error) {
-	data, fileType, err := d.RawImage(id)
+	data, fileType, err := d.RawImage(context.Background(), id)
 	if err != nil {
 		if errors.Is(err, pdfdoc.ErrUnsupportedCodec) {
 			return nil, 0, 0, errors.New("unsupported-codec")

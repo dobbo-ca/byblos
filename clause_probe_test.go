@@ -256,7 +256,7 @@ func probeVectorPaint(r *pageProbe, s *content.Scan, info func(int) (pdfdoc.Imag
 // whether removing the paint arm would really yield a page rather than move the
 // divert to a codec. It replicates extract.go:348-401 and nothing else.
 func decodeCheck(d pdfdoc.Doc, placement content.Placement) string {
-	data, fileType, err := d.RawImage(placement.ID)
+	data, fileType, err := d.RawImage(context.Background(), placement.ID)
 	if err != nil {
 		if errors.Is(err, pdfdoc.ErrUnsupportedCodec) {
 			return "unsupported-codec"
