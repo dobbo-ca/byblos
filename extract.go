@@ -16,6 +16,7 @@ import (
 	jpegcopy "github.com/dobbo-ca/jpeg-go"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/dct"
 	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
@@ -443,8 +444,11 @@ func ExtractPageRasterContext(ctx context.Context, r io.ReadSeeker, page int) (*
 
 // ExtractPageRasterLimits is ExtractPageRasterContext under lim: the parse and
 // content-walk caps (q-depth, form-depth, form-invocations and the rest) are
-// lim's, and a breach is a *LimitError. It reserves nothing from the memory
-// budget.
+// lim's, and a breach is a *LimitError. It reserves from the memory budget only
+// for a JPEG page's decode, sized from the SOF and held for that decode alone;
+// a budget that stays held until ctx ends returns ErrMemoryLimit. The SOF must
+// not exceed the image dictionary's pixels or lim.MaxImagePixels, nor differ in
+// component count; a smaller one decodes at its own size.
 func ExtractPageRasterLimits(ctx context.Context, r io.ReadSeeker, page int, lim Limits) (*PageRaster, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -600,9 +604,11 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 			}))
 	default:
 		if bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
-			err = checkDCT(data, d, placement.ID)
-			if err == nil {
-				img, err = decodeDCT(ctx, data)
+			var f dct.Frame
+			var release func()
+			if f, release, err = reserveDCT(ctx, data, d, placement.ID); err == nil {
+				img, err = decodeDCT(ctx, data, f, d.Limits().ImagePixels())
+				release()
 			}
 		} else {
 			img, _, err = image.Decode(bytes.NewReader(data))
@@ -610,7 +616,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	}
 	if err != nil {
 		var le *LimitError
-		if errors.As(err, &le) {
+		if errors.As(err, &le) || errors.Is(err, ErrMemoryLimit) {
 			countFailure()
 			return nil, PageProvenance{}, err
 		}
@@ -721,70 +727,35 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	return out, rec, nil
 }
 
-// dctFrame reads the first SOF marker's width, height and component count
-// without allocating; ok is false when no SOF precedes the first scan. Bytes
-// between segments are skipped to the next marker, as image/jpeg and libjpeg do.
-func dctFrame(data []byte) (w, h, n int, ok bool) {
-	for i := 2; i+4 <= len(data); {
-		m := data[i+1]
-		switch {
-		case data[i] != 0xFF:
-			i++
-		case m == 0xFF:
-			i++
-		case m == 0 || m == 0x01 || m >= 0xD0 && m <= 0xD8:
-			i += 2
-		case m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC:
-			if i+10 > len(data) {
-				return 0, 0, 0, false
-			}
-			return int(data[i+7])<<8 | int(data[i+8]), int(data[i+5])<<8 | int(data[i+6]), int(data[i+9]), true
-		case m == 0xDA:
-			return 0, 0, 0, false
-		default:
-			i += 2 + (int(data[i+2])<<8 | int(data[i+3]))
-		}
+// reserveDCT is dct.Reserve for image id of d under d's pixel cap: the SOF
+// against the image dictionary, then the decode's memory from byblos's budget.
+// The cap is a *LimitError, a budget held until ctx ends wraps ErrMemoryLimit,
+// and the rest are plain errors.
+func reserveDCT(ctx context.Context, data []byte, d pdfdoc.Doc, id int) (dct.Frame, func(), error) {
+	dictPixels, n := int64(-1), 0
+	if info, ok := d.ImageInfo(id); ok {
+		dictPixels = limits.MulSat(int64(info.Width), int64(info.Height))
+		n = map[string]int{"DeviceGray": 1, "DeviceRGB": 3, "DeviceCMYK": 4}[info.ColorSpace]
 	}
-	return 0, 0, 0, false
-}
-
-// checkDCT refuses a JPEG whose SOF disagrees with its image dictionary (when
-// the document has one), whose pixels pass the cap, or that has no readable SOF,
-// before any decoder allocates from it. The cap is a *LimitError; the rest are
-// plain errors. Data that is not a JPEG is left to its own decoder.
-func checkDCT(data []byte, d pdfdoc.Doc, id int) error {
-	if !bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
-		return nil
-	}
-	w, h, n, ok := dctFrame(data)
-	if !ok {
-		return errors.New("dct: no frame header before the first scan")
-	}
-	if err := limits.Check("image-pixels", limits.MulSat(int64(w), int64(h)), d.Limits().ImagePixels()); err != nil {
-		return err
-	}
-	info, ok := d.ImageInfo(id)
-	if !ok {
-		return nil
-	}
-	want := map[string]int{"DeviceGray": 1, "DeviceRGB": 3, "DeviceCMYK": 4}[info.ColorSpace]
-	if w != info.Width || h != info.Height || want != 0 && n != want {
-		return fmt.Errorf("dct: frame is %dx%d with %d components; the image dictionary declares %dx%d %s",
-			w, h, n, info.Width, info.Height, info.ColorSpace)
-	}
-	return nil
+	return dct.Reserve(ctx, data, d.Limits().ImagePixels(), dictPixels, n, 0)
 }
 
 // decodeDCT decodes a JPEG through the jpeg-go copy, whose pixels are
 // libjpeg-turbo's (poppler's and ocrmypdf's decoder): a grey stream comes back
 // as *image.Gray, a colour one as *image.RGBA. What the copy does not read
-// (CMYK and YCCK, 12-bit, lossless) falls back to image/jpeg, as before.
-func decodeDCT(ctx context.Context, data []byte) (image.Image, error) {
-	f := jpegcopy.FormatRGBA
-	if cfg, err := jpegcopy.DecodeConfig(data, nil); err == nil && cfg.Components == 1 {
-		f = jpegcopy.FormatGray
+// (CMYK and YCCK, 12-bit, lossless) falls back to image/jpeg, as before. The
+// caller holds f.Need() from reserveDCT, so the copy skips its own process-wide
+// limiter and bounds the call by maxPixels and that reservation.
+func decodeDCT(ctx context.Context, data []byte, f dct.Frame, maxPixels int64) (image.Image, error) {
+	format := jpegcopy.FormatRGBA
+	if f.N == 1 {
+		format = jpegcopy.FormatGray
 	}
-	img, err := jpegcopy.Decode(ctx, data, &jpegcopy.DecodeOptions{Format: f})
+	img, err := jpegcopy.Decode(ctx, data, &jpegcopy.DecodeOptions{
+		Format:   format,
+		Reserved: true,
+		Limits:   jpegcopy.Limits{MaxPixels: maxPixels, MaxBytes: f.Need()},
+	})
 	if errors.Is(err, jpegcopy.ErrUnsupported) {
 		img, _, err = image.Decode(bytes.NewReader(data))
 	}

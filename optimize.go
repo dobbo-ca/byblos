@@ -406,9 +406,11 @@ func recompressOneImage(d pdfdoc.Doc, id int, quality int) (bool, error) {
 	// poppler tolerate encodings Go's decoder does not, and one such image
 	// must not fail the whole document (see RecompressJPEG's doc comment:
 	// "Everything else is left byte-for-byte alone, with no error").
-	if checkDCT(data, d, id) != nil {
+	_, release, err := reserveDCT(context.Background(), data, d, id)
+	if err != nil {
 		return false, nil
 	}
+	defer release()
 	src, err := jpeg.Decode(bytes.NewReader(data))
 	if err != nil {
 		return false, nil

@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"github.com/dobbo-ca/byblos/internal/limits"
-	jpegcopy "github.com/dobbo-ca/jpeg-go"
 )
 
 // Limits bounds one call; the zero value, and any field <= 0, is the safe
@@ -26,10 +25,7 @@ var ErrMemoryLimit = limits.ErrMemoryLimit
 var ErrPassword = errors.New("byblos: document needs a password")
 
 // SetMemoryLimit sets the bytes all byblos operations in flight may hold
-// together, jpeg-go's decodes included; n <= 0 means none. It returns the previous
-// value. Unset, the limit is half of the Go memory limit (GOMEMLIMIT), else
-// half of the cgroup memory.max, else none.
-func SetMemoryLimit(n int64) int64 {
-	jpegcopy.SetMemoryLimit(n) // jpeg-go's own budget never exceeds byblos's
-	return limits.SetMemoryLimit(n)
-}
+// together; n <= 0 means none. It returns the previous value. Unset, the limit
+// is half of the Go memory limit (GOMEMLIMIT), else half of the cgroup
+// memory.max, else none.
+func SetMemoryLimit(n int64) int64 { return limits.SetMemoryLimit(n) }
