@@ -16,6 +16,7 @@ import (
 	jpegcopy "github.com/dobbo-ca/jpeg-go"
 
 	"github.com/dobbo-ca/byblos/internal/content"
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
@@ -599,12 +600,22 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 			}))
 	default:
 		if bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
-			img, err = decodeDCT(ctx, data)
+			if info, ok := d.ImageInfo(placement.ID); ok {
+				err = checkDCT(data, info, d.Limits())
+			}
+			if err == nil {
+				img, err = decodeDCT(ctx, data)
+			}
 		} else {
 			img, _, err = image.Decode(bytes.NewReader(data))
 		}
 	}
 	if err != nil {
+		var le *LimitError
+		if errors.As(err, &le) {
+			countFailure()
+			return nil, PageProvenance{}, err
+		}
 		// As above, the reason carries fileType so the divert nominates one
 		// decoder rather than all three (byb-z8j).
 		//
@@ -710,6 +721,49 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	}
 	countExtracted(out.CoversPage())
 	return out, rec, nil
+}
+
+// dctFrame reads the first SOF marker's width, height and component count
+// without allocating; ok is false when no SOF precedes the first scan.
+func dctFrame(data []byte) (w, h, n int, ok bool) {
+	for i := 2; i+4 <= len(data) && data[i] == 0xFF; {
+		m := data[i+1]
+		switch {
+		case m == 0xFF:
+			i++
+		case m == 0 || m == 0x01 || m >= 0xD0 && m <= 0xD8:
+			i += 2
+		case m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC:
+			if i+10 > len(data) {
+				return 0, 0, 0, false
+			}
+			return int(data[i+7])<<8 | int(data[i+8]), int(data[i+5])<<8 | int(data[i+6]), int(data[i+9]), true
+		case m == 0xDA:
+			return 0, 0, 0, false
+		default:
+			i += 2 + (int(data[i+2])<<8 | int(data[i+3]))
+		}
+	}
+	return 0, 0, 0, false
+}
+
+// checkDCT refuses a JPEG whose SOF disagrees with its image dictionary, or
+// whose pixels pass lim's cap, before any decoder allocates from the SOF. The
+// cap is a *LimitError; a mismatch is a plain error.
+func checkDCT(data []byte, info pdfdoc.ImageInfo, lim Limits) error {
+	w, h, n, ok := dctFrame(data)
+	if !ok {
+		return nil
+	}
+	if err := limits.Check("image-pixels", limits.MulSat(int64(w), int64(h)), lim.ImagePixels()); err != nil {
+		return err
+	}
+	want := map[string]int{"DeviceGray": 1, "DeviceRGB": 3, "DeviceCMYK": 4}[info.ColorSpace]
+	if w != info.Width || h != info.Height || want != 0 && n != want {
+		return fmt.Errorf("dct: frame is %dx%d with %d components; the image dictionary declares %dx%d %s",
+			w, h, n, info.Width, info.Height, info.ColorSpace)
+	}
+	return nil
 }
 
 // decodeDCT decodes a JPEG through the jpeg-go copy, whose pixels are
