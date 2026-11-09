@@ -382,17 +382,18 @@ func EXIFOrientation(data []byte, lim Limits) (Orientation, error) {
 	var x2 int
 	var ok2 bool
 	n7 := 0
+	carries2 := false
 	for p := x7; p != nil; p = p.prev {
 		v, ok, c := xmpOrientation(p.val)
 		conflict = conflict || c
 		if p == x7 {
-			x2, ok2 = v, ok
+			x2, ok2, carries2 = v, ok, xmpCarries(p.val)
 		}
-		if ok {
+		if xmpCarries(p.val) {
 			n7++
 		}
 	}
-	if dup || bad || n7 > 1 || n7 == 1 && !ok2 || conflict {
+	if dup || bad || n7 > 1 || n7 == 1 && !carries2 || conflict {
 		return Orientation{Ambiguous: true}, nil
 	}
 	if ok2 {
@@ -500,7 +501,7 @@ type exifData struct {
 // addXMP records one XMP packet. xmp is the last; only packets that carry an
 // orientation count towards ambiguity (xmpAmbiguous).
 func (d *exifData) addXMP(v []byte) {
-	_, d.xmpLast, _ = xmpOrientation(v)
+	d.xmpLast = xmpCarries(v)
 	if d.xmpLast {
 		d.xmpOri++
 	}
@@ -712,6 +713,11 @@ func fromHex(s []byte) ([]byte, error) {
 	}
 	return out, nil
 }
+
+// xmpCarries reports whether an XMP packet holds an orientation in any XML
+// form (single quotes, spaces around the =, an element), not only the ones
+// Pillow reads: duplicated orientation metadata is ambiguous whatever its form.
+func xmpCarries(x []byte) bool { return bytes.Contains(x, []byte("tiff:Orientation")) }
 
 // xmpOrientation is the digit Pillow takes from an XMP packet: the first
 // tiff:Orientation=" or tiff:Orientation> that a digit follows. conflict reports
