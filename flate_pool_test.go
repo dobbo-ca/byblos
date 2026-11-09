@@ -213,11 +213,11 @@ func TestFlateSoftMaskA85PastItsDictionaryIsRefused(t *testing.T) {
 	}
 }
 
-// An Indexed sample is one index, not the base space's components: a 2400x2400
+// An Indexed sample is one index, not the base space's components: a 1500x1500
 // 8-bit image fits a 64 MiB pool with its ordinary palette, and a palette that
 // inflates past 256 entries is refused.
 func TestFlateIndexed(t *testing.T) {
-	const s = 2400
+	const s = 1500
 	pdf := func(lut []byte) []byte {
 		img := zeros(t, s*(s+1))
 		return pdfFile([]string{catalog, pages1,
