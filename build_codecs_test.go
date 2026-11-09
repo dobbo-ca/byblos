@@ -459,7 +459,10 @@ func TestEmbedPageBoxMatchesImg2pdf(t *testing.T) {
 				}
 			}
 			if name == "exif-dup-1then6.jpg" || name == "exif-two-segments.jpg" {
-				return // ambiguous: rotation 0 by rule (orientation_test.go)
+				if strings.Contains(d, "/Rotate") { // ambiguous: rotation 0 by rule (orientation_test.go)
+					t.Errorf("ambiguous file got a rotated page %s", d)
+				}
+				return
 			}
 			if got := strings.Contains(d, fmt.Sprintf("/Rotate %d", want.Rotate)); got != (want.Rotate != 0) || (want.Rotate == 0 && strings.Contains(d, "/Rotate")) {
 				t.Errorf("page %s; img2pdf wrote /Rotate %d", d, want.Rotate)

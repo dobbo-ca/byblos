@@ -713,8 +713,10 @@ func exifTag(data []byte, tag uint16) (f *exifField, exif bool) {
 // TIFF header or with IFD0 out of range has no tags; entries are read in order
 // and the last of a repeated tag wins (dup reports any repeated entry of tag, skipped or not); an entry of a type Pillow does not know
 // or with no values is skipped; an entry whose values lie outside the block
-// ends the read, keeping the tags before it, as does an IFD0 cut short. f is
-// nil when the tag is absent.
+// ends the reading of values, keeping the tags before it, but not the scan for
+// repeats of tag, which runs over every entry the block holds (an entry cut
+// short by the block end that starts with tag counts as a repeat). f is nil
+// when the tag is absent.
 func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 	// The second pair is 0x002a or 0x2a00 (Pillow accepts either order); BigTIFF is not read.
 	if len(t) < 8 || t[0] != t[1] || (t[0] != 'I' && t[0] != 'M') || t[2]|t[3] != 0x2a || t[2]&t[3] != 0 {
@@ -729,10 +731,18 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 		return nil, false
 	}
 	n := bo.Uint16(t[ifd:])
-	seen := false
-	for e := ifd + 2; n > 0 && e+12 <= uint64(len(t)); e, n = e+12, n-1 {
-		if bo.Uint16(t[e:]) == tag {
+	seen, stop := false, false
+	for e := ifd + 2; n > 0 && e+2 <= uint64(len(t)); e, n = e+12, n-1 {
+		match := bo.Uint16(t[e:]) == tag
+		if match {
 			dup, seen = dup || seen, true // a repeat counts even if Pillow would skip the entry
+		}
+		if e+12 > uint64(len(t)) {
+			dup = dup || match // cut short by the block end
+			break
+		}
+		if stop {
+			continue
 		}
 		typ, count := bo.Uint16(t[e+2:]), bo.Uint32(t[e+4:])
 		if int(typ) >= len(exifSize) || exifSize[typ] == 0 || count == 0 {
@@ -742,11 +752,12 @@ func tiffField(t []byte, tag uint16) (f *exifField, dup bool) {
 		if size := uint64(exifSize[typ]) * uint64(count); size > 4 {
 			off := uint64(bo.Uint32(val))
 			if off+size > uint64(len(t)) {
-				break
+				stop = true
+				continue
 			}
 			val = t[off:]
 		}
-		if bo.Uint16(t[e:]) == tag {
+		if match {
 			f = &exifField{typ, val[:uint64(exifSize[typ])*uint64(count)], bo}
 		}
 	}

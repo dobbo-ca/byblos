@@ -164,6 +164,20 @@ func tiffDup(typ uint16, count, val uint32) []byte {
 	return append(b, 0, 0, 0, 0)
 }
 
+// tiffDupAfterOutside is a little-endian TIFF whose IFD0 holds Orientation SHORT=6,
+// an ASCII entry whose values lie outside the block, and then a second Orientation
+// (SHORT=1), whole or, if truncated, cut after its tag, type and count.
+func tiffDupAfterOutside(truncated bool) []byte {
+	b := []byte{'I', 'I', 42, 0, 8, 0, 0, 0, 3, 0}
+	b = append(b, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0)
+	b = append(b, 0x0f, 0x01, 2, 0, 100, 0, 0, 0, 0xf0, 0xff, 0, 0)
+	b = append(b, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+	if truncated {
+		return b[:len(b)-6]
+	}
+	return append(b, 0, 0, 0, 0)
+}
+
 // Repeated orientation metadata is ambiguous whatever the values or the order
 // (img2pdf follows Pillow and rotates by one of them).
 func TestOrientationRepeatedSourcesAreAmbiguous(t *testing.T) {
@@ -181,8 +195,13 @@ func TestOrientationRepeatedSourcesAreAmbiguous(t *testing.T) {
 		"jpeg-dup-badtype": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffDup(99, 1, 0)...)),
 		"jpeg-dup-count0":  jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffDup(3, 0, 0)...)),
 		"jpeg-dup-outside": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffDup(3, 100, 0xfff0)...)),
-		"png-dup-badtype":  pngBeforeIDAT(t, pngRaw("eXIf", tiffDup(99, 1, 0))),
-		"png-dup-count0":   pngBeforeIDAT(t, pngRaw("eXIf", tiffDup(3, 0, 0))),
+		// the repeat sits after an entry whose values lie outside the block, or is cut short by the block end.
+		"jpeg-dup-after-outside": jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffDupAfterOutside(false)...)),
+		"png-dup-after-outside":  pngBeforeIDAT(t, pngRaw("eXIf", tiffDupAfterOutside(false))),
+		"jpeg-dup-truncated":     jpegApp1(append(exifPrefix[:len(exifPrefix):len(exifPrefix)], tiffDupAfterOutside(true)...)),
+		"png-dup-truncated":      pngBeforeIDAT(t, pngRaw("eXIf", tiffDupAfterOutside(true))),
+		"png-dup-badtype":        pngBeforeIDAT(t, pngRaw("eXIf", tiffDup(99, 1, 0))),
+		"png-dup-count0":         pngBeforeIDAT(t, pngRaw("eXIf", tiffDup(3, 0, 0))),
 	} {
 		o, err := EXIFOrientation(data, Limits{})
 		if err != nil || o != (Orientation{Ambiguous: true}) {
