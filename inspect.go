@@ -10,7 +10,6 @@ import (
 	"sort"
 
 	"github.com/dobbo-ca/byblos/internal/content"
-	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
@@ -250,67 +249,12 @@ func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
 // *LimitError; a budget held by others returns ErrMemoryLimit. The cancellation
 // latency is InspectContext's.
 func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*DocumentInfo, error) {
-	if err := checkContext(ctx); err != nil {
-		return nil, err
-	}
-	d, release, err := pdfdoc.OpenBudgeted(ctx, r, lim)
+	doc, err := OpenDocument(ctx, r, lim)
 	if err != nil {
-		if pdfdoc.IsWrongPassword(err) {
-			return nil, fmt.Errorf("%w: %w", ErrPassword, err)
-		}
 		return nil, err
 	}
-	defer release()
-	cat := d.Catalog()
-	di := &DocumentInfo{
-		Pages:          make([]PageInfo, 0, d.PageCount()),
-		Encrypted:      d.EncryptInfo().Encrypted,
-		HasSignature:   cat.HasSignature,
-		NeedsRendering: cat.NeedsRendering,
-	}
-	images := 0
-	dl := d.Limits()
-	for n := 1; n <= d.PageCount(); n++ {
-		if err := checkContext(ctx); err != nil {
-			return nil, err
-		}
-		pi, _, err := inspectPage(ctx, d, n)
-		// A cap or budget refusal is the document's, not a page byblos worked
-		// around: it fails the call, whichever layer noticed it.
-		if derr := d.Err(); derr != nil {
-			err = derr
-		}
-		// The walk caps at their defaults stay page diagnostics, as before
-		// they were LimitErrors; a caller who set one asked for the failure.
-		if (errors.Is(err, ErrLimit) && !defaultWalkCap(err, dl)) || errors.Is(err, ErrMemoryLimit) {
-			return nil, err
-		}
-		if err != nil {
-			// Cancellation is not a defect in the document. Reporting it as a
-			// page diagnostic would hand back a document that was never read.
-			if cerr := checkContext(ctx); cerr != nil {
-				return nil, cerr
-			}
-			// Everything else is a page byblos worked around. inspectPage
-			// returns whatever it did establish, which is nothing at all only
-			// when the page dictionary itself would not resolve.
-			if pi == nil {
-				pi = &PageInfo{Index: n}
-			}
-			pi.Diagnostics = append(pi.Diagnostics, Diagnostic{
-				Severity: SeverityError,
-				Message:  err.Error(),
-			})
-		}
-		// The per-page caps do not bound what the pages keep together: pages
-		// can share one content stream. The same caps hold for the document.
-		images += len(pi.Images)
-		if err := limits.Check("images", int64(images), dl.Images()+dl.InlineImages()); err != nil {
-			return nil, err
-		}
-		di.Pages = append(di.Pages, *pi)
-	}
-	return di, nil
+	defer doc.Close()
+	return doc.Info(ctx)
 }
 
 // defaultWalkCap reports whether err is a content-walk nesting cap the caller

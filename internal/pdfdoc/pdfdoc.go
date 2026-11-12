@@ -47,6 +47,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/dct"
@@ -474,9 +475,13 @@ func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, er
 	return openSized(cctx, rs, lim, objectsIn(rs))
 }
 
+// Parses counts pdfcpu parses begun, for tests that pin how many a call makes.
+var Parses atomic.Int64
+
 // openSized is openDoc given the object count objectsIn found.
 func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size int64) (d Doc, err error) {
 	defer catchPanic("open", &err)
+	Parses.Add(1)
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
 		return nil, err
 	}
