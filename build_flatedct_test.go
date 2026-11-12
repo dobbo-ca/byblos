@@ -8,6 +8,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/jbig2"
@@ -135,5 +138,53 @@ func TestBuildPDFFlateDCTAndGlobalsGolden(t *testing.T) {
 		if got := hex.EncodeToString(sum[:]); got != c.want {
 			t.Errorf("%s: sha256 = %s; want %s", name, got, c.want)
 		}
+	}
+}
+
+// pdftoppmGray renders page 1 at 72 DPI to PGM through poppler, a decoder
+// independent of byblos and pdf-go. Skipped when poppler is absent; the
+// test-oracles CI job installs it and fails on a skip.
+func pdftoppmGray(t *testing.T, pdf []byte) [32]byte {
+	t.Helper()
+	bin, err := exec.LookPath("pdftoppm")
+	if err != nil {
+		t.Skip("pdftoppm not installed (poppler)")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "in.pdf")
+	if err := os.WriteFile(src, pdf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(bin, "-r", "72", "-gray", "-singlefile", src, filepath.Join(dir, "page")).CombinedOutput(); err != nil {
+		t.Fatalf("pdftoppm: %v: %s", err, out)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "page.pgm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sha256.Sum256(b)
+}
+
+func TestBuildPDFFlateDCTMatchesPdftoppm(t *testing.T) {
+	plain, _ := jpegImage(t, 20, 20)
+	wrapped := plain
+	wrapped.FlateLevel = 6
+	a := pdftoppmGray(t, buildOrFatal(t, []BuildPage{{Image: plain, DPI: 300}}))
+	b := pdftoppmGray(t, buildOrFatal(t, []BuildPage{{Image: wrapped, DPI: 300}}))
+	if a != b {
+		t.Error("poppler decodes Flate-wrapped DCT to different pixels than plain DCT")
+	}
+}
+
+// The globals split must decode like the same stream written whole.
+func TestBuildPDFJBIG2GlobalsMatchesPdftoppm(t *testing.T) {
+	split, globals := jbig2GlobalsImage(t)
+	whole := split
+	whole.Data = append(append([]byte{}, globals...), split.Data...)
+	whole.JBIG2Globals = nil
+	a := pdftoppmGray(t, buildOrFatal(t, []BuildPage{{Image: whole, DPI: 300}}))
+	b := pdftoppmGray(t, buildOrFatal(t, []BuildPage{{Image: split, DPI: 300}}))
+	if a != b {
+		t.Error("poppler decodes the JBIG2 globals split differently from the whole stream")
 	}
 }
