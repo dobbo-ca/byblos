@@ -89,7 +89,15 @@ type EncodedImage struct {
 	DecodeParms   *DecodeParms
 	Decode        []float64     // /Decode; BuildPDF writes it, ReplaceImage refuses it
 	SMask         *EncodedImage // BuildPDF writes it, ReplaceImage refuses it
-	Data          []byte
+	// FlateLevel 1..9 makes BuildPDF deflate a DCTDecode Data (stdlib zlib, that
+	// level) and write /Filter [/FlateDecode /DCTDecode]; 0 writes Data as given.
+	// BuildPDF only; ReplaceImage refuses it.
+	FlateLevel int
+	// JBIG2Globals is the decoded /JBIG2Globals stream of a JBIG2Decode image,
+	// written as its own object and named in /DecodeParms. BuildPDF only;
+	// ReplaceImage refuses it.
+	JBIG2Globals []byte
+	Data         []byte
 }
 
 func componentsOf(space string) (int, bool) {
@@ -143,8 +151,8 @@ func (img EncodedImage) validate() error {
 	if img.Filter == "" {
 		return fmt.Errorf("no filter named")
 	}
-	if len(img.Decode) > 0 || img.SMask != nil {
-		return fmt.Errorf("a /Decode array or /SMask is not carried by ReplaceImage")
+	if len(img.Decode) > 0 || img.SMask != nil || img.FlateLevel != 0 || img.JBIG2Globals != nil {
+		return fmt.Errorf("a /Decode array, /SMask, FlateLevel or JBIG2Globals is not carried by ReplaceImage")
 	}
 	if len(img.Data) == 0 {
 		return fmt.Errorf("no data")

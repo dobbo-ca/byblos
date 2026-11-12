@@ -512,15 +512,17 @@ func TestEXIFRotationOracleFiles(t *testing.T) {
 func FuzzBuildPDF(f *testing.F) {
 	jpg, _ := os.ReadFile("testdata/img2pdf/cmyk.jpg")
 	jp2f, _ := os.ReadFile("testdata/img2pdf/rgb.jp2")
-	f.Add("DCTDecode", "DeviceCMYK", 8, 16, 12, 0, jpg)
-	f.Add("JPXDecode", "DeviceRGB", 8, 16, 12, 90, jp2f)
-	f.Add("FlateDecode", "DeviceGray", 16, 2, 2, 180, []byte{0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01})
-	f.Add("FlateDecode", "Indexed", 16, 1, 1, 270, []byte{})
-	f.Fuzz(func(t *testing.T, filter, cs string, bpc, w, h, rot int, data []byte) {
-		if len(data) > 1<<16 {
+	f.Add("DCTDecode", "DeviceCMYK", 8, 16, 12, 0, jpg, 0, []byte(nil))
+	f.Add("DCTDecode", "DeviceCMYK", 8, 16, 12, 0, jpg, 6, []byte(nil))
+	f.Add("JPXDecode", "DeviceRGB", 8, 16, 12, 90, jp2f, 0, []byte(nil))
+	f.Add("JBIG2Decode", "DeviceGray", 1, 16, 12, 0, []byte{1}, 0, []byte("globals"))
+	f.Add("FlateDecode", "DeviceGray", 16, 2, 2, 180, []byte{0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01}, 0, []byte(nil))
+	f.Add("FlateDecode", "Indexed", 16, 1, 1, 270, []byte{}, 0, []byte(nil))
+	f.Fuzz(func(t *testing.T, filter, cs string, bpc, w, h, rot int, data []byte, level int, globals []byte) {
+		if len(data) > 1<<16 || len(globals) > 1<<16 {
 			return
 		}
-		img := EncodedImage{Width: w, Height: h, BPC: bpc, ColorSpace: ColorSpace{Name: cs}, Filter: filter, Data: data}
+		img := EncodedImage{Width: w, Height: h, BPC: bpc, ColorSpace: ColorSpace{Name: cs}, Filter: filter, Data: data, FlateLevel: level, JBIG2Globals: globals}
 		var out bytes.Buffer
 		err := BuildPDFLimits(t.Context(), &out, []BuildPage{{Image: img, DPI: 72, Rotate: rot}}, Limits{MaxEncodedImagePixels: 1 << 16})
 		if err != nil {
