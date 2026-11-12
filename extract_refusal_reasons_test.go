@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +64,19 @@ func TestExtractRefusesColourSpacesAndDCTVariantsByReason(t *testing.T) {
 		}
 		if ref.Reason != c.reason || ref.Class == "" {
 			t.Errorf("%s: Reason=%q Class=%q; want %q and a class", c.name, ref.Reason, ref.Class, c.reason)
+		}
+	}
+}
+
+// A filter pdfcpu will not decode is not a colour-space refusal, whatever the
+// colour space is called: the reason must never carry document data.
+func TestExtractFilterRefusalIsNotAColourSpaceReason(t *testing.T) {
+	for _, cs := range []string{"[/Patient#20John#20Smith#20DOB#201970]", "[/ICCBased 6 0 R]", "[/Indexed /DeviceRGB 0 <000000>]"} {
+		pdf := refusalPDF("/ColorSpace "+cs+" /BitsPerComponent 8 /Filter /ASCIIHexDecode", []byte("00>"))
+		_, err := ExtractPageRaster(bytes.NewReader(pdf), 1)
+		var ref *RasterRefusal
+		if errors.As(err, &ref) && strings.HasPrefix(ref.Reason, "unsupported-colorspace") {
+			t.Errorf("%s: Reason=%q; want no colour-space reason", cs, ref.Reason)
 		}
 	}
 }

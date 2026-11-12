@@ -135,15 +135,26 @@ type UnsupportedColorSpaceError struct {
 func (e *UnsupportedColorSpaceError) Error() string { return e.err.Error() }
 func (e *UnsupportedColorSpaceError) Unwrap() error { return e.err }
 
+// colorSpaceFamilies is every colour-space family name the PDF spec defines. A
+// name outside it is document data and never reaches a refusal reason.
+var colorSpaceFamilies = map[string]bool{
+	"devicegray": true, "devicergb": true, "devicecmyk": true, "calgray": true, "calrgb": true,
+	"lab": true, "iccbased": true, "indexed": true, "pattern": true, "separation": true, "devicen": true,
+}
+
 // colorSpaceName is sd's /ColorSpace family, lower-cased, "indexed-<base>" for
-// an Indexed one; empty when it is a device name or unreadable.
+// an Indexed one; "unknown" for a family the spec does not define, empty when
+// it is unreadable.
 func (d *doc) colorSpaceName(sd *types.StreamDict) string {
 	family := func(o types.Object) string {
 		if a, ok := d.deref(o).(types.Array); ok && len(a) > 0 {
 			o = a[0]
 		}
 		n, _ := d.deref(o).(types.Name)
-		return strings.ToLower(n.Value())
+		if f := strings.ToLower(n.Value()); colorSpaceFamilies[f] {
+			return f
+		}
+		return "unknown"
 	}
 	a, _ := d.deref(sd.Dict["ColorSpace"]).(types.Array)
 	if len(a) == 0 {
@@ -1461,11 +1472,13 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 		if errors.Is(err, filter.ErrDecodeLimitExceeded) {
 			return nil, "", &limits.LimitError{Name: "image-bytes", Got: declared + 1, Max: declared}
 		}
-		err = fmt.Errorf("byblos/pdfdoc: rendering image %d: %w", id, err)
-		if space := d.colorSpaceName(sd); space != "" && errors.Is(err, pdfcpu.ErrUnsupportedResource) {
-			err = &UnsupportedColorSpaceError{Space: space, err: err}
+		// Only pdfcpu's render step refuses on colour space; a filter refusal
+		// ("image obj#N filter ...") is ErrUnsupportedResource too, and says nothing about it.
+		if space := d.colorSpaceName(sd); space != "" && errors.Is(err, pdfcpu.ErrUnsupportedResource) &&
+			strings.HasPrefix(err.Error(), fmt.Sprintf("image obj#%d render ", id)) {
+			return nil, "", &UnsupportedColorSpaceError{Space: space, err: fmt.Errorf("byblos/pdfdoc: rendering image %d: %w", id, err)}
 		}
-		return nil, "", err
+		return nil, "", fmt.Errorf("byblos/pdfdoc: rendering image %d: %w", id, err)
 	}
 	// pdfcpu signals "I will not render this filter" by returning a nil reader
 	// and an empty file type, with a nil error. Reading that panics.
