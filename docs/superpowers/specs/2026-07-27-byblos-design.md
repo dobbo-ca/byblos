@@ -495,6 +495,17 @@ type DocumentInfo struct {
 
 func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*DocumentInfo, error)
 
+// Document is a PDF parsed once: Info and PageRaster read from that one parse,
+// where InspectDocument and ExtractPageRasterLimits parse per call. Close
+// releases its memory reservation.
+type Document struct{}
+
+func OpenDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Document, error)
+func (doc *Document) Close()
+func (doc *Document) PageCount() int
+func (doc *Document) Info(ctx context.Context) (*DocumentInfo, error)
+func (doc *Document) PageRaster(ctx context.Context, page int) (*PageRaster, error)
+
 // --- resource limits (docs/guides/memory-limits.md) ---
 
 // Limits bounds one call; its zero value is the safe default.
