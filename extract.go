@@ -516,6 +516,10 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		if errors.Is(err, pdfdoc.ErrUnsupportedCodec) {
 			return refuse(page, "unsupported-codec", fmt.Errorf("%w: %v", ErrUnsupportedImageCodec, err))
 		}
+		var cse *pdfdoc.UnsupportedColorSpaceError
+		if errors.As(err, &cse) {
+			return refuse(page, "unsupported-colorspace-"+cse.Space, err)
+		}
 		countFailure()
 		return nil, PageProvenance{}, err
 	}
@@ -647,7 +651,13 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// because internal/jbig2 draws the line itself and says so with
 		// ErrUnsupportedFeature. Give a decoder here the same sentinel (byb-2bx)
 		// and this arm can name its capability the same way.
-		return refuse(page, "unsupported-codec-"+fileType,
+		reason := "unsupported-codec-" + fileType
+		if bytes.HasPrefix(data, []byte{0xFF, 0xD8}) {
+			if f, ok := dct.Parse(data); ok && f.Variant() != "" {
+				reason = "unsupported-codec-dct-" + f.Variant()
+			}
+		}
+		return refuse(page, reason,
 			fmt.Errorf("%w: %s: %v", ErrUnsupportedImageCodec, fileType, err))
 	}
 	out := &PageRaster{

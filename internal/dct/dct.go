@@ -15,6 +15,8 @@ import (
 type Frame struct {
 	W, H, N int
 	Samp    [4][2]int // each component's horizontal and vertical sampling
+	SOF     byte      // the SOF marker's low byte: 0xC0 baseline, 0xC9 arithmetic, ...
+	Prec    int       // sample precision in bits
 	Coefs   bool      // progressive, or more than one scan: coefficients outlive a scan
 }
 
@@ -35,6 +37,7 @@ func Parse(data []byte) (f Frame, ok bool) {
 			if i+10 > len(data) {
 				return Frame{}, false
 			}
+			f.SOF, f.Prec = m, int(data[i+4])
 			f.H, f.W, f.N = int(data[i+5])<<8|int(data[i+6]), int(data[i+7])<<8|int(data[i+8]), int(data[i+9])
 			if f.N < 1 || f.N > 4 || i+10+3*f.N > len(data) {
 				return Frame{}, false
@@ -57,6 +60,20 @@ func Parse(data []byte) (f Frame, ok bool) {
 		}
 	}
 	return Frame{}, false
+}
+
+// Variant names why no byblos decoder reads f: "lossless", "arith" (arithmetic
+// coding) or "12bit"; empty for a frame the decoders do read.
+func (f Frame) Variant() string {
+	switch {
+	case f.SOF == 0xC3 || f.SOF == 0xC7 || f.SOF == 0xCB || f.SOF == 0xCF:
+		return "lossless"
+	case f.SOF >= 0xC9:
+		return "arith"
+	case f.Prec == 12:
+		return "12bit"
+	}
+	return ""
 }
 
 func countSOS(b []byte) (n int) {

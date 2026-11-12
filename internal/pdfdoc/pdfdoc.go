@@ -123,6 +123,39 @@ func pdfcpuLimit(lim limits.Limits, err error) error {
 // job, not this package's.
 var ErrUnsupportedCodec = errors.New("byblos/pdfdoc: image codec cannot be rendered")
 
+// UnsupportedColorSpaceError reports an image whose colour space pdfcpu will
+// not render (Lab, CalGray, Indexed over another base, DeviceN with a
+// non-device alternate). Space is its lower-case name, "indexed-<base>" for an
+// Indexed one; Unwrap is pdfcpu's own error.
+type UnsupportedColorSpaceError struct {
+	Space string
+	err   error
+}
+
+func (e *UnsupportedColorSpaceError) Error() string { return e.err.Error() }
+func (e *UnsupportedColorSpaceError) Unwrap() error { return e.err }
+
+// colorSpaceName is sd's /ColorSpace family, lower-cased, "indexed-<base>" for
+// an Indexed one; empty when it is a device name or unreadable.
+func (d *doc) colorSpaceName(sd *types.StreamDict) string {
+	family := func(o types.Object) string {
+		if a, ok := d.deref(o).(types.Array); ok && len(a) > 0 {
+			o = a[0]
+		}
+		n, _ := d.deref(o).(types.Name)
+		return strings.ToLower(n.Value())
+	}
+	a, _ := d.deref(sd.Dict["ColorSpace"]).(types.Array)
+	if len(a) == 0 {
+		return ""
+	}
+	name := family(a[0])
+	if name == "indexed" && len(a) > 1 {
+		name += "-" + family(a[1])
+	}
+	return name
+}
+
 // ErrMalformed reports a document pdfcpu could not parse without panicking.
 //
 // pdfcpu indexes unchecked in several parsers — skipTJ walks off an empty
@@ -1428,7 +1461,11 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 		if errors.Is(err, filter.ErrDecodeLimitExceeded) {
 			return nil, "", &limits.LimitError{Name: "image-bytes", Got: declared + 1, Max: declared}
 		}
-		return nil, "", fmt.Errorf("byblos/pdfdoc: rendering image %d: %w", id, err)
+		err = fmt.Errorf("byblos/pdfdoc: rendering image %d: %w", id, err)
+		if space := d.colorSpaceName(sd); space != "" && errors.Is(err, pdfcpu.ErrUnsupportedResource) {
+			err = &UnsupportedColorSpaceError{Space: space, err: err}
+		}
+		return nil, "", err
 	}
 	// pdfcpu signals "I will not render this filter" by returning a nil reader
 	// and an empty file type, with a nil error. Reading that panics.
