@@ -232,7 +232,9 @@ decoded. jbig2-go does not expose a plan-based size, so a striped page that
 disagrees with its dictionary is decoded (up to `maxJBIG2Pixels`) and only then
 refused. Capping the decode at the dictionary's size instead would starve a
 document whose globals dictionary is large, so it is not done; closing this
-needs a jbig2-go API for the plan-based size.
+needs a jbig2-go API for the plan-based size. This and the reservation a
+malformed stream makes before its refusal are accepted deviations: see
+docs/decisions.md, "JBIG2 through jbig2-go: two accepted deviations".
 
 `ctx` entry points exist today for the nine document-scale primitives,
 `BuildFromPagesContext`, `RenderPageContext` and the `...Limits` forms above: `InspectContext` (`inspect.go:213`),
