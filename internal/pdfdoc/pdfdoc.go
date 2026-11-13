@@ -47,6 +47,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/dobbo-ca/byblos/internal/content"
 	"github.com/dobbo-ca/byblos/internal/dct"
@@ -329,6 +330,12 @@ type Doc interface {
 	// Limits is the caps the document was opened under, as OpenBudgeted lowered
 	// them.
 	Limits() limits.Limits
+	// EndWalk drops what the content walk decoded (forms, the page's running
+	// total): nothing after the walk reads it. EndPage drops the image records
+	// the walk resolved, which RawImage reads, so call it when the page is done.
+	// A document that is only read (never written) loses nothing by either.
+	EndWalk()
+	EndPage()
 	// Catalog reports the signature and dynamic-XFA flags; see catalog.go.
 	Catalog() CatalogInfo
 	// EncryptInfo reports whether this document carries an /Encrypt
@@ -474,9 +481,13 @@ func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, er
 	return openSized(cctx, rs, lim, objectsIn(rs))
 }
 
+// Parses counts pdfcpu parses begun, for tests that pin how many a call makes.
+var Parses atomic.Int64
+
 // openSized is openDoc given the object count objectsIn found.
 func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size int64) (d Doc, err error) {
 	defer catchPanic("open", &err)
+	Parses.Add(1)
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
 		return nil, err
 	}

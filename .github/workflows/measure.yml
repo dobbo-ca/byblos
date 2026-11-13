@@ -1,0 +1,63 @@
+# Times one-shot against open-once page data on generated 300- and
+# 2000-page documents. Hosted runner only; the result is in the job log
+# ("MEASURE" lines). Never run these sizes locally.
+name: measure
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['opendoc*.go', '.github/workflows/measure.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: 0
+      GOPRIVATE: github.com/dobbo-ca/deflate-go,github.com/dobbo-ca/jpeg-go,github.com/dobbo-ca/jp2k-go,github.com/dobbo-ca/webp-go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          # Private source must not reach the public repo's Actions cache.
+          cache: false
+      # Private dobbo-ca Go modules (deflate-go, jpeg-go, jp2k-go, webp-go) are
+      # fetched with a short-lived GitHub App token, minted per job. Skipped when
+      # the variable is unset, and for fork and Dependabot PRs, which get no
+      # secrets (the action would fail on an empty key). go.mod needs jpeg-go (the DCT decode), so
+      # a skipped mint fails the job on a fork PR, which cannot build here.
+      - id: app
+        if: ${{ vars.CI_READ_APP_ID != '' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.CI_READ_APP_ID }}
+          private-key: ${{ secrets.CI_READ_APP_KEY }}
+          owner: dobbo-ca
+          repositories: deflate-go,jpeg-go,jp2k-go,webp-go
+          permission-contents: read
+      # Token only in THIS step's env (not $GITHUB_ENV): later steps run PR code.
+      # insteadOf is a plain prefix match, so keep the four repo names prefix-free
+      # of other dobbo-ca repos. Later steps build from the warm module cache.
+      - name: download private modules
+        if: ${{ steps.app.outcome == 'success' }}
+        env:
+          GIT_LFS_SKIP_SMUDGE: 1 # the copies keep fixtures in LFS; a smudged zip hashes differently from go.sum
+          GIT_CONFIG_COUNT: 4
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/deflate-go.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/dobbo-ca/deflate-go
+          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jpeg-go.insteadOf
+          GIT_CONFIG_VALUE_1: https://github.com/dobbo-ca/jpeg-go
+          GIT_CONFIG_KEY_2: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/jp2k-go.insteadOf
+          GIT_CONFIG_VALUE_2: https://github.com/dobbo-ca/jp2k-go
+          GIT_CONFIG_KEY_3: url.https://x-access-token:${{ steps.app.outputs.token }}@github.com/dobbo-ca/webp-go.insteadOf
+          GIT_CONFIG_VALUE_3: https://github.com/dobbo-ca/webp-go
+        run: go mod download
+      - if: ${{ steps.app.outcome == 'skipped' }}
+        run: echo "::notice::private-module token not minted (no CI_READ_APP_ID, fork or Dependabot)"
+      - name: measure
+        env:
+          BYBLOS_MEASURE: 1
+        run: go test . -run '^TestMeasureOpenOnce$' -v -count=1 -timeout 15m

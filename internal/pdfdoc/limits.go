@@ -224,6 +224,15 @@ func isLimit(err error) bool {
 	return errors.Is(err, limits.ErrLimit) || errors.Is(err, limits.ErrMemoryLimit)
 }
 
+func (d *doc) EndWalk() { d.pageBytes, d.pageForms = 0, nil }
+
+func (d *doc) EndPage() {
+	d.EndWalk()
+	clear(d.images)
+	clear(d.streams)
+	clear(d.refs)
+}
+
 // Err returns the first limit breach a lookup that can only answer "no" (a
 // form XObject, say) had to swallow, or nil.
 func (d *doc) Err() error { return d.limitErr }

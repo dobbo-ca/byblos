@@ -210,6 +210,7 @@ type budget struct {
 	inited bool
 	limit  int64 // <= 0: none
 	used   int64
+	peak   int64 // most used since ResetPeak, for tests
 	q      []*waiter
 }
 
@@ -231,6 +232,7 @@ func (b *budget) grant() {
 			return
 		}
 		b.used += w.n
+		b.peak = max(b.peak, b.used)
 		w.granted = true
 		close(w.ch)
 		b.q = b.q[1:]
@@ -249,6 +251,21 @@ func SetMemoryLimit(n int64) int64 {
 	global.limit = n
 	global.grant()
 	return prev
+}
+
+// PeakReserved is the most the budget had reserved since ResetPeak, which
+// starts it from what is reserved now. For tests that pin an accounting.
+func PeakReserved() int64 {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	return global.peak
+}
+
+// ResetPeak restarts PeakReserved from the bytes reserved now.
+func ResetPeak() {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.peak = global.used
 }
 
 // MemoryLimit is the budget now in force; <= 0 means none.
@@ -282,6 +299,7 @@ func Reserve(ctx context.Context, n int64) (func(), error) {
 	}
 	if len(b.q) == 0 && b.used+n <= lim {
 		b.used += n
+		b.peak = max(b.peak, b.used)
 		b.mu.Unlock()
 		return release, nil
 	}
