@@ -412,9 +412,17 @@ func OpenLimits(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, 
 // hold a 64 MiB decode still takes the document, and refuses only a stream
 // that would not fit.
 func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, func(), error) {
+	d, _, release, err := OpenBudgetedHeld(ctx, rs, lim)
+	return d, release, err
+}
+
+// OpenBudgetedHeld is OpenBudgeted that also returns the decode slot, for the
+// caller to put on the ctx of every call that decodes (limits.WithHeld): a
+// decode's own reservation is then paid from the slot, not queued behind it.
+func OpenBudgetedHeld(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, *limits.Held, func(), error) {
 	size := objectsIn(rs)
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	budget := limits.MemoryLimit()
 	const minStream = 1 << 20
@@ -457,16 +465,18 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	// stream decodes (one at a time) run in. A decode that reserved for itself
 	// while the document held its table would wait on that table, alone or
 	// against other documents doing the same, until ctx ended.
-	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+fileBytes+records+retained+limits.DecodeBytes(max(streams, total, lim.ObjectBytes())))
+	slot := limits.DecodeBytes(max(streams, total, lim.ObjectBytes()))
+	whole := limits.ObjectTableBytes(size) + fileBytes + records + retained + slot
+	release, err := limits.Reserve(ctx, whole)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	d, err := openSized(ctx, rs, lim, size)
 	if err != nil {
 		release()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return d, release, nil
+	return d, limits.NewHeld(slot, whole), release, nil
 }
 
 // openDoc is Open with the caps of lim. The /Size cap is checked before the parse
@@ -1467,7 +1477,7 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	saved := lims.MaxDecodeBytes
 	lims.MaxDecodeBytes = declared
 	defer func() { lims.MaxDecodeBytes = saved }()
-	release, err := d.reserveCMYKDCT(sd, info, declared)
+	release, err := d.reserveCMYKDCT(ctx, sd, info, declared)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1548,7 +1558,7 @@ func (d *doc) softMask(sd *types.StreamDict, info ImageInfo) (*types.StreamDict,
 // ErrUnsupportedCodec. Anything else returns a no-op release. declared bounds
 // what pdfcpu holds after the decode (gob, then the RGBA it renders), so three
 // copies of it join the decode's own need in the reservation.
-func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int64) (func(), error) {
+func (d *doc) reserveCMYKDCT(ctx context.Context, sd *types.StreamDict, info ImageInfo, declared int64) (func(), error) {
 	none := func() {}
 	n := len(sd.FilterPipeline)
 	if n == 0 || sd.FilterPipeline[n-1].Name != filter.DCT {
@@ -1566,7 +1576,7 @@ func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int6
 		}
 		jpg = cp.Content
 	}
-	_, release, err := dct.Reserve(context.Background(), jpg, d.lim.ImagePixels(), int64(info.Width)*int64(info.Height), 4, 3*declared)
+	_, release, err := dct.Reserve(context.WithoutCancel(ctx), jpg, d.lim.ImagePixels(), int64(info.Width)*int64(info.Height), 4, 3*declared)
 	if err != nil {
 		var le *limits.LimitError
 		if !errors.As(err, &le) && !errors.Is(err, limits.ErrMemoryLimit) {

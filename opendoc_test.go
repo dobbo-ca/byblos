@@ -66,7 +66,9 @@ func TestOpenDocumentParsesOnce(t *testing.T) {
 	}
 	n := doc.PageCount()
 	for p := 1; p <= n; p++ {
-		doc.PageRaster(ctx, p)
+		if _, err := doc.PageRaster(ctx, p); err != nil {
+			t.Fatalf("page %d: %v", p, err)
+		}
 	}
 	doc.Close()
 	if got := pdfdoc.Parses.Load() - before; got != 1 {
@@ -149,5 +151,28 @@ func TestOpenDocumentCloseReleases(t *testing.T) {
 	}
 	if g := runtime.NumGoroutine(); g > g0 {
 		t.Errorf("goroutines %d after Close; %d before", g, g0)
+	}
+}
+
+// A page whose JPEG decode reserves memory must not queue behind the document's
+// own reservation: under a budget the one-shot render and the open-once render
+// of it agree, and neither waits (a held ctx would end the test by its deadline).
+func TestOpenDocumentJPEGPageUnderBudget(t *testing.T) {
+	data := corpus.ScanJPEG()
+	for _, budget := range []int64{64 << 20, 300 << 20, 1024 << 20} {
+		prev := SetMemoryLimit(budget)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(data), 1, Limits{})
+		doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{})
+		if err != nil {
+			t.Fatalf("budget %d: open: %v", budget, err)
+		}
+		got, gerr := doc.PageRaster(ctx, 1)
+		doc.Close()
+		cancel()
+		SetMemoryLimit(prev)
+		if werr != nil || gerr != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("budget %d: open-once err=%v; one-shot err=%v; equal=%v", budget, gerr, werr, reflect.DeepEqual(got, want))
+		}
 	}
 }

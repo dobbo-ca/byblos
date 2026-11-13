@@ -21,6 +21,7 @@ import (
 // is collectable once the caller drops it.
 type Document struct {
 	d       pdfdoc.Doc
+	held    *limits.Held
 	release func()
 }
 
@@ -31,14 +32,14 @@ func OpenDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Document, 
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	d, release, err := pdfdoc.OpenBudgeted(ctx, r, lim)
+	d, held, release, err := pdfdoc.OpenBudgetedHeld(ctx, r, lim)
 	if err != nil {
 		if pdfdoc.IsWrongPassword(err) {
 			return nil, fmt.Errorf("%w: %w", ErrPassword, err)
 		}
 		return nil, err
 	}
-	return &Document{d: d, release: release}, nil
+	return &Document{d: d, held: held, release: release}, nil
 }
 
 // Close gives back the memory reservation and drops the parse. It is safe to
@@ -59,7 +60,7 @@ func (doc *Document) PageRaster(ctx context.Context, page int) (*PageRaster, err
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	pr, _, err := extractPage(ctx, doc.d, page)
+	pr, _, err := extractPage(limits.WithHeld(ctx, doc.held), doc.d, page)
 	return pr, err
 }
 
@@ -69,6 +70,7 @@ func (doc *Document) Info(ctx context.Context) (*DocumentInfo, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
+	ctx = limits.WithHeld(ctx, doc.held)
 	d := doc.d
 	cat := d.Catalog()
 	di := &DocumentInfo{
