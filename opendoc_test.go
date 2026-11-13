@@ -253,7 +253,7 @@ func TestOpenDocumentPageFitsBudgetWithoutParseHeadroom(t *testing.T) {
 		t.Fatal(err)
 	}
 	need := limits.PeakReserved()
-	SetMemoryLimit(need + int64(len(data)) + 16) // fits the page and the bytes it reads, not the page plus the table and the file
+	SetMemoryLimit(need + 16)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(data), 1, Limits{})
@@ -264,7 +264,7 @@ func TestOpenDocumentPageFitsBudgetWithoutParseHeadroom(t *testing.T) {
 	defer doc.Close()
 	got, gerr := doc.PageRaster(ctx, 1)
 	if werr != nil || gerr != nil || !reflect.DeepEqual(got, want) {
-		t.Errorf("budget %d: open-once err=%v; one-shot err=%v; equal=%v", need+int64(len(data))+16, gerr, werr, reflect.DeepEqual(got, want))
+		t.Errorf("budget %d: open-once err=%v; one-shot err=%v; equal=%v", need+16, gerr, werr, reflect.DeepEqual(got, want))
 	}
 	// And a one-shot call on another document is not starved meanwhile.
 	if _, err := ExtractPageRasterLimits(ctx, bytes.NewReader(corpus.ScanJPEG()), 1, Limits{}); err != nil {

@@ -1428,18 +1428,31 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	if err := limits.Check("image-pixels", int64(info.Width)*int64(info.Height), d.lim.ImagePixels()); err != nil {
 		return nil, "", err
 	}
-	if d.lazy && sd.Raw == nil {
-		// The bytes are read now, held for this call under the budget, and let go when it returns.
+	last := lastFilter(sd)
+	codec := last == "DCTDecode" || last == "JPXDecode" || last == "JBIG2Decode"
+	// A lazy image's bytes are read now, held for this call under the budget, and let go
+	// when it returns. Never hold one reservation while waiting on another: the waiter would
+	// wait on itself. A codec stream has no decode reservation of its own to fold them into,
+	// so it holds its own, and hands it back before the CMYK DCT gate asks for more; any
+	// other stream's bytes join the decode reservation below.
+	lazyRaw := d.lazy && sd.Raw == nil
+	releaseRaw := func() {}
+	defer func() {
+		if lazyRaw {
+			sd.Raw = nil
+		}
+		releaseRaw()
+	}()
+	if lazyRaw && codec {
 		release, err := limits.Reserve(ctx, rawLen(sd))
 		if err != nil {
 			return nil, "", err
 		}
-		defer func() { sd.Raw = nil; release() }()
+		releaseRaw = release
 		if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
 			return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: %w", id, err)
 		}
 	}
-	last := lastFilter(sd)
 	bpc, n := info.BPC, 4 // four components when the colour space does not say
 	if info.ImageMask {
 		bpc, n = 1, 1
@@ -1465,7 +1478,6 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	// The bound is on pixels. When the last filter is a codec, the layers in
 	// front of it (Flate around DCT) yield compressed bytes, which for a tiny
 	// image outweigh its pixels, so they get a floor.
-	codec := last == "DCTDecode" || last == "JPXDecode" || last == "JBIG2Decode"
 	if codec {
 		declared = max(declared, 1<<20)
 	}
@@ -1488,11 +1500,22 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 			smRaw = rawLen(sm)
 		}
 		px := limits.MulSat(int64(info.Width), int64(info.Height))
-		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+3*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px+smRaw)
+		// The decode's own need has room for encoded bytes up to the declared size; only a
+		// stream bigger than that adds to it.
+		var extra int64
+		if lazyRaw {
+			extra = max(rawLen(sd)-declared, 0)
+		}
+		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+3*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px+smRaw+extra)
 		if err != nil {
 			return nil, "", err
 		}
 		defer release()
+		if lazyRaw {
+			if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
+				return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: %w", id, err)
+			}
+		}
 		if sm != nil {
 			if smRaw > 0 {
 				if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sm); err != nil {
@@ -1511,7 +1534,7 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	saved := lims.MaxDecodeBytes
 	lims.MaxDecodeBytes = declared
 	defer func() { lims.MaxDecodeBytes = saved }()
-	release, err := d.reserveCMYKDCT(sd, info, declared)
+	release, err := d.reserveCMYKDCT(sd, info, declared, func() { releaseRaw(); releaseRaw = func() {} })
 	if err != nil {
 		return nil, "", err
 	}
@@ -1599,8 +1622,9 @@ func (d *doc) softMask(sd *types.StreamDict, info ImageInfo) (*types.StreamDict,
 // pixel cap is a *limits.LimitError; one the dictionary does not allow is
 // ErrUnsupportedCodec. Anything else returns a no-op release. declared bounds
 // what pdfcpu holds after the decode (gob, then the RGBA it renders), so three
-// copies of it join the decode's own need in the reservation.
-func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int64) (func(), error) {
+// copies of it join the decode's own need in the reservation. handoff runs just
+// before that reservation is asked for.
+func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int64, handoff func()) (func(), error) {
 	none := func() {}
 	n := len(sd.FilterPipeline)
 	if n == 0 || sd.FilterPipeline[n-1].Name != filter.DCT {
@@ -1618,6 +1642,7 @@ func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int6
 		}
 		jpg = cp.Content
 	}
+	handoff() // the reservation below covers the decode; waiting on it while holding the raw one would deadlock
 	_, release, err := dct.Reserve(context.Background(), jpg, d.lim.ImagePixels(), int64(info.Width)*int64(info.Height), 4, 3*declared)
 	if err != nil {
 		var le *limits.LimitError
