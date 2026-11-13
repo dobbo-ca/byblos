@@ -1726,7 +1726,13 @@ func (d *doc) RawBitonal(ctx context.Context, id int) (pix []byte, stride int, e
 	if int64(len(cp.Content)) < int64(stride)*int64(info.Height) {
 		return nil, 0, fmt.Errorf("byblos/pdfdoc: image %d: %d bytes of samples for %d rows of %d", id, len(cp.Content), info.Height, stride)
 	}
-	return cp.Content[:stride*info.Height], stride, nil
+	pix = cp.Content[:stride*info.Height]
+	if len(sd.Raw) > 0 && len(pix) > 0 && &pix[0] == &sd.Raw[0] {
+		// With no filter left to decode, Content is Raw itself. The caller packs
+		// these bytes in place, which must not flip the document's own stream.
+		pix = append([]byte(nil), pix...) // inside the declared-bytes reservation above
+	}
+	return pix, stride, nil
 }
 
 // RawImageGlobals returns the JBIG2 page-0 segments image id declares in

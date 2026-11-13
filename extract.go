@@ -319,7 +319,9 @@ type PageRaster struct {
 	// asked for it (Limits.PackedBitonal) and the source is a declared-bitonal
 	// DeviceGray or image mask that is not masked: CCITT, JBIG2, 1-bpc Flate.
 	// A set bit is a pixel that renders dark -- below 128 once /Decode is
-	// applied -- so it is the RGBA decode thresholded at 128, at an eighth of
+	// applied -- so it is the RGBA decode thresholded at 128 (except for a
+	// /Decode value within a half level of 0.5: byblos rounds it to a gray
+	// level as poppler does, pdfcpu truncates), at an eighth of
 	// the memory of a byte a pixel and a thirty-second of the RGBA. Anything
 	// else keeps Image, with Bitmap nil.
 	Bitmap *Bitmap
