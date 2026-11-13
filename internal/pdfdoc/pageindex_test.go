@@ -96,3 +96,35 @@ func TestIndexedPageDictMatchesPdfcpu(t *testing.T) {
 		}
 	}
 }
+
+// A /Pages node without /Count is a tree the index does not understand:
+// pdfcpu enters it and its attributes leak into later pages, so lookups must
+// stay on pdfcpu's path and return the same values.
+func TestPageIndexFallsBackWithoutCount(t *testing.T) {
+	data := rawPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 /MediaBox [0 0 100 200] >>",
+		"<< /Type /Pages /Parent 2 0 R /Kids [4 0 R] /Rotate 90 /MediaBox [0 0 1 1] >>",
+		"<< /Type /Page /Parent 3 0 R >>",
+		"<< /Type /Page /Parent 2 0 R >>",
+	})
+	od, err := Open(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := od.(*doc)
+	if d.buildPageIndex() != nil {
+		t.Fatal("tree with a /Pages node lacking /Count was indexed")
+	}
+	got, ginh, err := d.pageDict(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _, winh, err := d.ctx.XRefTable.PageDict(context.Background(), 2, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(ginh, winh) {
+		t.Errorf("page 2: got %v %+v, pdfcpu %v %+v", got, ginh, want, winh)
+	}
+}
