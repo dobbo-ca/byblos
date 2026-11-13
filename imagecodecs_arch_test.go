@@ -52,8 +52,8 @@ func TestNoFormatRegisteringImageDecoderIsImported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go list: %v", err)
 	}
-	// ccitt is a filter, not a format: it registers nothing and
-	// internal/jbig2/fixtures_test.go already uses it. draw is the resampler
+	// ccitt is a filter, not a format: it registers nothing (the in-tree JBIG2
+	// decoder's fixtures used it before jbig2-go replaced it). draw is the resampler
 	// byb-b3 needs; `go list -deps golang.org/x/image/draw` is the standard
 	// library plus golang.org/x/image/math/f64, and neither registers.
 	// font/sfnt and math/fixed are the TrueType parser stage 4c (byb-8b9.3)

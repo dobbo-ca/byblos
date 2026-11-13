@@ -198,27 +198,33 @@ into an error. They are configurable and nothing else.
 |---|---|---|
 | JBIG2 page pixels | 1<<26 | `jbig2.go` (`maxJBIG2Pixels`): the image dictionary's declared size is checked against it before any decode |
 
-JBIG2 is decoded by `github.com/dobbo-ca/jbig2-go`, which carries its own
-stream budgets (page pixels, bitmap bytes, segments, symbols; see its
-`docs/guides/memory-limits.md`). byblos passes it `maxJBIG2Pixels` as the page
-pixel cap (the page, its regions and every symbol, including a globals
-dictionary, share it) and reserves its own share (the packed bitmap and the
-one-byte-per-pixel raster) from its budget first. jbig2-go reserves its own
-decode estimate from a separate, non-waiting process-wide pool
-(`jbig2.SetMemoryLimit`), so `SetMemoryLimit` here does not bound the decode
-itself, and the two default pools can together claim more than half of
-GOMEMLIMIT.
+JBIG2 is decoded by `github.com/dobbo-ca/jbig2-go` (v0.2.0), and byblos's budget
+is the only pool the decode draws on, as for DCT. Before anything is reserved
+or decoded, `jbig2.PageSize` reads the page size from the headers and a page
+that disagrees with the image dictionary is refused with no pixel decoded. Then
+`decodeJBIG2Placement` reserves, from `SetMemoryLimit`'s budget, the
+one-byte-per-pixel raster plus the most jbig2-go can estimate for a decode under
+these caps (`jbig2DecodeBound`: the 16 MiB packed-bitmap cap, 96 bytes a declared
+symbol up to 1<<16, 256 a segment up to 1<<16, the stream and 256 KiB of context
+arrays; about 38 MiB), and calls `jbig2.Decode` with `Reserved: true` and
+`MaxBytes` set to the decode's part of it, so jbig2-go's own process-wide pool
+(`jbig2.SetMemoryLimit`) is skipped. Caps handed to it are the old decoder's:
+`maxJBIG2Pixels` for pages, regions and symbols together (including a globals
+dictionary), 1<<16 symbols and 1<<16 segments, so what is refused as
+`unsupported-codec-jbig2` is unchanged.
 
-This departs from plan item B1 (byblos reserves from its own pool, as for
-jpeg-go). Meeting it needs jbig2-go to take a reserve func on its public
-`Decode`; its internal `DecodeStream` already does. Status: open, pending a
-decision by the kleio primary review session on whether to wait for that
-jbig2-go release.
+A reservation larger than the whole budget, and a `*jbig2.LimitError` named
+`MaxBytes` or `MemoryLimit`, are a `*LimitError` (permanent). A budget held by
+others waits until ctx ends and is `ErrMemoryLimit` (transient), the same as a
+DCT decode. A cancelled ctx comes back as the context's error and moves no
+counter.
 
-A `jbig2.ErrMemoryLimit` from that pool comes back as `ErrMemoryLimit`
-(transient) when the request would fit the pool alone, and as a `*LimitError`
-(permanent) when it is larger than the whole pool, as the contract above
-requires.
+A striped page (height 0xFFFFFFFF, sized from its regions) has no size in its
+headers, so `jbig2.PageSize` returns `ErrNoPageSize` for it, as it does for a
+stream with no page-information segment or malformed headers. byblos does not
+refuse any of them for that: the reservation above does not depend on the
+page's size, `jbig2.Decode` refuses what is malformed or unsupported, and the
+decoded size is compared with the dictionary afterwards.
 
 `ctx` entry points exist today for the nine document-scale primitives,
 `BuildFromPagesContext`, `RenderPageContext` and the `...Limits` forms above: `InspectContext` (`inspect.go:213`),

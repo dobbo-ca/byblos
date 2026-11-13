@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 	jbig2 "github.com/dobbo-ca/jbig2-go"
 )
@@ -585,13 +589,22 @@ func jbig2ReplacedDoc(t *testing.T) []byte {
 	return out.Bytes()
 }
 
-// TestJBIG2RequestOverTheWholePoolIsPermanent: a request larger than jbig2-go's
-// whole pool can never fit, so retrying it forever is wrong. It must be a
-// *LimitError (permanent), not ErrMemoryLimit and not a refusal or divert.
-func TestJBIG2RequestOverTheWholePoolIsPermanent(t *testing.T) {
+// jbig2Info is a dictionary for an image of the given size.
+func jbig2Info(w, h int) func(int) (pdfdoc.ImageInfo, bool) {
+	return func(int) (pdfdoc.ImageInfo, bool) { return grayInfo(w, h), true }
+}
+
+// TestJBIG2RequestOverTheWholeBudgetIsPermanent: a decode whose reservation is
+// larger than byblos's whole budget can never fit, so retrying it forever is
+// wrong. It must be a *LimitError (permanent), not ErrMemoryLimit and not a
+// refusal or divert. byblos.SetMemoryLimit is the only pool: jbig2-go's own is
+// never consulted (jbig2.SetMemoryLimit(1) must change nothing).
+func TestJBIG2RequestOverTheWholeBudgetIsPermanent(t *testing.T) {
 	doc := jbig2ReplacedDoc(t)
+	src := jbig2TestBitmap()
 	jbig2.SetMemoryLimit(1)
 	t.Cleanup(func() { jbig2.SetMemoryLimit(0) })
+	defer SetMemoryLimit(SetMemoryLimit(32 << 20)) // above a small PDF's parse, below jbig2DecodeBound
 
 	ResetExtractStats()
 	_, err := ExtractPageRaster(bytes.NewReader(doc), 1)
@@ -599,61 +612,172 @@ func TestJBIG2RequestOverTheWholePoolIsPermanent(t *testing.T) {
 	if !errors.As(err, &le) {
 		t.Fatalf("err = %v; want a *LimitError", err)
 	}
+	if le.Got < jbig2DecodeBound(0) {
+		t.Errorf("LimitError %+v is not the JBIG2 reservation (want Got >= %d); the budget tripped earlier", le, jbig2DecodeBound(0))
+	}
 	if errors.Is(err, ErrMemoryLimit) {
 		t.Errorf("err = %v; a request that can never fit must not be transient", err)
 	}
 	var rr *RasterRefusal
 	if errors.As(err, &rr) {
-		t.Errorf("pool overflow became a refusal %q", rr.Reason)
+		t.Errorf("a budget overflow became a refusal %q", rr.Reason)
 	}
 	if got := ExtractStats(); got.Diverted != 0 {
-		t.Errorf("pool overflow was counted as a divert: %+v", got)
+		t.Errorf("a budget overflow was counted as a divert: %+v", got)
+	}
+
+	// The same through the placement, with a budget below even the raster.
+	SetMemoryLimit(1 << 10)
+	data, _ := encodeJBIG2Generic(src)
+	_, err = decodeJBIG2Placement(context.Background(), data, nil, jbig2Info(src.Width, src.Height), 7)
+	if !errors.As(err, &le) || errors.Is(err, ErrMemoryLimit) {
+		t.Errorf("tiny budget: err = %v; want a permanent *LimitError", err)
 	}
 }
 
-// TestJBIG2PoolRequestParses pins the jbig2-go wording jbig2PoolRequest reads,
-// against the real error, and the transient case (fits alone, pool busy).
-func TestJBIG2PoolRequestParses(t *testing.T) {
-	stream, err := encodeJBIG2Generic(jbig2TestBitmap())
+// TestJBIG2BudgetHeldElsewhereIsTransient: a decode that fits the budget alone
+// but not while another operation holds it waits for it, as a DCT decode does
+// (TestDCTDecodeSharesByblosBudget), and ends with ErrMemoryLimit when ctx does.
+func TestJBIG2BudgetHeldElsewhereIsTransient(t *testing.T) {
+	src := jbig2TestBitmap()
+	data, err := encodeJBIG2Generic(src)
 	if err != nil {
-		t.Fatalf("encodeJBIG2Generic: %v", err)
+		t.Fatal(err)
 	}
-	jbig2.SetMemoryLimit(1)
-	t.Cleanup(func() { jbig2.SetMemoryLimit(0) })
-	_, err = jbig2.Decode(context.Background(), stream, nil, jbig2.Limits{})
-	need, limit, ok := jbig2PoolRequest(err)
-	if !ok || limit != 1 || need <= limit {
-		t.Fatalf("jbig2PoolRequest(%v) = %d, %d, %v; want need > 1 and limit 1", err, need, limit, ok)
+	need := int64(src.Width*src.Height) + jbig2DecodeBound(len(data))
+	defer SetMemoryLimit(SetMemoryLimit(need + 1<<20))
+	release, err := limits.Reserve(context.Background(), need)
+	if err != nil {
+		t.Fatal(err)
 	}
-	busy := fmt.Errorf("%w: need 10 bytes, 95 of 100 in use", jbig2.ErrMemoryLimit)
-	if need, limit, ok := jbig2PoolRequest(busy); !ok || need > limit {
-		t.Errorf("a busy pool read as need %d limit %d ok %v; want need <= limit", need, limit, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err = decodeJBIG2Placement(ctx, data, nil, jbig2Info(src.Width, src.Height), 7)
+	var le *LimitError
+	if !errors.Is(err, ErrMemoryLimit) || errors.As(err, &le) {
+		t.Fatalf("err = %v; want transient ErrMemoryLimit, not a *LimitError", err)
+	}
+	release()
+	if _, err := decodeJBIG2Placement(context.Background(), data, nil, jbig2Info(src.Width, src.Height), 7); err != nil {
+		t.Fatalf("after the release: %v", err)
+	}
+}
+
+// jbig2StripedStream is a legal striped page by hand: page height 0xFFFFFFFF
+// with the striping bit set, one generic region of w x h with no coded data (the
+// MQ decoder reads 1 bits past its end, so the region decodes at its declared
+// size), and an end-of-stripe segment at row h-1, which is what fixes the page
+// height (T.88 7.4.8.2).
+func jbig2StripedStream(w, h int) []byte {
+	seg := func(num uint32, typ byte, data []byte) []byte {
+		hd := binary.BigEndian.AppendUint32(nil, num)
+		hd = append(hd, typ, 0x00, 0x01)
+		hd = binary.BigEndian.AppendUint32(hd, uint32(len(data)))
+		return append(hd, data...)
+	}
+	pi := binary.BigEndian.AppendUint32(nil, uint32(w))
+	pi = binary.BigEndian.AppendUint32(pi, 0xFFFFFFFF)
+	pi = binary.BigEndian.AppendUint32(pi, 0)
+	pi = binary.BigEndian.AppendUint32(pi, 0)
+	pi = append(pi, 0x01, 0x80, 0x10) // striped, maximum stripe size 16
+	r := binary.BigEndian.AppendUint32(nil, uint32(w))
+	r = binary.BigEndian.AppendUint32(r, uint32(h))
+	r = binary.BigEndian.AppendUint32(r, 0)
+	r = binary.BigEndian.AppendUint32(r, 0)
+	r = append(r, 0x00, 0x00)
+	r = append(r, 0x03, 0xFF, 0xFD, 0xFF, 0x02, 0xFE, 0xFE, 0xFE)
+	eos := binary.BigEndian.AppendUint32(nil, uint32(h-1))
+	return append(append(seg(0, 48, pi), seg(1, 38, r)...), seg(2, 50, eos)...)
+}
+
+// TestDecodeJBIG2PlacementDecodesAStripedPage: a legal striped stream has no
+// size in its headers (jbig2.PageSize returns ErrNoPageSize), and byblos must
+// neither refuse nor divert it for that. It decodes and the decoded size is
+// checked against the dictionary afterwards, as main did, through the public
+// ExtractPageRaster as well as the placement.
+func TestDecodeJBIG2PlacementDecodesAStripedPage(t *testing.T) {
+	const w, h = 24, 10
+	stream := jbig2StripedStream(w, h)
+	if _, _, err := jbig2.PageSize(stream, nil); !errors.Is(err, jbig2.ErrNoPageSize) {
+		t.Fatalf("PageSize err = %v; the fixture must be a stream PageSize cannot size", err)
+	}
+	img, err := decodeJBIG2Placement(context.Background(), stream, nil, jbig2Info(w, h), 7)
+	if err != nil {
+		t.Fatalf("a legal striped page was refused: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != w || b.Dy() != h {
+		t.Fatalf("raster is %v; want %dx%d", b, w, h)
+	}
+	// The decoded size is still checked against the dictionary.
+	_, err = decodeJBIG2Placement(context.Background(), stream, nil, jbig2Info(w, h+1), 7)
+	if err == nil || !strings.Contains(err.Error(), "page is 24x10 but image 7's dictionary says 24x11") {
+		t.Fatalf("err = %v; want the post-decode size mismatch", err)
+	}
+
+	in := corpusDoc(t, "scan")
+	ref := inspect(t, "scan")[0].Images[0]
+	var out bytes.Buffer
+	if err := ReplaceImages(&out, bytes.NewReader(in), map[int]EncodedImage{
+		ref.ObjNr: {Width: w, Height: h, BPC: 1, ColorSpace: ColorSpace{Name: "DeviceGray"},
+			Filter: "JBIG2Decode", Data: stream},
+	}); err != nil {
+		t.Fatalf("ReplaceImages: %v", err)
+	}
+	ResetExtractStats()
+	pr, err := ExtractPageRaster(bytes.NewReader(out.Bytes()), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster on a striped page: %v", err)
+	}
+	if b := pr.Image.Bounds(); b.Dx() != w || b.Dy() != h {
+		t.Errorf("extracted raster is %v; want %dx%d", b, w, h)
+	}
+	if got := ExtractStats(); got.Diverted != 0 || got.Failed != 0 {
+		t.Errorf("a striped page moved the failure counters: %+v", got)
+	}
+}
+
+// cancelInJBIG2 is cancelled by the first ctx.Err() call made from inside
+// jbig2-go, and stays cancelled, so the cancel lands during jbig2.Decode and
+// nowhere earlier.
+type cancelInJBIG2 struct {
+	context.Context
+	hit bool
+}
+
+func (c *cancelInJBIG2) Err() error {
+	if c.hit {
+		return context.Canceled
+	}
+	pcs := make([]uintptr, 16)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.Contains(f.Function, "dobbo-ca/jbig2-go") {
+			c.hit = true
+			return context.Canceled
+		}
+		if !more {
+			return nil
+		}
 	}
 }
 
 // TestJBIG2CancelMidDecodeIsNotADivert: a cancellation that lands inside
 // jbig2.Decode is the caller's, so it comes back as the context error and does
-// not count as a divert.
+// not move the counters (TestCancelledExtractionDoesNotMoveTheCounters).
 func TestJBIG2CancelMidDecodeIsNotADivert(t *testing.T) {
 	doc := jbig2ReplacedDoc(t)
-	var sawJBIG2 bool
-	for after := 1; after < 200; after++ {
-		ResetExtractStats()
-		cc := &cancelAtCheck{Context: context.Background(), after: after}
-		_, err := ExtractPageRasterContext(cc, bytes.NewReader(doc), 1)
-		if err == nil {
-			break // past the last check
-		}
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("cancel at check %d returned %v; want context.Canceled", after, err)
-		}
-		if got := ExtractStats(); got.Diverted != 0 {
-			t.Fatalf("cancel at check %d counted a divert: %+v", after, got)
-		}
-		sawJBIG2 = true
+	ResetExtractStats()
+	cc := &cancelInJBIG2{Context: context.Background()}
+	_, err := ExtractPageRasterContext(cc, bytes.NewReader(doc), 1)
+	if !cc.hit {
+		t.Fatal("jbig2-go never checked the context; the test proved nothing")
 	}
-	if !sawJBIG2 {
-		t.Fatal("no check cancelled the extraction; the sweep proved nothing")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v; want context.Canceled", err)
+	}
+	if got := ExtractStats(); got.Diverted != 0 || got.Failed != 0 || len(got.Reasons) != 0 {
+		t.Fatalf("a cancel inside the decode moved the counters: %+v", got)
 	}
 }
 
@@ -693,9 +817,9 @@ func TestDecodeJBIG2PlacementComparesSizesBeforeDecoding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, h, ok := jbig2PageSize(stream)
-	if !ok || w != 8000 || h != 8000 {
-		t.Fatalf("jbig2PageSize = %d, %d, %v; want 8000, 8000, true", w, h, ok)
+	w, h, err := jbig2.PageSize(stream, nil)
+	if err != nil || w != 8000 || h != 8000 {
+		t.Fatalf("jbig2.PageSize = %d, %d, %v; want 8000, 8000, nil", w, h, err)
 	}
 	// Page-information segment: 11-byte header (no referred-to segments, 1-byte
 	// page association) plus its 19-byte body.
@@ -706,5 +830,74 @@ func TestDecodeJBIG2PlacementComparesSizesBeforeDecoding(t *testing.T) {
 	_, err = decodeJBIG2Placement(context.Background(), head, nil, info, 7)
 	if err == nil || !strings.Contains(err.Error(), "page is 8000x8000 but image 7's dictionary says 10x10") {
 		t.Fatalf("err = %v; want the size mismatch, raised before decoding", err)
+	}
+}
+
+// wastedWorkStreamHex is 67 bytes of legal JBIG2 whose cost would be thrown
+// away: a 1x1 page and one generic region of 8192x4095 (33,546,240 pixels, no
+// coded data) at (0,0), 4,193,281 packed bytes together, inside the byte cap. A
+// decoder that charged only the region's pixels would run the MQ decoder over
+// 33.5 million of them to hand back one. jbig2-go refuses it from the headers.
+const wastedWorkStreamHex = "000000003000010000001300000001000000010000000000000000010000000000012600010000001a0000200000000fff0000000000000000000003fffdff02fefefe"
+
+// wastedWorkDoc is a document whose pages (a fixture's own image objects) are
+// replaced by the 67-byte stream under a 1x1 dictionary, so the dictionary
+// agrees with the page and only the region's cost is in question.
+func wastedWorkDoc(t *testing.T, fixture string) []byte {
+	t.Helper()
+	data, err := hex.DecodeString(wastedWorkStreamHex)
+	if err != nil || len(data) != 67 {
+		t.Fatalf("fixture hex: %d bytes, %v", len(data), err)
+	}
+	repl := map[int]EncodedImage{}
+	for _, p := range inspect(t, fixture) {
+		repl[p.Images[0].ObjNr] = EncodedImage{Width: 1, Height: 1, BPC: 1,
+			ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "JBIG2Decode", Data: data}
+	}
+	var out bytes.Buffer
+	if err := ReplaceImages(&out, bytes.NewReader(corpusDoc(t, fixture)), repl); err != nil {
+		t.Fatalf("ReplaceImages: %v", err)
+	}
+	return out.Bytes()
+}
+
+// TestExtractPageRasterBoundsDecodingByWhatItCanReturn drives the stream
+// through ExtractPageRaster: jbig2-go refuses it from its headers, so the page
+// is diverted at once (the wall-clock guard is far above any header parse).
+func TestExtractPageRasterBoundsDecodingByWhatItCanReturn(t *testing.T) {
+	doc := wastedWorkDoc(t, "scan")
+	start := time.Now()
+	pr, err := ExtractPageRaster(bytes.NewReader(doc), 1)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("took %v on a 67-byte stream", elapsed)
+	}
+	if err == nil {
+		if b := pr.Image.Bounds(); b.Dx() != 1 || b.Dy() != 1 {
+			t.Fatalf("returned a %v raster for a 1x1 page", b)
+		}
+		return
+	}
+	var rr *RasterRefusal
+	if !errors.As(err, &rr) || rr.Reason != "unsupported-codec-jbig2" {
+		t.Fatalf("err = %v; want the stream refused as unsupported-codec-jbig2", err)
+	}
+}
+
+// TestRecordExtractionBoundsDecodingByWhatItCanReturn is the same over every
+// page of a document (RecordExtraction pays once per page).
+func TestRecordExtractionBoundsDecodingByWhatItCanReturn(t *testing.T) {
+	doc := wastedWorkDoc(t, "dup-raster")
+	start := time.Now()
+	prov, err := RecordExtraction(bytes.NewReader(doc))
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("took %v over 2 pages of a 67-byte stream", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("RecordExtraction: %v", err)
+	}
+	for _, pg := range prov.Pages {
+		if pg.Diverted != "" && pg.Diverted != "unsupported-codec-jbig2" {
+			t.Errorf("a page diverted as %q; want it refused as unsupported-codec-jbig2 or extracted", pg.Diverted)
+		}
 	}
 }

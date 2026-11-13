@@ -8,9 +8,9 @@ import (
 
 // TestReplaceImagesCarriesASauvolaJBIG2PageIntoAnExistingPDF is byb-js5.4:
 // nothing else in the suite drives corpusDoc -> ExtractPageRaster -> Sauvola
-// -> EncodeJBIG2Generic -> ReplaceImages -> re-extract on a REAL raster.
-// sauvola_test.go covers Sauvola -> EncodeJBIG2Generic on synthetic images;
-// jbig2_decode_test.go covers EncodeJBIG2Generic -> ReplaceImages -> re-extract
+// -> jbig2-go Encode -> ReplaceImages -> re-extract on a REAL raster.
+// sauvola_test.go covers Sauvola -> jbig2-go Encode on synthetic images;
+// jbig2_decode_test.go covers jbig2-go Encode -> ReplaceImages -> re-extract
 // on a synthetic bitmap. This is the seam neither half crosses, modelled on
 // TestReplaceImagesCarriesAQuantizedIndexedImageIntoAnExistingPDF
 // (substitute_test.go) for the pngquant chain.

@@ -26,7 +26,7 @@ package byblos
 // 160-point page puts 40 device pixels on a side of every cell, and the middle
 // half of each cell is then flat colour that either agrees or does not.
 //
-// It skips when pdftoppm is absent, as internal/jbig2's pdfimages tests do.
+// It skips when pdftoppm is absent, as the other poppler-backed tests do.
 
 import (
 	"bytes"
