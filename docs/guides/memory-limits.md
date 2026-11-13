@@ -226,6 +226,14 @@ refuse any of them for that: the reservation above does not depend on the
 page's size, `jbig2.Decode` refuses what is malformed or unsupported, and the
 decoded size is compared with the dictionary afterwards.
 
+KNOWN DEVIATION FROM THE DECODER THIS REPLACED: that decoder sized a striped page
+from its regions' headers and refused a dictionary mismatch with no pixel
+decoded. jbig2-go does not expose a plan-based size, so a striped page that
+disagrees with its dictionary is decoded (up to `maxJBIG2Pixels`) and only then
+refused. Capping the decode at the dictionary's size instead would starve a
+document whose globals dictionary is large, so it is not done; closing this
+needs a jbig2-go API for the plan-based size.
+
 `ctx` entry points exist today for the nine document-scale primitives,
 `BuildFromPagesContext`, `RenderPageContext` and the `...Limits` forms above: `InspectContext` (`inspect.go:213`),
 `ExtractPageRasterContext` (`extract.go:437`), `OptimizeContext`

@@ -637,28 +637,30 @@ func TestJBIG2RequestOverTheWholeBudgetIsPermanent(t *testing.T) {
 
 // TestJBIG2BudgetHeldElsewhereIsTransient: a decode that fits the budget alone
 // but not while another operation holds it waits for it, as a DCT decode does
-// (TestDCTDecodeSharesByblosBudget), and ends with ErrMemoryLimit when ctx does.
+// (TestDCTDecodeSharesByblosBudget), and through the public API ends with
+// ErrMemoryLimit, counted as Failed, when ctx does.
 func TestJBIG2BudgetHeldElsewhereIsTransient(t *testing.T) {
+	doc := jbig2ReplacedDoc(t)
 	src := jbig2TestBitmap()
-	data, err := encodeJBIG2Generic(src)
+	px := int64(src.Width * src.Height)
+	defer SetMemoryLimit(SetMemoryLimit(px + jbig2DecodeBound(0) + 1<<20))
+	release, err := limits.Reserve(context.Background(), 2<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	need := int64(src.Width*src.Height) + jbig2DecodeBound(len(data))
-	defer SetMemoryLimit(SetMemoryLimit(need + 1<<20))
-	release, err := limits.Reserve(context.Background(), need)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ResetExtractStats()
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	_, err = decodeJBIG2Placement(ctx, data, nil, jbig2Info(src.Width, src.Height), 7)
+	_, err = ExtractPageRasterContext(ctx, bytes.NewReader(doc), 1)
 	var le *LimitError
 	if !errors.Is(err, ErrMemoryLimit) || errors.As(err, &le) {
 		t.Fatalf("err = %v; want transient ErrMemoryLimit, not a *LimitError", err)
 	}
+	if got := ExtractStats(); got.Failed != 1 || got.Diverted != 0 {
+		t.Errorf("stats = %+v; want one Failed and no divert", got)
+	}
 	release()
-	if _, err := decodeJBIG2Placement(context.Background(), data, nil, jbig2Info(src.Width, src.Height), 7); err != nil {
+	if _, err := ExtractPageRaster(bytes.NewReader(doc), 1); err != nil {
 		t.Fatalf("after the release: %v", err)
 	}
 }

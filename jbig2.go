@@ -54,7 +54,9 @@ func jbig2DecodeBound(streamLen int) int64 {
 // (jbig2.ErrNoPageSize); they are not refused for that. Decode reads the headers
 // again and refuses what is malformed or unsupported, and the decoded page's
 // size is compared with the dictionary after it, so a striped page decodes and
-// is checked as soon as it exists.
+// is checked as soon as it exists. That is a known deviation from the decoder this
+// replaced, which sized a striped page from its regions and refused a mismatch
+// before decoding: jbig2-go exposes no plan-based size.
 //
 // There is ONE memory pool. byblos reserves the raster (one byte a pixel) and
 // jbig2-go's whole decode (jbig2DecodeBound) from its own budget, as the DCT

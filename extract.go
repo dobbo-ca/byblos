@@ -559,15 +559,19 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		}
 		img, err = decodeJBIG2Placement(ctx, data, globals, d.ImageInfo, placement.ID)
 		if err != nil {
-			// A cancellation inside the decode is the caller's, not the page's:
-			// no divert, no counter (TestCancelledExtractionDoesNotMoveTheCounters).
-			if cerr := checkContext(ctx); cerr != nil {
-				return nil, PageProvenance{}, cerr
-			}
+			// A budget error comes first: limits.Reserve gives up only when ctx
+			// ends and wraps ctx's error in ErrMemoryLimit, so asking about the
+			// context first would turn "the budget was held" into a bare
+			// deadline and skip the Failed count, unlike a DCT decode.
 			var le *LimitError
 			if errors.As(err, &le) || errors.Is(err, ErrMemoryLimit) {
 				countFailure()
 				return nil, PageProvenance{}, err
+			}
+			// A cancellation inside the decode is the caller's, not the page's:
+			// no divert, no counter (TestCancelledExtractionDoesNotMoveTheCounters).
+			if cerr := checkContext(ctx); cerr != nil {
+				return nil, PageProvenance{}, cerr
 			}
 			// No fileType interpolation here, unlike the sibling sites: every
 			// error this branch can produce already opens with "jbig2:", so
