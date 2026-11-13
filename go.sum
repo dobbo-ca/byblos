@@ -4,6 +4,8 @@ github.com/dobbo-ca/jpeg-go v0.7.0 h1:Ki4iIDlsBpyaDs8G29fwIDPoMtnNQXBQ+v0e+d9Sk4
 github.com/dobbo-ca/jpeg-go v0.7.0/go.mod h1:9/XuoqEPO9n3BgqJz/CWk3lCfFOKgGVyOdEB/vLfAiw=
 github.com/dobbo-ca/pdf-go v0.17.0 h1:5xaIlZyUVOdYlEBPcS4vnY4J3NvDv7Zh5vOKt+egnSQ=
 github.com/dobbo-ca/pdf-go v0.17.0/go.mod h1:qQVgS3FqgKO5uEEj0kdu/05NeT5L3NgPA/M1lDUukKI=
+github.com/dobbo-ca/pdf-go v0.17.2-0.20261113035513-6eca30a31677 h1:wVwHjDuHdyDPK60NQcnfooqoHXGObrZZRa/uCLUKxoo=
+github.com/dobbo-ca/pdf-go v0.17.2-0.20261113035513-6eca30a31677/go.mod h1:qQVgS3FqgKO5uEEj0kdu/05NeT5L3NgPA/M1lDUukKI=
 github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
 github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
 github.com/hhrutter/tiff v1.0.7 h1:Oelnv46vb9gycPsotT0q1IoJ6Ywkzd77I1smgQvkP7g=

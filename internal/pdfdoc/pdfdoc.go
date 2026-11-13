@@ -381,6 +381,8 @@ type doc struct {
 	pageForms map[int][]byte // decoded forms already counted in pageBytes, shared by every Do of one form
 	limitErr  error          // first limit breach a bool-returning lookup had to swallow
 
+	lazy bool // image bytes are loaded per page by XObject, not at open
+
 	pidx        *pageIndex // nil when the page tree is not one pageDict can index
 	pageIndexed bool       // pidx has been built
 }
@@ -404,6 +406,15 @@ func Open(rs io.ReadSeeker) (Doc, error) {
 // budget.
 func OpenLimits(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
 	return openDoc(ctx, rs, lim)
+}
+
+// OpenLazy is OpenLimits for a read-only caller: image stream bytes are not
+// held from the open. XObject reads an image's bytes from rs when the page that
+// draws it is walked, onto the page's copy of the stream dictionary, which
+// EndPage drops. So rs must stay readable until the Doc is dropped, and the
+// Doc must not be written or optimized (those want every stream loaded).
+func OpenLazy(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
+	return openSized(ctx, rs, lim, objectsIn(rs), true)
 }
 
 // OpenBudgeted is Open under lim, with the object table and one stream decode
@@ -470,7 +481,7 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	if err != nil {
 		return nil, nil, err
 	}
-	d, err := openSized(ctx, rs, lim, size)
+	d, err := openSized(ctx, rs, lim, size, false)
 	if err != nil {
 		release()
 		return nil, nil, err
@@ -481,14 +492,14 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 // openDoc is Open with the caps of lim. The /Size cap is checked before the parse
 // on every path; only OpenBudgeted also reserves memory.
 func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
-	return openSized(cctx, rs, lim, objectsIn(rs))
+	return openSized(cctx, rs, lim, objectsIn(rs), false)
 }
 
 // Parses counts pdfcpu parses begun, for tests that pin how many a call makes.
 var Parses atomic.Int64
 
 // openSized is openDoc given the object count objectsIn found.
-func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size int64) (d Doc, err error) {
+func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size int64, lazy bool) (d Doc, err error) {
 	defer catchPanic("open", &err)
 	Parses.Add(1)
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
@@ -512,6 +523,9 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 	conf.Limits.MaxTotalDecodeBytes = lim.TotalDecodeBytes()
 	conf.Limits.MaxParsedBytes = parsedBytes(lim, limits.ObjectTableBytes(size))
 	conf.Limits.MaxStreamTotalBytes = lim.MaxStreamTotalBytes
+	if lazy {
+		cctx = pdfcpu.WithLazyImageStreams(cctx)
+	}
 	ctx, err := api.ReadContext(cctx, rs, conf)
 	if err != nil {
 		if le := pdfcpuLimit(lim, err); le != nil {
@@ -542,6 +556,7 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 		refs:    map[int]types.IndirectRef{},
 		nextID:  -1,
 		lim:     lim,
+		lazy:    lazy,
 	}, nil
 }
 
@@ -1035,6 +1050,13 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 		if raw, ok := sd.Dict.Find("ColorSpace"); ok {
 			if n, ok := raw.(types.Name); ok {
 				csName = string(n)
+			}
+		}
+		if d.lazy && sd.Raw == nil {
+			if prev := d.streams[id]; prev != nil && prev.Raw != nil { // drawn twice on this page
+				sd = prev
+			} else if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
+				return content.XObject{}, false
 			}
 		}
 		d.images[id] = ImageInfo{
