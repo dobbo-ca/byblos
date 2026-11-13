@@ -107,6 +107,34 @@ func TestPageRasterSourceCarriesJBIG2AndItsGlobals(t *testing.T) {
 	}
 }
 
+// Source.Globals must be the caller's own copy: for an unfiltered globals
+// stream pdfcpu's Content is the same slice as the xref entry's Raw, so a write
+// through it would corrupt the next page's decode.
+func TestPageRasterSourceGlobalsAreACopy(t *testing.T) {
+	page, globals := symbolFixture(t, "symbol-page.jb2"), symbolFixture(t, "symbol-globals.jb2")
+	pdf := jbig2GlobalsPDF(page, globals, 640, 480)
+	for _, lim := range []Limits{{}, {PackedBitonal: true}} {
+		doc, err := OpenDocument(context.Background(), bytes.NewReader(pdf), lim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pr, err := doc.PageRaster(context.Background(), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clear(pr.Source.Globals)
+		clear(pr.Source.Data)
+		again, err := doc.PageRaster(context.Background(), 1)
+		if err != nil {
+			t.Fatalf("PageRaster after the caller wrote to Source: %v", err)
+		}
+		if !bytes.Equal(again.Source.Globals, globals) || !bytes.Equal(again.Source.Data, page) {
+			t.Error("second read's Source differs from the document's streams")
+		}
+		doc.Close()
+	}
+}
+
 func bitmapInk(b *Bitmap) int {
 	n := 0
 	for y := 0; y < b.Height; y++ {

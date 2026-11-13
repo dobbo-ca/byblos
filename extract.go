@@ -318,8 +318,9 @@ type PageRaster struct {
 	// Bitmap is the raster as packed bits, and Image is nil, when the call
 	// asked for it (Limits.PackedBitonal) and the source is a declared-bitonal
 	// DeviceGray or image mask that is not masked: CCITT, JBIG2, 1-bpc Flate.
-	// A set bit is a pixel that renders dark -- below 128 once /Decode is
-	// applied -- so it is the RGBA decode thresholded at 128 (except for a
+	// A set bit is a pixel below 128 once /Decode is applied (for a stencil
+	// that is the pixel painted, in the current fill colour, so "dark" only
+	// under a black fill) -- so it is the RGBA decode thresholded at 128 (except for a
 	// /Decode value within a half level of 0.5: byblos rounds it to a gray
 	// level as poppler does, pdfcpu truncates), at an eighth of
 	// the memory of a byte a pixel and a thirty-second of the RGBA. Anything
@@ -337,7 +338,9 @@ type ImageSource struct {
 	// Data is the encoded bytes after any filters that are not the image codec
 	// (the DCT stream under a Flate wrapper), for DCT and JBIG2 sources. It is
 	// nil for the rest: pdfcpu decodes CCITT and Flate itself and hands back
-	// no encoded stream.
+	// no encoded stream. (Accepted deviation from "encoded bytes after any
+	// non-codec layers": the G4 bytes are reachable, but nothing needs them
+	// yet; keep-the-smaller works on DCT and JBIG2.)
 	Data []byte
 	// Globals is the decoded /JBIG2Globals stream, nil when there is none.
 	Globals []byte
