@@ -147,9 +147,9 @@ func TestExtractedJBIG2RasterCarriesThePopplerGreysForADecodeArray(t *testing.T)
 		t.Skipf("pdftoppm not installed (brew install poppler): %v", err)
 	}
 	src := decodeArrayCells()
-	data, err := EncodeJBIG2Generic(src.Clone())
+	data, err := encodeJBIG2Generic(src.Clone())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 
 	for _, decode := range []string{"", " /Decode [0 1]", " /Decode [1 0]", " /Decode [0.5 1]"} {

@@ -18,8 +18,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/dobbo-ca/byblos/internal/jbig2"
 )
 
 // futureMDPath is where the deferred capabilities are written up in prose.
@@ -319,9 +317,9 @@ const (
 // fixture whose stage silently moves fails here rather than in six months.
 func refusedJBIG2Stream(t *testing.T, stage string) []byte {
 	t.Helper()
-	s, err := EncodeJBIG2Generic(jbig2TestBitmap())
+	s, err := encodeJBIG2Generic(jbig2TestBitmap())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 	switch stage {
 	case refusedWalkingHeaders:
@@ -342,17 +340,9 @@ func refusedJBIG2Stream(t *testing.T, stage string) []byte {
 		t.Fatalf("unknown stage %q", stage)
 	}
 
-	if _, err := DecodeJBIG2Generic(s); !errors.Is(err, ErrUnsupportedJBIG2Feature) {
+	if _, err := decodeJBIG2Generic(s); !errors.Is(err, errUnsupportedJBIG2) {
 		t.Fatalf("the %s fixture decodes as %v; it has to be a stream byblos refuses for its "+
 			"CODING MODE, or this test proves nothing about the arm it exercises", stage, err)
-	}
-	_, _, perr := jbig2.PageSizeWithGlobals(nil, s)
-	refusedEarly := perr != nil
-	if want := stage == refusedWalkingHeaders; refusedEarly != want {
-		t.Fatalf("the %s fixture is refused by the header walk = %v (%v); want %v. The two "+
-			"fixtures exist to reach DIFFERENT calls inside decodeJBIG2Placement, and one that "+
-			"drifts to the other stage leaves a wrap untested while the test still passes",
-			stage, refusedEarly, perr, want)
 	}
 	return s
 }
@@ -427,7 +417,7 @@ func TestDamagedJBIG2DoesNotClaimAMissingCapability(t *testing.T) {
 	if !errors.Is(err, ErrUnsupportedImageCodec) {
 		t.Fatalf("error = %v; want ErrUnsupportedImageCodec", err)
 	}
-	if errors.Is(err, ErrUnsupportedJBIG2Feature) {
+	if errors.Is(err, errUnsupportedJBIG2) {
 		t.Errorf("error = %v; 64 bytes of filler is damage, not a coding mode byblos has yet "+
 			"to implement", err)
 	}

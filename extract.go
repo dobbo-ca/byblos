@@ -13,6 +13,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 
+	jbig2 "github.com/dobbo-ca/jbig2-go"
 	jpegcopy "github.com/dobbo-ca/jpeg-go"
 
 	"github.com/dobbo-ca/byblos/internal/content"
@@ -529,10 +530,8 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	case "jbig2":
 		// pdfcpu returns JBIG2 as opaque bytes rather than erroring, so nothing
 		// upstream of here has looked at them; image.Decode would not recognise
-		// them either. byblos decodes them itself (jbig2.go): the generic-region
-		// subset EncodeJBIG2Generic writes, so a byblos-compressed page is
-		// re-extractable by byblos (byb-riy), and since byb-9v0 the arithmetic
-		// symbol mode most archive scanners emit.
+		// them either. They are decoded by jbig2-go (jbig2.go): generic regions and
+		// the arithmetic symbol mode most archive scanners emit.
 		//
 		// What still diverts is the rest -- Huffman symbol coding, refinement,
 		// halftones, MMR, the three generic templates byblos does not code --
@@ -558,8 +557,13 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 			return refuse(page, "unsupported-codec-jbig2",
 				fmt.Errorf("%w: jbig2: %v", ErrUnsupportedImageCodec, gerr))
 		}
-		img, err = decodeJBIG2Placement(data, globals, d.ImageInfo, placement.ID)
+		img, err = decodeJBIG2Placement(ctx, data, globals, d.ImageInfo, placement.ID)
 		if err != nil {
+			var le *LimitError
+			if errors.As(err, &le) || errors.Is(err, ErrMemoryLimit) {
+				countFailure()
+				return nil, PageProvenance{}, err
+			}
 			// No fileType interpolation here, unlike the sibling sites: every
 			// error this branch can produce already opens with "jbig2:", so
 			// adding it again would read "jbig2: jbig2: ...".
@@ -574,7 +578,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 			//
 			// Measured over the pinned sample at 23a3470: 37 pages reach here,
 			// 36 for a coding mode and 1 for damage.
-			if errors.Is(err, ErrUnsupportedJBIG2Feature) {
+			if errors.Is(err, jbig2.ErrUnsupportedFeature) {
 				return refuse(page, "unsupported-codec-jbig2",
 					fmt.Errorf("%w: %v (%w)", ErrUnsupportedImageCodec, err, &NotImplemented{
 						Capability: "decode-jbig2",

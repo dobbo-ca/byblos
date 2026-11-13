@@ -46,7 +46,7 @@ func TestReplaceImagesCarriesASauvolaJBIG2PageIntoAnExistingPDF(t *testing.T) {
 		t.Fatalf("Sauvola: %v", err)
 	}
 
-	enc, err := EncodeJBIG2Image(bm.Clone())
+	enc, err := encodeJBIG2Image(bm.Clone())
 	if err != nil {
 		t.Fatalf("EncodeJBIG2Image: %v", err)
 	}

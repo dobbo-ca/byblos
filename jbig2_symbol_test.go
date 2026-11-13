@@ -63,7 +63,7 @@ const symbolFixtureInk = 45104
 func TestDecodeJBIG2GenericDecodesSymbolModeAndDeclinesItsHuffmanVariant(t *testing.T) {
 	s := symbolInlineStream(t)
 
-	got, err := DecodeJBIG2Generic(s)
+	got, err := decodeJBIG2Generic(s)
 	if err != nil {
 		t.Fatalf("DecodeJBIG2Generic on a self-contained symbol-mode stream: %v", err)
 	}
@@ -82,13 +82,13 @@ func TestDecodeJBIG2GenericDecodesSymbolModeAndDeclinesItsHuffmanVariant(t *test
 	}
 	huff := bytes.Clone(s)
 	huff[12] = 0x01
-	bad, err := DecodeJBIG2Generic(huff)
+	bad, err := decodeJBIG2Generic(huff)
 	if err == nil {
 		t.Fatalf("DecodeJBIG2Generic returned a %dx%d bitmap for a Huffman symbol dictionary; "+
-			"want ErrUnsupportedJBIG2Feature", bad.Width, bad.Height)
+			"want errUnsupportedJBIG2", bad.Width, bad.Height)
 	}
-	if !errors.Is(err, ErrUnsupportedJBIG2Feature) {
-		t.Fatalf("error = %v; want ErrUnsupportedJBIG2Feature. An archive decides whether a page is "+
+	if !errors.Is(err, errUnsupportedJBIG2) {
+		t.Fatalf("error = %v; want errUnsupportedJBIG2. An archive decides whether a page is "+
 			"recoverable by a future decoder or is damaged on exactly this difference (jbig2.go)", err)
 	}
 	if bad != nil {

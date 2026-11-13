@@ -217,7 +217,7 @@ jobs:
                 add extract-raster; add jbig2-generic; add quantize-png
                 add downsample; add build-pdf ;;
               build.go|internal/pdfbuild/*) add build-pdf ;;
-              jbig2.go|internal/jbig2/*) add jbig2-generic ;;
+              jbig2.go) add jbig2-generic ;;
               sauvola.go) add jbig2-generic ;;
               quantize.go) add quantize-png ;;
               quantize_indexed.go) add quantize-png; add build-pdf ;;

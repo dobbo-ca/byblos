@@ -111,8 +111,8 @@ jobs:
           go list -f '{{range .Imports}}{{.}}{{"\n"}}{{end}}{{range .TestImports}}{{.}}{{"\n"}}{{end}}{{range .XTestImports}}{{.}}{{"\n"}}{{end}}' ./... \
             | sort -u | grep '\.' | grep -v '^github.com/dobbo-ca/byblos' > ext.txt || true
           echo "external imports:"; cat ext.txt
-          if grep -vE '^(github\.com/dobbo-ca/pdf-go(/|$)|github\.com/dobbo-ca/jpeg-go$|golang\.org/x/image/(ccitt|draw|font|font/sfnt|math/fixed)(/|$))' ext.txt; then
-            echo "FORBIDDEN dependency listed above. Permitted: pdf-go, the jpeg-go copy (DCT decode), and"
+          if grep -vE '^(github\.com/dobbo-ca/pdf-go(/|$)|github\.com/dobbo-ca/jpeg-go$|github\.com/dobbo-ca/jbig2-go$|golang\.org/x/image/(ccitt|draw|font|font/sfnt|math/fixed)(/|$))' ext.txt; then
+            echo "FORBIDDEN dependency listed above. Permitted: pdf-go, the jpeg-go copy (DCT decode), jbig2-go (JBIG2), and"
             echo "golang.org/x/image/{ccitt,draw,font,font/sfnt,math/fixed} ONLY --"
             echo "x/image is allowlisted by subpackage because /bmp, /tiff and"
             echo "/webp each call image.RegisterFormat in init(), which would"

@@ -358,7 +358,7 @@ func TestSauvolaOutputFeedsEncodeJBIG2Generic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sauvola: %v", err)
 	}
-	if _, err := EncodeJBIG2Generic(bm); err != nil {
-		t.Fatalf("EncodeJBIG2Generic(Sauvola(img)): %v", err)
+	if _, err := encodeJBIG2Generic(bm); err != nil {
+		t.Fatalf("encodeJBIG2Generic(Sauvola(img)): %v", err)
 	}
 }

@@ -3,6 +3,7 @@ module github.com/dobbo-ca/byblos
 go 1.27.3
 
 require (
+	github.com/dobbo-ca/jbig2-go v0.1.0
 	github.com/dobbo-ca/jpeg-go v0.7.0
 	github.com/dobbo-ca/pdf-go v0.17.2
 	golang.org/x/image v0.47.0
