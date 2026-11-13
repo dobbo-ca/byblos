@@ -568,6 +568,18 @@ type PageRaster struct {
     ObjNr         int             // ImageRef.ObjNr this raster came from; the ReplaceImages key
     DroppedAnnots int             // annotations that paint and are not in Image
     Bitonal       bool            // source DECLARED 1 bpc or /ImageMask; never a pixel test
+    Bitmap        *Bitmap         // packed bits instead of Image, when Limits.PackedBitonal and the source is a bare DeviceGray/mask bitonal; set = renders dark
+    Source        ImageSource     // the image XObject as the file holds it
+}
+
+// ImageSource is the image XObject a PageRaster came from, before decoding.
+type ImageSource struct {
+    Filters    []string // /Filter chain, decode order
+    Data       []byte   // encoded bytes after non-codec layers; DCT and JBIG2 sources only
+    Globals    []byte   // decoded /JBIG2Globals, nil when none
+    BPC        int      // /BitsPerComponent, 0 for an image mask
+    ColorSpace string   // plain /ColorSpace name, "" for an array
+    SMask, Mask bool    // /SMask and /Mask present
 }
 
 func (p PageRaster) CoversPage() bool

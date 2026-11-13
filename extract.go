@@ -8,6 +8,7 @@ import (
 	"image"
 	"io"
 	"math"
+	"slices"
 	"strings"
 
 	_ "image/jpeg"
@@ -313,6 +314,46 @@ type PageRaster struct {
 	// Bitonal is chosen over an int BPC because an /ImageMask carries no
 	// /BitsPerComponent at all and would have to report 0; see byb-xcx.
 	Bitonal bool
+
+	// Bitmap is the raster as packed bits, and Image is nil, when the call
+	// asked for it (Limits.PackedBitonal) and the source is a declared-bitonal
+	// DeviceGray or image mask: CCITT, JBIG2, 1-bpc Flate. All but JBIG2 must also
+	// be unmasked; a masked JBIG2 page packs too, as its mask is ignored wide too.
+	// A set bit is a pixel below 128 once /Decode is applied (for a stencil
+	// that is the pixel painted, in the current fill colour, so "dark" only
+	// under a black fill) -- so it is the RGBA decode thresholded at 128 (except for a
+	// /Decode value within a half level of 0.5: byblos rounds it to a gray
+	// level as poppler does, pdfcpu truncates), at an eighth of
+	// the memory of a byte a pixel and a thirty-second of the RGBA. Anything
+	// else keeps Image, with Bitmap nil.
+	Bitmap *Bitmap
+
+	// Source is the chosen image XObject as the file holds it.
+	Source ImageSource
+}
+
+// ImageSource is the image XObject a PageRaster came from, before decoding.
+type ImageSource struct {
+	// Filters is the /Filter chain in decode order, by name.
+	Filters []string
+	// Data is the encoded bytes after any filters that are not the image codec
+	// (the DCT stream under a Flate wrapper), for JBIG2 and DCT sources. It is
+	// nil for the rest: pdfcpu decodes CCITT and Flate itself and hands back
+	// no encoded stream, and a four-component (CMYK) DCT image, which pdfcpu
+	// decodes to a PNG itself. (Accepted deviation from "encoded bytes after any
+	// non-codec layers": the G4 bytes are reachable, but nothing needs them
+	// yet; keep-the-smaller works on DCT and JBIG2.)
+	Data []byte
+	// Globals is the decoded /JBIG2Globals stream, nil when there is none.
+	Globals []byte
+	// BPC is /BitsPerComponent as the file writes it (0 when the entry is
+	// missing, which an image mask may do). ColorSpace is /ColorSpace when it
+	// is a plain name, "" for an array (Indexed, ICCBased, ...).
+	BPC        int
+	ColorSpace string
+	// SMask and Mask report /SMask and /Mask: an alpha plane and a stencil or
+	// colour key. The raster carries the first as alpha and ignores the second.
+	SMask, Mask bool
 }
 
 // CoversPage reports whether the raster fills the page box. When it is false
@@ -497,7 +538,8 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	}
 
 	placement := scan.Images[idx]
-	data, fileType, err := d.RawImage(ctx, placement.ID)
+	var bm *Bitmap
+	data, fileType, err := rawImage(ctx, d, placement.ID, &bm)
 	if err != nil {
 		// pdfcpu declines to render some filters by returning a nil reader;
 		// pdfdoc turns that into ErrUnsupportedCodec. That is a divert (the page
@@ -526,7 +568,9 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		return nil, PageProvenance{}, err
 	}
 	var img image.Image
+	var globals []byte
 	switch fileType {
+	case "packed": // rawImage decoded it to bm
 	case "jbig2":
 		// pdfcpu returns JBIG2 as opaque bytes rather than erroring, so nothing
 		// upstream of here has looked at them; image.Decode would not recognise
@@ -552,12 +596,21 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// build. Every byblos ever written would fail on it, so no future
 		// capability recovers the page and nominating one would send a caller
 		// back over an archive for nothing.
-		globals, gerr := d.RawImageGlobals(placement.ID)
+		var gerr error
+		globals, gerr = d.RawImageGlobals(placement.ID)
 		if gerr != nil {
 			return refuse(page, "unsupported-codec-jbig2",
 				fmt.Errorf("%w: jbig2: %v", ErrUnsupportedImageCodec, gerr))
 		}
-		img, err = decodeJBIG2Placement(ctx, data, globals, d.ImageInfo, placement.ID)
+		// The stream and the globals outlive the decode in PageRaster.Source, so
+		// the pool holds them until the page is done, as it holds the raster's.
+		release, rerr := limits.Reserve(ctx, int64(len(data))+int64(len(globals)))
+		if rerr != nil {
+			countFailure()
+			return nil, PageProvenance{}, rerr
+		}
+		defer release()
+		img, bm, err = decodeJBIG2(ctx, data, globals, d.ImageInfo, placement.ID, d.Limits().PackedBitonal)
 		if err != nil {
 			// A budget error comes first: limits.Reserve gives up only when ctx
 			// ends and wraps ctx's error in ErrMemoryLimit, so asking about the
@@ -621,6 +674,16 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 				Issue:      capabilityIssue["decode-jpx"],
 			}))
 	default:
+		// A JPEG's bytes outlive the decode in PageRaster.Source, so the pool
+		// holds them until the page is done, as it holds the raster's.
+		if fileType == "jpg" {
+			release, rerr := limits.Reserve(ctx, int64(len(data)))
+			if rerr != nil {
+				countFailure()
+				return nil, PageProvenance{}, rerr
+			}
+			defer release()
+		}
 		var f dct.Frame
 		var release func()
 		if f, release, err = reserveDCT(ctx, data, d, placement.ID); err == nil {
@@ -676,6 +739,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	}
 	out := &PageRaster{
 		Image:  img,
+		Bitmap: bm,
 		Bounds: boxRect(placement.Box),
 		Page:   rectOf(p.CropBox),
 	}
@@ -699,6 +763,13 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	if info, ok := d.ImageInfo(placement.ID); ok {
 		out.Bitonal = info.BPC == 1 || info.ImageMask
 		out.ObjNr = info.ObjNr
+		out.Source = ImageSource{
+			Filters: slices.Clone(info.Filters), Globals: globals, BPC: info.BPC,
+			ColorSpace: info.ColorSpace, SMask: info.SMask, Mask: info.Mask,
+		}
+		if fileType == "jbig2" || fileType == "jpg" {
+			out.Source.Data = data
+		}
 	}
 	// Only on the success path. A divert has already told the caller it is
 	// getting no raster, and 97% of a real archive diverts, so reading and
@@ -749,6 +820,56 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 	}
 	countExtracted(out.CoversPage())
 	return out, rec, nil
+}
+
+// rawImage is d.RawImage, except that for a call asking for packed bits
+// (Limits.PackedBitonal) and an image that can be had as them, it reads the
+// samples without rendering and returns them in *bm with the file type
+// "packed". Anything it cannot read as bits is left to RawImage, which says
+// what is wrong with it.
+func rawImage(ctx context.Context, d pdfdoc.Doc, id int, bm **Bitmap) ([]byte, string, error) {
+	info, ok := d.ImageInfo(id)
+	if d.Limits().PackedBitonal && ok && (info.BPC == 1 || info.ImageMask) && !info.SMask && !info.Mask &&
+		info.Filter != "JBIG2Decode" && info.Filter != "DCTDecode" && info.Filter != "JPXDecode" {
+		if info.ImageMask {
+			info.ColorSpace = "DeviceGray" // a stencil's samples are grays as a gray image's are
+		}
+		ink, background, err := grayLevels(info, id)
+		if err == nil && info.ColorSpace == "DeviceGray" {
+			pix, stride, err := d.RawBitonal(ctx, id)
+			switch {
+			case err == nil:
+				*bm = packBits(pix, info.Width, info.Height, stride, background < 128, ink < 128)
+				return nil, "packed", nil
+			case errors.Is(err, ErrLimit) || errors.Is(err, ErrMemoryLimit) || checkContext(ctx) != nil:
+				return nil, "", err
+			}
+		}
+	}
+	return d.RawImage(ctx, id)
+}
+
+// packBits turns 1-bpc samples (rows of stride bytes, padding past w ignored)
+// into a Bitmap, in place. A set sample becomes a set bit when setIf1, a clear
+// one when setIf0: the caller says which of the two renders dark.
+func packBits(pix []byte, w, h, stride int, setIf1, setIf0 bool) *Bitmap {
+	pix = pix[:stride*h]
+	for i, b := range pix {
+		switch {
+		case setIf1 && setIf0:
+			pix[i] = 0xFF
+		case setIf0:
+			pix[i] = ^b
+		case !setIf1:
+			pix[i] = 0
+		}
+	}
+	if pad := uint(-w) & 7; pad != 0 {
+		for y := 1; y <= h; y++ {
+			pix[y*stride-1] &= 0xFF << pad
+		}
+	}
+	return &Bitmap{Width: w, Height: h, Stride: stride, Pix: pix}
 }
 
 // reserveDCT is dct.Reserve for image id of d under d's pixel cap: the SOF

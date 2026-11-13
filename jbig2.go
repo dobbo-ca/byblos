@@ -73,28 +73,41 @@ func jbig2DecodeBound(streamLen int) int64 {
 // passes those through. A coding mode jbig2-go does not decode carries
 // jbig2.ErrUnsupportedFeature.
 func decodeJBIG2Placement(ctx context.Context, data, globals []byte, imageInfo func(int) (pdfdoc.ImageInfo, bool), id int) (image.Image, error) {
+	img, _, err := decodeJBIG2(ctx, data, globals, imageInfo, id, false)
+	return img, err
+}
+
+// decodeJBIG2 is decodeJBIG2Placement, or with packed the same page as a Bitmap
+// whose set bits are the pixels that render dark (below 128), the raster's 8
+// bytes a pixel never built: the reservation is the decode's alone. The Bitmap
+// is the decode's own buffer, so nothing is copied.
+func decodeJBIG2(ctx context.Context, data, globals []byte, imageInfo func(int) (pdfdoc.ImageInfo, bool), id int, packed bool) (image.Image, *Bitmap, error) {
 	info, ok := imageInfo(id)
 	if !ok {
-		return nil, fmt.Errorf("jbig2: image %d has no dictionary to check the decoded raster against", id)
+		return nil, nil, fmt.Errorf("jbig2: image %d has no dictionary to check the decoded raster against", id)
 	}
 	ink, background, err := grayLevels(info, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	px := int64(info.Width) * int64(info.Height)
 	if px > maxJBIG2Pixels {
-		return nil, fmt.Errorf("jbig2: image %d's dictionary declares %dx%d, %d pixels; byblos renders a "+
+		return nil, nil, fmt.Errorf("jbig2: image %d's dictionary declares %dx%d, %d pixels; byblos renders a "+
 			"bilevel page at one byte per pixel and the limit is %d",
 			id, info.Width, info.Height, px, int64(maxJBIG2Pixels))
 	}
 	if w, h, err := jbig2.PageSize(data, globals); err == nil && (w != info.Width || h != info.Height) {
-		return nil, fmt.Errorf("jbig2: page is %dx%d but image %d's dictionary says %dx%d",
+		return nil, nil, fmt.Errorf("jbig2: page is %dx%d but image %d's dictionary says %dx%d",
 			w, h, id, info.Width, info.Height)
 	}
 	bound := jbig2DecodeBound(len(data) + len(globals))
-	release, err := limits.Reserve(ctx, px+bound)
+	need := bound
+	if !packed {
+		need += px
+	}
+	release, err := limits.Reserve(ctx, need)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer release()
 	b, err := jbig2.Decode(ctx, data, globals, jbig2.Limits{
@@ -104,15 +117,19 @@ func decodeJBIG2Placement(ctx context.Context, data, globals []byte, imageInfo f
 	if err != nil {
 		var le *jbig2.LimitError
 		if errors.As(err, &le) && (le.Name == "MaxBytes" || le.Name == "MemoryLimit") {
-			return nil, &limits.LimitError{Name: "jbig2-memory", Got: le.Got, Max: le.Max}
+			return nil, nil, &limits.LimitError{Name: "jbig2-memory", Got: le.Got, Max: le.Max}
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	if b.W != info.Width || b.H != info.Height {
-		return nil, fmt.Errorf("jbig2: page is %dx%d but image %d's dictionary says %dx%d",
+		return nil, nil, fmt.Errorf("jbig2: page is %dx%d but image %d's dictionary says %dx%d",
 			b.W, b.H, id, info.Width, info.Height)
 	}
-	return grayImage(b, ink, background), nil
+	if packed {
+		// An ink pixel renders as ink, a clear one as background.
+		return nil, packBits(b.Pix, b.W, b.H, b.Stride, ink < 128, background < 128), nil
+	}
+	return grayImage(b, ink, background), nil, nil
 }
 
 // defaultInk and defaultBackground are the /DeviceGray samples a 1-bit image
