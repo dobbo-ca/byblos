@@ -346,8 +346,9 @@ type ImageSource struct {
 	Data []byte
 	// Globals is the decoded /JBIG2Globals stream, nil when there is none.
 	Globals []byte
-	// BPC is /BitsPerComponent, 0 for an image mask. ColorSpace is /ColorSpace
-	// when it is a plain name, "" for an array (Indexed, ICCBased, ...).
+	// BPC is /BitsPerComponent as the file writes it (0 when the entry is
+	// missing, which an image mask may do). ColorSpace is /ColorSpace when it
+	// is a plain name, "" for an array (Indexed, ICCBased, ...).
 	BPC        int
 	ColorSpace string
 	// SMask and Mask report /SMask and /Mask: an alpha plane and a stencil or
