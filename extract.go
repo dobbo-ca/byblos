@@ -453,7 +453,7 @@ func ExtractPageRasterLimits(ctx context.Context, r io.ReadSeeker, page int, lim
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	d, err := pdfdoc.OpenLimits(context.Background(), r, lim) // not ctx: pdfcpu would add checks per object, which the latency table pins
+	d, err := pdfdoc.OpenLazy(context.Background(), r, lim) // not ctx: pdfcpu would add checks per object, which the latency table pins
 	if err != nil {
 		if cerr := checkContext(ctx); cerr != nil {
 			return nil, cerr

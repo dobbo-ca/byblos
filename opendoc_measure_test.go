@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -108,4 +110,51 @@ func TestMeasurePageData(t *testing.T) {
 		doc.Close()
 		t.Logf("MEASURE pages=%d open=%v info=%v rasters=%v", n, tOpen, tInfo, tRaster)
 	}
+}
+
+// TestMeasureOpenDocumentHeap reports live heap (after GC, above the file's own
+// bytes) once OpenDocument returns and after pages have run, on a generated 200
+// page document of 1 MiB incompressible images. With image bytes held from the
+// open it is the file's size from the first line on; per page it should be flat.
+// Hosted runner only.
+func TestMeasureOpenDocumentHeap(t *testing.T) {
+	if os.Getenv("BYBLOS_MEASURE") == "" {
+		t.Skip("set BYBLOS_MEASURE=1 (CI measure workflow only)")
+	}
+	const pages = 200
+	rng := rand.New(rand.NewSource(1))
+	px := make([]byte, 1000*1000)
+	bp := make([]BuildPage, pages)
+	for i := range bp {
+		rng.Read(px)
+		bp[i] = BuildPage{Image: EncodedImage{Width: 1000, Height: 1000, BPC: 8, ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: flateEncode(t, px)}, WidthPt: 612, HeightPt: 792, DPI: 100}
+	}
+	var buf bytes.Buffer
+	if err := BuildPDF(&buf, bp); err != nil {
+		t.Fatal(err)
+	}
+	bp = nil
+	data := buf.Bytes()
+	live := func() float64 {
+		var m runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&m)
+		return float64(m.HeapAlloc) / 1e6
+	}
+	ctx := context.Background()
+	base := live()
+	doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{MaxTotalDecodeBytes: 1 << 40}) // the default total (64 MiB of decodes over a parse) ends a 200-image run
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("MEASURE heap pdf_mb=%.0f pages=%d base_mb=%.0f after_open_mb=%.0f", float64(len(data))/1e6, pages, base, live())
+	for p := 1; p <= pages; p++ {
+		if _, err := doc.PageRaster(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		if p%50 == 0 {
+			t.Logf("MEASURE heap after_page=%d live_mb=%.0f", p, live())
+		}
+	}
+	doc.Close()
 }

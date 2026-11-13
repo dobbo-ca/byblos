@@ -66,7 +66,7 @@ func RenderPageLimits(ctx context.Context, r io.ReadSeeker, page, longEdgePx int
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	d, err := pdfdoc.OpenLimits(ctx, r, lim)
+	d, err := pdfdoc.OpenLazy(ctx, r, lim)
 	if err != nil {
 		return nil, fmt.Errorf("byblos: RenderPage: %w", err)
 	}

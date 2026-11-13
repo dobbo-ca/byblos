@@ -381,6 +381,8 @@ type doc struct {
 	pageForms map[int][]byte // decoded forms already counted in pageBytes, shared by every Do of one form
 	limitErr  error          // first limit breach a bool-returning lookup had to swallow
 
+	lazy bool // image bytes are loaded per page by XObject, not at open
+
 	pidx        *pageIndex // nil when the page tree is not one pageDict can index
 	pageIndexed bool       // pidx has been built
 }
@@ -406,7 +408,16 @@ func OpenLimits(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, 
 	return openDoc(ctx, rs, lim)
 }
 
-// OpenBudgeted is Open under lim, with the object table and one stream decode
+// OpenLazy is OpenLimits for a read-only caller: image stream bytes are not
+// held from the open. XObject reads an image's bytes from rs when the page that
+// draws it is walked, onto the page's copy of the stream dictionary, which
+// EndPage drops. So rs must stay readable until the Doc is dropped, and the
+// Doc must not be written or optimized (those want every stream loaded).
+func OpenLazy(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
+	return openSized(ctx, rs, lim, objectsIn(rs), true)
+}
+
+// OpenBudgeted is OpenLazy under lim, with the object table and one stream decode
 // reserved from the package memory budget (limits.SetMemoryLimit) before pdfcpu
 // parses. The returned release gives the reservation back; call it when done
 // with the document. The reservation comes from objectsIn: the larger of the
@@ -470,7 +481,7 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	if err != nil {
 		return nil, nil, err
 	}
-	d, err := openSized(ctx, rs, lim, size)
+	d, err := openSized(ctx, rs, lim, size, true)
 	if err != nil {
 		release()
 		return nil, nil, err
@@ -481,14 +492,14 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 // openDoc is Open with the caps of lim. The /Size cap is checked before the parse
 // on every path; only OpenBudgeted also reserves memory.
 func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
-	return openSized(cctx, rs, lim, objectsIn(rs))
+	return openSized(cctx, rs, lim, objectsIn(rs), false)
 }
 
 // Parses counts pdfcpu parses begun, for tests that pin how many a call makes.
 var Parses atomic.Int64
 
 // openSized is openDoc given the object count objectsIn found.
-func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size int64) (d Doc, err error) {
+func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size int64, lazy bool) (d Doc, err error) {
 	defer catchPanic("open", &err)
 	Parses.Add(1)
 	if err := limits.Check("objects", size, lim.Objects()); err != nil {
@@ -512,6 +523,9 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 	conf.Limits.MaxTotalDecodeBytes = lim.TotalDecodeBytes()
 	conf.Limits.MaxParsedBytes = parsedBytes(lim, limits.ObjectTableBytes(size))
 	conf.Limits.MaxStreamTotalBytes = lim.MaxStreamTotalBytes
+	if lazy {
+		cctx = pdfcpu.WithLazyImageStreams(cctx)
+	}
 	ctx, err := api.ReadContext(cctx, rs, conf)
 	if err != nil {
 		if le := pdfcpuLimit(lim, err); le != nil {
@@ -542,6 +556,7 @@ func openSized(cctx context.Context, rs io.ReadSeeker, lim limits.Limits, size i
 		refs:    map[int]types.IndirectRef{},
 		nextID:  -1,
 		lim:     lim,
+		lazy:    lazy,
 	}, nil
 }
 
@@ -1414,6 +1429,13 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 		return nil, "", err
 	}
 	last := lastFilter(sd)
+	codec := last == "DCTDecode" || last == "JPXDecode" || last == "JBIG2Decode"
+	lazyRaw := d.lazy && sd.Raw == nil
+	defer func() {
+		if lazyRaw {
+			sd.Raw = nil
+		}
+	}()
 	bpc, n := info.BPC, 4 // four components when the colour space does not say
 	if info.ImageMask {
 		bpc, n = 1, 1
@@ -1439,12 +1461,44 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	// The bound is on pixels. When the last filter is a codec, the layers in
 	// front of it (Flate around DCT) yield compressed bytes, which for a tiny
 	// image outweigh its pixels, so they get a floor.
-	codec := last == "DCTDecode" || last == "JPXDecode" || last == "JBIG2Decode"
 	if codec {
 		declared = max(declared, 1<<20)
 	}
 	if declared <= 0 { // overflow
 		return nil, "", &limits.LimitError{Name: "image-bytes", Got: d.lim.StreamBytes() + 1, Max: d.lim.StreamBytes()}
+	}
+	// A lazy image's bytes (and its soft mask's) are read now and reserved once, so open-once
+	// and one-shot need the same. A non-codec image's reservation below has room for encoded
+	// bytes up to the declared size, so only what a stream holds past that is added (extra).
+	// A codec stream has no decode reservation of its own (dct.Reserve counts the frame, not
+	// the data), so all of its encoded bytes are extra: held by themselves, and handed back
+	// before the CMYK DCT gate asks for more (waiting on it would be waiting on itself).
+	// The page's other streams are not lazy: /JBIG2Globals and an Indexed lookup table are not
+	// image XObjects, and /Mask is never read.
+	sm, smCap := d.softMask(sd, info)
+	var smRaw int64 // a lazy mask's bytes: read for the check below and again by pdfcpu, one copy at a time
+	if sm != nil && d.lazy && sm.Raw == nil {
+		smRaw = rawLen(sm)
+	}
+	var extra int64
+	if lazyRaw {
+		extra = max(rawLen(sd)-declared, 0)
+		if codec {
+			extra = rawLen(sd)
+		}
+	}
+	extra += max(smRaw-smCap, 0)
+	releaseRaw := func() {}
+	defer func() { releaseRaw() }()
+	if lazyRaw && codec {
+		release, err := limits.Reserve(ctx, extra)
+		if err != nil {
+			return nil, "", err
+		}
+		releaseRaw = release
+		if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
+			return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: %w", id, err)
+		}
 	}
 	// pdfcpu decodes everything but a codec's stream itself, and not under any
 	// budget of its own: take its memory from byblos's, before it allocates. Its
@@ -1456,26 +1510,36 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	// buffer holds its old and new arrays at once: three times, not two. A soft mask is decoded too, under the size its own dictionary
 	// allows, so a stream that lies about it is refused.
 	if !codec {
-		sm, smCap := d.softMask(sd, info)
 		px := limits.MulSat(int64(info.Width), int64(info.Height))
-		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+3*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px)
+		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+3*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px+extra)
 		if err != nil {
 			return nil, "", err
 		}
 		defer release()
+		if lazyRaw {
+			if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
+				return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: %w", id, err)
+			}
+		}
 		if sm != nil {
+			if smRaw > 0 {
+				if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sm); err != nil {
+					return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: soft mask: %w", id, err)
+				}
+			}
 			if err := sm.DecodeWithLimit(smCap); errors.Is(err, filter.ErrDecodeLimitExceeded) {
 				return nil, "", &limits.LimitError{Name: "image-bytes", Got: smCap + 1, Max: smCap}
 			} else if err != nil {
 				return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: soft mask: %w", id, err)
 			}
+			sm.Raw, sm.Content = nil, nil // pdfcpu reads its own copy
 		}
 	}
 	lims := &d.ctx.Configuration.Limits
 	saved := lims.MaxDecodeBytes
 	lims.MaxDecodeBytes = declared
 	defer func() { lims.MaxDecodeBytes = saved }()
-	release, err := d.reserveCMYKDCT(sd, info, declared)
+	release, err := d.reserveCMYKDCT(sd, info, declared, extra, func() { releaseRaw(); releaseRaw = func() {} })
 	if err != nil {
 		return nil, "", err
 	}
@@ -1503,6 +1567,14 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 		return nil, "", fmt.Errorf("byblos/pdfdoc: reading image %d: %w", id, err)
 	}
 	return b, im.FileType, nil
+}
+
+// rawLen is sd's declared encoded length, 0 when unknown.
+func rawLen(sd *types.StreamDict) int64 {
+	if sd.StreamLength == nil {
+		return 0
+	}
+	return *sd.StreamLength
 }
 
 // lastFilter is the name of sd's last filter, empty for none.
@@ -1555,8 +1627,10 @@ func (d *doc) softMask(sd *types.StreamDict, info ImageInfo) (*types.StreamDict,
 // pixel cap is a *limits.LimitError; one the dictionary does not allow is
 // ErrUnsupportedCodec. Anything else returns a no-op release. declared bounds
 // what pdfcpu holds after the decode (gob, then the RGBA it renders), so three
-// copies of it join the decode's own need in the reservation.
-func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int64) (func(), error) {
+// copies of it join the decode's own need in the reservation, and extra is the
+// lazy bytes RawImage held past it. handoff runs just
+// before that reservation is asked for.
+func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared, extra int64, handoff func()) (func(), error) {
 	none := func() {}
 	n := len(sd.FilterPipeline)
 	if n == 0 || sd.FilterPipeline[n-1].Name != filter.DCT {
@@ -1574,7 +1648,8 @@ func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int6
 		}
 		jpg = cp.Content
 	}
-	_, release, err := dct.Reserve(context.Background(), jpg, d.lim.ImagePixels(), int64(info.Width)*int64(info.Height), 4, 3*declared)
+	handoff() // the reservation below covers the decode; waiting on it while holding the raw one would deadlock
+	_, release, err := dct.Reserve(context.Background(), jpg, d.lim.ImagePixels(), int64(info.Width)*int64(info.Height), 4, 3*declared+extra)
 	if err != nil {
 		var le *limits.LimitError
 		if !errors.As(err, &le) && !errors.Is(err, limits.ErrMemoryLimit) {

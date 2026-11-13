@@ -15,6 +15,9 @@ import (
 //
 // Memory model (SetMemoryLimit): the Document reserves nothing while it is
 // open, as the one-shot ExtractPageRasterLimits reserves nothing for its parse.
+// It holds no image bytes either: the parse leaves them in the file and a page
+// reads the ones it draws, so what an open Document keeps live does not grow
+// with the file's image data.
 // Each page reserves its own need when it runs and releases it when it is done,
 // exactly as the one-shot path does, so an open Document neither makes other
 // callers wait nor makes its own page wait on bytes only Close could give back.
@@ -22,7 +25,8 @@ import (
 // a budget. Per-page state (decoded forms, the page's image records) is dropped
 // when the page is done.
 //
-// The reader is read in OpenDocument only. A Document is not safe for
+// The reader is read by OpenDocument and by each page's images, so it must stay
+// readable until Close. A Document is not safe for
 // concurrent use. A returned raster is the caller's, so a page's memory is
 // collectable once the caller drops it.
 type Document struct {
@@ -36,7 +40,7 @@ func OpenDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Document, 
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	d, err := pdfdoc.OpenLimits(context.Background(), r, lim) // not ctx, as in the one-shot path
+	d, err := pdfdoc.OpenLazy(context.Background(), r, lim) // not ctx, as in the one-shot path
 	if err != nil {
 		if cerr := checkContext(ctx); cerr != nil {
 			return nil, cerr

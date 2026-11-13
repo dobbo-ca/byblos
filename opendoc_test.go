@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	imagepng "image/png"
+	"math/rand"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -250,7 +253,7 @@ func TestOpenDocumentPageFitsBudgetWithoutParseHeadroom(t *testing.T) {
 		t.Fatal(err)
 	}
 	need := limits.PeakReserved()
-	SetMemoryLimit(need + 16) // fits the page, not the page plus the table and the file
+	SetMemoryLimit(need + 16)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(data), 1, Limits{})
@@ -266,6 +269,65 @@ func TestOpenDocumentPageFitsBudgetWithoutParseHeadroom(t *testing.T) {
 	// And a one-shot call on another document is not starved meanwhile.
 	if _, err := ExtractPageRasterLimits(ctx, bytes.NewReader(corpus.ScanJPEG()), 1, Limits{}); err != nil {
 		t.Errorf("one-shot beside the open Document: %v", err)
+	}
+}
+
+// openOnceFitsBudget asserts the page renders open-once under need+16, where need is
+// what the one-shot render of it reserved at its peak: every lazily loaded stream the
+// page reads is reserved once, inside the reservation the one-shot path takes.
+func openOnceFitsBudget(t *testing.T, data []byte) {
+	t.Helper()
+	prev := SetMemoryLimit(1 << 30)
+	defer SetMemoryLimit(prev)
+	limits.ResetPeak()
+	if _, err := ExtractPageRasterLimits(context.Background(), bytes.NewReader(data), 1, Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	need := limits.PeakReserved()
+	SetMemoryLimit(need + 16)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(data), 1, Limits{})
+	doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	got, gerr := doc.PageRaster(ctx, 1)
+	if werr != nil || gerr != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("budget %d: open-once err=%v; one-shot err=%v; equal=%v", need+16, gerr, werr, reflect.DeepEqual(got, want))
+	}
+}
+
+// Masked, codec and globals pages fit the same budget open-once as one-shot.
+func TestOpenDocumentFitsBudgetMasksCodecsAndGlobals(t *testing.T) {
+	const side = 256
+	px := make([]byte, side*side)
+	rand.New(rand.NewSource(2)).Read(px)
+	dctSMask := func(t *testing.T) []byte {
+		enc, _, err := EmbedJPEG(dcOnlyJPEG(side, side, 1, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		enc.SMask = &EncodedImage{Width: side, Height: side, BPC: 8, ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: flateEncode(t, px)}
+		var buf bytes.Buffer
+		if err := BuildPDF(&buf, []BuildPage{{Image: enc, WidthPt: 612, HeightPt: 792}}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	for _, c := range []struct {
+		name string
+		pdf  func(*testing.T) []byte
+	}{
+		{"flate-smask", func(t *testing.T) []byte { return flateImagePDF(t, 600, 600, 3, true) }},
+		{"dct-flate-smask", dctSMask},
+		{"jbig2-globals", func(t *testing.T) []byte {
+			return jbig2GlobalsPDF(symbolFixture(t, "symbol-page.jb2"), symbolFixture(t, "symbol-globals.jb2"), 640, 480)
+		}},
+		{"cmyk-dct", func(t *testing.T) []byte { return dctPDF(t, img2pdfFile(t, "cmyk.jpg"), 16, 12) }},
+	} {
+		t.Run(c.name, func(t *testing.T) { openOnceFitsBudget(t, c.pdf(t)) })
 	}
 }
 
@@ -288,6 +350,198 @@ func TestOpenDocumentJPEGPageUnderBudget(t *testing.T) {
 		SetMemoryLimit(prev)
 		if werr != nil || gerr != nil || !reflect.DeepEqual(got, want) {
 			t.Errorf("budget %d: open-once err=%v; one-shot err=%v; equal=%v", budget, gerr, werr, reflect.DeepEqual(got, want))
+		}
+	}
+}
+
+// An open Document holds the file's parse, not its image bytes, and a page's
+// images are gone when the page is: live heap after OpenDocument, and after
+// every page has run, stays well under the file's size.
+func TestOpenDocumentHoldsNoImageBytes(t *testing.T) {
+	const pages, w, h = 24, 512, 256
+	rng := rand.New(rand.NewSource(1))
+	bp := make([]BuildPage, pages)
+	for i := range bp {
+		px := make([]byte, w*h)
+		rng.Read(px)
+		bp[i] = BuildPage{Image: EncodedImage{Width: w, Height: h, BPC: 8, ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: flateEncode(t, px)}, WidthPt: 612, HeightPt: 792, DPI: 100}
+	}
+	var buf bytes.Buffer
+	if err := BuildPDF(&buf, bp); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+	live := func() uint64 {
+		var m runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&m)
+		return m.HeapAlloc
+	}
+	ctx := context.Background()
+	base := live()
+	doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	if grew := live() - base; grew > uint64(len(data))/4 {
+		t.Errorf("after open, live heap grew %d bytes for a %d-byte file", grew, len(data))
+	}
+	for p := 1; p <= pages; p++ {
+		if _, err := doc.PageRaster(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if grew := live() - base; grew > uint64(len(data))/4 {
+		t.Errorf("after %d pages, live heap grew %d bytes for a %d-byte file", pages, grew, len(data))
+	}
+}
+
+// A Flate image with a Flate /SMask (what TranscodePNG writes for alpha) renders
+// from an open Document as the one-shot path renders it: the mask is an image
+// stream whose bytes the lazy parse left in the file.
+func TestOpenDocumentFlateSoftMask(t *testing.T) {
+	const w, h = 64, 32
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i * 7)
+	}
+	var png bytes.Buffer
+	if err := imagepng.Encode(&png, src); err != nil {
+		t.Fatal(err)
+	}
+	enc, _, err := TranscodePNG(context.Background(), &png, Limits{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := BuildPDF(&buf, []BuildPage{{Image: enc, WidthPt: 612, HeightPt: 792}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(buf.Bytes()), 1, Limits{})
+	doc, err := OpenDocument(ctx, bytes.NewReader(buf.Bytes()), Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	got, gerr := doc.PageRaster(ctx, 1)
+	if errStr(gerr) != errStr(werr) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("doc: %v; one-shot: %v (nil: %v / %v)", gerr, werr, got == nil, want == nil)
+	}
+	if want == nil {
+		t.Fatal("one-shot rendered nothing")
+	}
+}
+
+// zlibExcessPDF is a 100x100 RGB Flate image whose stream holds more encoded
+// bytes than the image's declared room (trailing bytes after the zlib stream):
+// the shape of the 5000x1000 case, on a small page.
+func zlibExcessPDF(t *testing.T) []byte {
+	t.Helper()
+	const w, h = 100, 100
+	px := make([]byte, w*h*3)
+	rand.New(rand.NewSource(3)).Read(px)
+	img := append(flateEncode(t, px), make([]byte, 40000)...)
+	return pdfFile([]string{catalog, pages1,
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+		"<< /Length 30 >>\nstream\nq 612 0 0 792 0 0 cm /Im0 Do Q\nendstream",
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", w, h, len(img), img),
+	}, "", 0)
+}
+
+// Every corpus page, and the synthetic masked, DCT+SMask, JBIG2-globals, CMYK DCT
+// and zlib-excess pages, give the same verdict and the same output open-once and
+// one-shot at the one-shot's own need + 16: both reserve the same bytes.
+func TestOpenOnceAndOneShotSameVerdictAtTightBudget(t *testing.T) {
+	const side = 256
+	px := make([]byte, side*side)
+	rand.New(rand.NewSource(2)).Read(px)
+	dctSMask := func(t *testing.T) []byte {
+		enc, _, err := EmbedJPEG(dcOnlyJPEG(side, side, 1, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		enc.SMask = &EncodedImage{Width: side, Height: side, BPC: 8, ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: flateEncode(t, px)}
+		var buf bytes.Buffer
+		if err := BuildPDF(&buf, []BuildPage{{Image: enc, WidthPt: 612, HeightPt: 792}}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	docs := map[string][]byte{
+		"flate-smask":     flateImagePDF(t, 600, 600, 3, true),
+		"dct-flate-smask": dctSMask(t),
+		"jbig2-globals":   jbig2GlobalsPDF(symbolFixture(t, "symbol-page.jb2"), symbolFixture(t, "symbol-globals.jb2"), 640, 480),
+		"cmyk-dct":        dctPDF(t, img2pdfFile(t, "cmyk.jpg"), 16, 12),
+		"zlib-excess":     zlibExcessPDF(t),
+	}
+	for _, d := range corpus.All() {
+		docs["corpus/"+d.Name] = d.Data
+	}
+	prev := SetMemoryLimit(1 << 30)
+	defer SetMemoryLimit(prev)
+	for name, data := range docs {
+		t.Run(name, func(t *testing.T) {
+			SetMemoryLimit(1 << 30)
+			infos, err := Inspect(bytes.NewReader(data))
+			if err != nil {
+				t.Skip("not inspectable:", err)
+			}
+			for _, pi := range infos {
+				SetMemoryLimit(1 << 30)
+				limits.ResetPeak()
+				_, _ = ExtractPageRasterLimits(context.Background(), bytes.NewReader(data), pi.Index, Limits{})
+				SetMemoryLimit(limits.PeakReserved() + 16)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(data), pi.Index, Limits{})
+				doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{})
+				if err != nil {
+					cancel()
+					t.Fatal(err)
+				}
+				got, gerr := doc.PageRaster(ctx, pi.Index)
+				doc.Close()
+				cancel()
+				if errStr(gerr) != errStr(werr) || !reflect.DeepEqual(got, want) {
+					t.Errorf("page %d: open-once err=%v; one-shot err=%v; equal=%v", pi.Index, gerr, werr, reflect.DeepEqual(got, want))
+				}
+			}
+		})
+	}
+}
+
+// A codec image's encoded bytes are reserved whole, whatever the declared floor: a JPEG
+// padded with COM segments to under 1 MiB used to load with none of its bytes reserved.
+func TestCodecImageReservesItsEncodedBytes(t *testing.T) {
+	jpg := dcOnlyJPEG(16, 16, 1, 1)
+	com := append([]byte{0xFF, 0xFE, 0xFF, 0xFF}, make([]byte, 0xFFFD)...)
+	pad := bytes.Repeat(com, 14)
+	jpg = append(jpg[:2:2], append(pad, jpg[2:]...)...)
+	data := dctPDF(t, jpg, 16, 16)
+	prev := SetMemoryLimit(1 << 30)
+	defer SetMemoryLimit(prev)
+	for name, run := range map[string]func() error{
+		"one-shot": func() error {
+			_, err := ExtractPageRasterLimits(context.Background(), bytes.NewReader(data), 1, Limits{})
+			return err
+		},
+		"open-once": func() error {
+			doc, err := OpenDocument(context.Background(), bytes.NewReader(data), Limits{})
+			if err != nil {
+				return err
+			}
+			defer doc.Close()
+			_, err = doc.PageRaster(context.Background(), 1)
+			return err
+		},
+	} {
+		limits.ResetPeak()
+		if err := run(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := limits.PeakReserved(); got < int64(len(jpg)) {
+			t.Errorf("%s: peak reserved %d < %d encoded bytes held", name, got, len(jpg))
 		}
 	}
 }

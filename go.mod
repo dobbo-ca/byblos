@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/dobbo-ca/jpeg-go v0.7.0
-	github.com/dobbo-ca/pdf-go v0.17.0
+	github.com/dobbo-ca/pdf-go v0.17.2-0.20261113061614-3a015a5185ef
 	golang.org/x/image v0.47.0
 )
 
