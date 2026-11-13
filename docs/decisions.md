@@ -15,4 +15,4 @@ the caps under a budget, so its output could differ from the one-shot path.
 
 Bound: the unreserved parse memory is limited by the existing object-count and file-size caps
 (`Limits`), the same bound the one-shot path relies on; it only lives longer, for the life of the
-`Document`. Accepted by the owner (through the kleio primary) on 2026-11-13, byblos#141.
+`Document`. Accepted by the kleio primary review session on 2026-11-13, byblos#141.
