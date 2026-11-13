@@ -380,6 +380,9 @@ type doc struct {
 	pageBytes int64          // decoded non-image stream bytes of the current page
 	pageForms map[int][]byte // decoded forms already counted in pageBytes, shared by every Do of one form
 	limitErr  error          // first limit breach a bool-returning lookup had to swallow
+
+	pidx        *pageIndex // nil when the page tree is not one pageDict can index
+	pageIndexed bool       // pidx has been built
 }
 
 type scope struct {
@@ -604,7 +607,6 @@ func (d *doc) Page(n int) (p *Page, err error) {
 	if n < 1 || n > d.ctx.PageCount {
 		return nil, fmt.Errorf("byblos/pdfdoc: page %d out of range 1..%d", n, d.ctx.PageCount)
 	}
-	xt := d.ctx.XRefTable
 	// consolidateRes=false, for the reasons text.go's AddFontResource already
 	// gives, plus one it could not see (byb-ged). true does two things, and
 	// Byblos wants neither:
@@ -634,7 +636,7 @@ func (d *doc) Page(n int) (p *Page, err error) {
 	// /Resources inheritable, not additive: a page that declares one gets its
 	// own, and poppler agrees. Measured over the same 4,840 documents, no file
 	// changed answer because of it.
-	pd, _, inh, err := xt.PageDict(context.Background(), n, false)
+	pd, inh, err := d.pageDict(n)
 	if err != nil {
 		// Object streams are decoded when first read, so the cumulative limits can end a page.
 		if le := pdfcpuLimit(d.lim, err); le != nil {
