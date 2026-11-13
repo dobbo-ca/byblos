@@ -143,7 +143,7 @@ func TestMeasureOpenDocumentHeap(t *testing.T) {
 	}
 	ctx := context.Background()
 	base := live()
-	doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{})
+	doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{MaxTotalDecodeBytes: 1 << 40}) // the default total (64 MiB of decodes over a parse) ends a 200-image run
 	if err != nil {
 		t.Fatal(err)
 	}
