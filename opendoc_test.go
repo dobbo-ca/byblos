@@ -272,6 +272,65 @@ func TestOpenDocumentPageFitsBudgetWithoutParseHeadroom(t *testing.T) {
 	}
 }
 
+// openOnceFitsBudget asserts the page renders open-once under need+16, where need is
+// what the one-shot render of it reserved at its peak: every lazily loaded stream the
+// page reads is reserved once, inside the reservation the one-shot path takes.
+func openOnceFitsBudget(t *testing.T, data []byte) {
+	t.Helper()
+	prev := SetMemoryLimit(1 << 30)
+	defer SetMemoryLimit(prev)
+	limits.ResetPeak()
+	if _, err := ExtractPageRasterLimits(context.Background(), bytes.NewReader(data), 1, Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	need := limits.PeakReserved()
+	SetMemoryLimit(need + 16)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(data), 1, Limits{})
+	doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	got, gerr := doc.PageRaster(ctx, 1)
+	if werr != nil || gerr != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("budget %d: open-once err=%v; one-shot err=%v; equal=%v", need+16, gerr, werr, reflect.DeepEqual(got, want))
+	}
+}
+
+// Masked, codec and globals pages fit the same budget open-once as one-shot.
+func TestOpenDocumentFitsBudgetMasksCodecsAndGlobals(t *testing.T) {
+	const side = 256
+	px := make([]byte, side*side)
+	rand.New(rand.NewSource(2)).Read(px)
+	dctSMask := func(t *testing.T) []byte {
+		enc, _, err := EmbedJPEG(dcOnlyJPEG(side, side, 1, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		enc.SMask = &EncodedImage{Width: side, Height: side, BPC: 8, ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: flateEncode(t, px)}
+		var buf bytes.Buffer
+		if err := BuildPDF(&buf, []BuildPage{{Image: enc, WidthPt: 612, HeightPt: 792}}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	for _, c := range []struct {
+		name string
+		pdf  func(*testing.T) []byte
+	}{
+		{"flate-smask", func(t *testing.T) []byte { return flateImagePDF(t, 600, 600, 3, true) }},
+		{"dct-flate-smask", dctSMask},
+		{"jbig2-globals", func(t *testing.T) []byte {
+			return jbig2GlobalsPDF(symbolFixture(t, "symbol-page.jb2"), symbolFixture(t, "symbol-globals.jb2"), 640, 480)
+		}},
+		{"cmyk-dct", func(t *testing.T) []byte { return dctPDF(t, img2pdfFile(t, "cmyk.jpg"), 16, 12) }},
+	} {
+		t.Run(c.name, func(t *testing.T) { openOnceFitsBudget(t, c.pdf(t)) })
+	}
+}
+
 // A page whose JPEG decode reserves memory must not queue behind the document's
 // own reservation: under a budget the one-shot render and the open-once render
 // of it agree, and neither waits (a held ctx would end the test by its deadline).

@@ -1430,29 +1430,12 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	}
 	last := lastFilter(sd)
 	codec := last == "DCTDecode" || last == "JPXDecode" || last == "JBIG2Decode"
-	// A lazy image's bytes are read now, held for this call under the budget, and let go
-	// when it returns. Never hold one reservation while waiting on another: the waiter would
-	// wait on itself. A codec stream has no decode reservation of its own to fold them into,
-	// so it holds its own, and hands it back before the CMYK DCT gate asks for more; any
-	// other stream's bytes join the decode reservation below.
 	lazyRaw := d.lazy && sd.Raw == nil
-	releaseRaw := func() {}
 	defer func() {
 		if lazyRaw {
 			sd.Raw = nil
 		}
-		releaseRaw()
 	}()
-	if lazyRaw && codec {
-		release, err := limits.Reserve(ctx, rawLen(sd))
-		if err != nil {
-			return nil, "", err
-		}
-		releaseRaw = release
-		if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
-			return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: %w", id, err)
-		}
-	}
 	bpc, n := info.BPC, 4 // four components when the colour space does not say
 	if info.ImageMask {
 		bpc, n = 1, 1
@@ -1484,6 +1467,36 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	if declared <= 0 { // overflow
 		return nil, "", &limits.LimitError{Name: "image-bytes", Got: d.lim.StreamBytes() + 1, Max: d.lim.StreamBytes()}
 	}
+	// A lazy image's bytes (and its soft mask's) are read now. They are reserved once, inside
+	// the reservation the one-shot path takes for the same page, which already has room for
+	// encoded bytes up to the declared size: only what a stream holds past that is added
+	// (extra), so open-once and one-shot need the same. The page's other streams are not lazy:
+	// /JBIG2Globals and an Indexed lookup table are not image XObjects, and /Mask is never read.
+	// A codec stream has no decode reservation of its own, so extra is held by itself, and
+	// handed back before the CMYK DCT gate asks for more (waiting on it would be waiting on
+	// itself).
+	sm, smCap := d.softMask(sd, info)
+	var smRaw int64 // a lazy mask's bytes: read for the check below and again by pdfcpu, one copy at a time
+	if sm != nil && d.lazy && sm.Raw == nil {
+		smRaw = rawLen(sm)
+	}
+	var extra int64
+	if lazyRaw {
+		extra = max(rawLen(sd)-declared, 0)
+	}
+	extra += max(smRaw-smCap, 0)
+	releaseRaw := func() {}
+	defer func() { releaseRaw() }()
+	if lazyRaw && codec {
+		release, err := limits.Reserve(ctx, extra)
+		if err != nil {
+			return nil, "", err
+		}
+		releaseRaw = release
+		if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
+			return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: %w", id, err)
+		}
+	}
 	// pdfcpu decodes everything but a codec's stream itself, and not under any
 	// budget of its own: take its memory from byblos's, before it allocates. Its
 	// decode buffer grows by doubling and is copied (DecodeBytes), and the
@@ -1494,19 +1507,8 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	// buffer holds its old and new arrays at once: three times, not two. A soft mask is decoded too, under the size its own dictionary
 	// allows, so a stream that lies about it is refused.
 	if !codec {
-		sm, smCap := d.softMask(sd, info)
-		var smRaw int64 // a lazy mask's bytes: read for the check below and again by pdfcpu, one copy at a time
-		if sm != nil && d.lazy && sm.Raw == nil {
-			smRaw = rawLen(sm)
-		}
 		px := limits.MulSat(int64(info.Width), int64(info.Height))
-		// The decode's own need has room for encoded bytes up to the declared size; only a
-		// stream bigger than that adds to it.
-		var extra int64
-		if lazyRaw {
-			extra = max(rawLen(sd)-declared, 0)
-		}
-		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+3*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px+smRaw+extra)
+		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+3*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px+extra)
 		if err != nil {
 			return nil, "", err
 		}
@@ -1534,7 +1536,7 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	saved := lims.MaxDecodeBytes
 	lims.MaxDecodeBytes = declared
 	defer func() { lims.MaxDecodeBytes = saved }()
-	release, err := d.reserveCMYKDCT(sd, info, declared, func() { releaseRaw(); releaseRaw = func() {} })
+	release, err := d.reserveCMYKDCT(sd, info, declared, extra, func() { releaseRaw(); releaseRaw = func() {} })
 	if err != nil {
 		return nil, "", err
 	}
@@ -1622,9 +1624,10 @@ func (d *doc) softMask(sd *types.StreamDict, info ImageInfo) (*types.StreamDict,
 // pixel cap is a *limits.LimitError; one the dictionary does not allow is
 // ErrUnsupportedCodec. Anything else returns a no-op release. declared bounds
 // what pdfcpu holds after the decode (gob, then the RGBA it renders), so three
-// copies of it join the decode's own need in the reservation. handoff runs just
+// copies of it join the decode's own need in the reservation, and extra is the
+// lazy bytes RawImage held past it. handoff runs just
 // before that reservation is asked for.
-func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int64, handoff func()) (func(), error) {
+func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared, extra int64, handoff func()) (func(), error) {
 	none := func() {}
 	n := len(sd.FilterPipeline)
 	if n == 0 || sd.FilterPipeline[n-1].Name != filter.DCT {
@@ -1643,7 +1646,7 @@ func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared int6
 		jpg = cp.Content
 	}
 	handoff() // the reservation below covers the decode; waiting on it while holding the raw one would deadlock
-	_, release, err := dct.Reserve(context.Background(), jpg, d.lim.ImagePixels(), int64(info.Width)*int64(info.Height), 4, 3*declared)
+	_, release, err := dct.Reserve(context.Background(), jpg, d.lim.ImagePixels(), int64(info.Width)*int64(info.Height), 4, 3*declared+extra)
 	if err != nil {
 		var le *limits.LimitError
 		if !errors.As(err, &le) && !errors.Is(err, limits.ErrMemoryLimit) {
