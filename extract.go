@@ -317,7 +317,8 @@ type PageRaster struct {
 
 	// Bitmap is the raster as packed bits, and Image is nil, when the call
 	// asked for it (Limits.PackedBitonal) and the source is a declared-bitonal
-	// DeviceGray or image mask that is not masked: CCITT, JBIG2, 1-bpc Flate.
+	// DeviceGray or image mask: CCITT, JBIG2, 1-bpc Flate. All but JBIG2 must also
+	// be unmasked; a masked JBIG2 page packs too, as its mask is ignored wide too.
 	// A set bit is a pixel below 128 once /Decode is applied (for a stencil
 	// that is the pixel painted, in the current fill colour, so "dark" only
 	// under a black fill) -- so it is the RGBA decode thresholded at 128 (except for a
@@ -336,9 +337,10 @@ type ImageSource struct {
 	// Filters is the /Filter chain in decode order, by name.
 	Filters []string
 	// Data is the encoded bytes after any filters that are not the image codec
-	// (the DCT stream under a Flate wrapper), for DCT and JBIG2 sources. It is
+	// (the DCT stream under a Flate wrapper), for JBIG2 and DCT sources. It is
 	// nil for the rest: pdfcpu decodes CCITT and Flate itself and hands back
-	// no encoded stream. (Accepted deviation from "encoded bytes after any
+	// no encoded stream, and a four-component (CMYK) DCT image, which pdfcpu
+	// decodes to a PNG itself. (Accepted deviation from "encoded bytes after any
 	// non-codec layers": the G4 bytes are reachable, but nothing needs them
 	// yet; keep-the-smaller works on DCT and JBIG2.)
 	Data []byte
@@ -599,6 +601,14 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 			return refuse(page, "unsupported-codec-jbig2",
 				fmt.Errorf("%w: jbig2: %v", ErrUnsupportedImageCodec, gerr))
 		}
+		// The stream and the globals outlive the decode in PageRaster.Source, so
+		// the pool holds them until the page is done, as it holds the raster's.
+		release, rerr := limits.Reserve(ctx, int64(len(data))+int64(len(globals)))
+		if rerr != nil {
+			countFailure()
+			return nil, PageProvenance{}, rerr
+		}
+		defer release()
 		img, bm, err = decodeJBIG2(ctx, data, globals, d.ImageInfo, placement.ID, d.Limits().PackedBitonal)
 		if err != nil {
 			// A budget error comes first: limits.Reserve gives up only when ctx

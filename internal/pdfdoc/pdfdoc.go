@@ -1793,9 +1793,8 @@ func (d *doc) RawImageGlobals(id int) (globals []byte, err error) {
 	}
 	// A copy: for an unfiltered stream Content is the same slice as the xref
 	// entry's Raw, and the caller owns what it is handed (a write through it
-	// would corrupt every later page that names the same globals). Globals
-	// are a symbol dictionary, small next to the page, and are released with
-	// the raster like Source.Data, so they are not reserved separately.
+	// would corrupt every later page that names the same globals). The caller
+	// reserves the copy from the pool for as long as it holds it.
 	return append([]byte(nil), gsd.Content...), nil
 }
 

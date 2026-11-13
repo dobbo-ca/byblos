@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"os"
 	"runtime"
 	"slices"
 	"testing"
@@ -420,6 +421,28 @@ func TestPackedBitmapOfAnImageMask(t *testing.T) {
 	for name, pr := range rasters(t, pdf, Limits{PackedBitonal: true}) {
 		if pr.Bitmap == nil || !bytes.Equal(pr.Bitmap.Pix, []byte{0x0F, 0xF0}) || !pr.Bitonal {
 			t.Errorf("%s: Bitmap %+v; want rows 0F F0 (sample 0 paints)", name, pr.Bitmap)
+		}
+	}
+}
+
+// A four-component DCT image is rendered to PNG by pdfcpu, which hands back no
+// encoded stream, so Source.Data is documented as nil for it.
+func TestPageRasterSourceLeavesOutCMYKDCT(t *testing.T) {
+	jpg, err := os.ReadFile("testdata/img2pdf/cmyk.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, _, err := EmbedJPEG(jpg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := BuildPDF(&buf, []BuildPage{{Image: enc, WidthPt: 64, HeightPt: 48}}); err != nil {
+		t.Fatal(err)
+	}
+	for name, pr := range rasters(t, buf.Bytes(), Limits{}) {
+		if pr.Source.ColorSpace != "DeviceCMYK" || pr.Source.Data != nil {
+			t.Errorf("%s: cs %q, Data %d bytes; want DeviceCMYK and nil", name, pr.Source.ColorSpace, len(pr.Source.Data))
 		}
 	}
 }
