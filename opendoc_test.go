@@ -197,7 +197,8 @@ func TestOpenDocumentLimitsAndCancel(t *testing.T) {
 	}
 }
 
-// Close returns the memory reservation and leaves no goroutine behind.
+// An open Document reserves nothing: the whole budget is reservable while it is
+// open, and Close leaves no goroutine behind.
 func TestOpenDocumentCloseReleases(t *testing.T) {
 	const budget = 300 << 20
 	prev := SetMemoryLimit(budget)
@@ -215,24 +216,56 @@ func TestOpenDocumentCloseReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	tctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-	if rel, err := limits.Reserve(tctx, budget); err == nil {
-		rel()
-		t.Error("whole budget reservable while the document is open")
-	}
+	rel, err := limits.Reserve(tctx, budget)
 	cancel()
-	doc.Close()
-	doc.Close()
-	rel, err := limits.Reserve(ctx, budget)
 	if err != nil {
-		t.Fatalf("reserve after Close: %v", err)
+		t.Errorf("whole budget not reservable while the document is open: %v", err)
+	} else {
+		rel()
 	}
-	rel()
+	doc.Close()
+	doc.Close()
 
 	for i := 0; i < 50 && runtime.NumGoroutine() > g0; i++ {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if g := runtime.NumGoroutine(); g > g0 {
 		t.Errorf("goroutines %d after Close; %d before", g, g0)
+	}
+}
+
+// A page whose own need fits the budget renders open-once whenever it renders
+// one-shot, even when the budget is under the need plus the document's parse:
+// the Document must not wait on bytes only its own Close would give back.
+func TestOpenDocumentPageFitsBudgetWithoutParseHeadroom(t *testing.T) {
+	var buf bytes.Buffer
+	if err := BuildPDF(&buf, []BuildPage{{Image: flateGrayImage(t, 1000, 1000, 1), WidthPt: 612, HeightPt: 792, DPI: 100}}); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+	prev := SetMemoryLimit(1 << 30)
+	defer SetMemoryLimit(prev)
+	limits.ResetPeak()
+	if _, err := ExtractPageRasterLimits(context.Background(), bytes.NewReader(data), 1, Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	need := limits.PeakReserved()
+	SetMemoryLimit(need + 16) // fits the page, not the page plus the table and the file
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(data), 1, Limits{})
+	doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	got, gerr := doc.PageRaster(ctx, 1)
+	if werr != nil || gerr != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("budget %d: open-once err=%v; one-shot err=%v; equal=%v", need+16, gerr, werr, reflect.DeepEqual(got, want))
+	}
+	// And a one-shot call on another document is not starved meanwhile.
+	if _, err := ExtractPageRasterLimits(ctx, bytes.NewReader(corpus.ScanJPEG()), 1, Limits{}); err != nil {
+		t.Errorf("one-shot beside the open Document: %v", err)
 	}
 }
 

@@ -13,20 +13,20 @@ import (
 // Document is a PDF parsed once. Info and PageRaster read from that one parse,
 // so N pages cost one pdfcpu parse rather than N+1.
 //
-// Memory model (SetMemoryLimit): the Document holds, until Close, only what
-// lives across pages, the object table and the file's bytes. Each page's own
-// need is reserved when the page runs and released when it is done, exactly as
-// the one-shot ExtractPageRasterLimits reserves it, so an open Document does not
-// make other callers wait. Its caps are Limits as given, the same as the
-// one-shot path's, with or without a budget. Per-page state (decoded forms, the
-// page's image records) is dropped when the page is done.
+// Memory model (SetMemoryLimit): the Document reserves nothing while it is
+// open, as the one-shot ExtractPageRasterLimits reserves nothing for its parse.
+// Each page reserves its own need when it runs and releases it when it is done,
+// exactly as the one-shot path does, so an open Document neither makes other
+// callers wait nor makes its own page wait on bytes only Close could give back.
+// Its caps are Limits as given, the same as the one-shot path's, with or without
+// a budget. Per-page state (decoded forms, the page's image records) is dropped
+// when the page is done.
 //
 // The reader is read in OpenDocument only. A Document is not safe for
 // concurrent use. A returned raster is the caller's, so a page's memory is
 // collectable once the caller drops it.
 type Document struct {
-	d       pdfdoc.Doc
-	release func()
+	d pdfdoc.Doc
 }
 
 // OpenDocument parses r under lim, checked before anything is allocated. The
@@ -36,24 +36,24 @@ func OpenDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Document, 
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	d, release, err := pdfdoc.OpenHeld(ctx, r, lim)
+	d, err := pdfdoc.OpenLimits(context.Background(), r, lim) // not ctx, as in the one-shot path
 	if err != nil {
+		if cerr := checkContext(ctx); cerr != nil {
+			return nil, cerr
+		}
 		if pdfdoc.IsWrongPassword(err) {
 			return nil, fmt.Errorf("%w: %w", ErrPassword, err)
 		}
 		return nil, err
 	}
-	return &Document{d: d, release: release}, nil
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	return &Document{d: d}, nil
 }
 
-// Close gives back the memory reservation and drops the parse. It is safe to
-// call twice.
-func (doc *Document) Close() {
-	if doc.release != nil {
-		doc.release()
-	}
-	doc.d, doc.release = nil, nil
-}
+// Close drops the parse. It is safe to call twice.
+func (doc *Document) Close() { doc.d = nil }
 
 // PageCount is the number of pages.
 func (doc *Document) PageCount() int { return doc.d.PageCount() }

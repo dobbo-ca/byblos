@@ -475,29 +475,6 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	return d, release, nil
 }
 
-// OpenHeld is the open of a Document: lim's caps as given (the one-shot path's,
-// whatever the budget), and a reservation of only what the parse keeps across
-// pages, the object table and the file's bytes, until release. Each page's own
-// decodes reserve for themselves when they run, as in the one-shot path, so an
-// open document does not queue other calls behind a slot it never uses.
-func OpenHeld(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, func(), error) {
-	size := objectsIn(rs)
-	if err := limits.Check("objects", size, lim.Objects()); err != nil {
-		return nil, nil, err
-	}
-	lim.MaxObjects = min(size+size/8+64, lim.Objects())
-	release, err := limits.Reserve(ctx, limits.ObjectTableBytes(size)+sizeOf(rs))
-	if err != nil {
-		return nil, nil, err
-	}
-	d, err := openSized(ctx, rs, lim, size)
-	if err != nil {
-		release()
-		return nil, nil, err
-	}
-	return d, release, nil
-}
-
 // openDoc is Open with the caps of lim. The /Size cap is checked before the parse
 // on every path; only OpenBudgeted also reserves memory.
 func openDoc(cctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, error) {
