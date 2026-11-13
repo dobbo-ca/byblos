@@ -344,10 +344,10 @@ func TestSauvolaEmitsNoInkOnSmoothShadingAlone(t *testing.T) {
 	}
 }
 
-// The bitmap Sauvola returns must be the exact type EncodeJBIG2Generic
+// The bitmap Sauvola returns must be the exact type jbig2-go Encode
 // consumes -- that is the whole point of routing binarization through
 // byblos's own Bitmap rather than a package-private type.
-func TestSauvolaOutputFeedsEncodeJBIG2Generic(t *testing.T) {
+func TestSauvolaOutputFeedsJBIG2Encode(t *testing.T) {
 	img := grayUniform(40, 40, 255)
 	for y := 10; y < 30; y++ {
 		for x := 10; x < 30; x++ {
@@ -358,7 +358,7 @@ func TestSauvolaOutputFeedsEncodeJBIG2Generic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sauvola: %v", err)
 	}
-	if _, err := EncodeJBIG2Generic(bm); err != nil {
-		t.Fatalf("EncodeJBIG2Generic(Sauvola(img)): %v", err)
+	if _, err := encodeJBIG2Generic(bm); err != nil {
+		t.Fatalf("encodeJBIG2Generic(Sauvola(img)): %v", err)
 	}
 }

@@ -1,4 +1,4 @@
-.PHONY: build test lint corpus oracle glyphless jbig2-goldens fontmeasure
+.PHONY: build test lint corpus oracle glyphless fontmeasure
 
 build:
 	CGO_ENABLED=0 go build ./...
@@ -42,9 +42,3 @@ fontmeasure:
 	CGO_ENABLED=0 go run tools/fontmeasure/boxfont.go -style=hollow -family="Byblos Box Hollow" -out=tools/fontmeasure/faces/box-hollow.ttf
 	CGO_ENABLED=0 go run tools/fontmeasure/boxfont.go -style=filled -inset=0.324 -family="Byblos Box Narrow" -out=tools/fontmeasure/faces/box-narrow.ttf
 	CGO_ENABLED=0 go run tools/fontmeasure/boxfont.go -style=filled -top=230 -family="Byblos Box Short" -out=tools/fontmeasure/faces/box-short.ttf
-
-# Regenerates the committed JBIG2 encoder goldens. Requires jbig2dec, which
-# verifies each stream round-trips losslessly before the golden is written.
-# Manual step -- never run in CI. Commit the results.
-jbig2-goldens:
-	go test ./internal/jbig2/ -run TestEncoderGoldens -update -v

@@ -48,7 +48,7 @@ var Targets = []Target{
 	{Capability: "inspect", Entry: "Inspect", Corpus: "all", Override: 1.0},
 	{Capability: "extract-raster", Entry: "ExtractPageRaster", Corpus: "all", Override: 1.0},
 	{Capability: "build-pdf", Entry: "BuildPDF", Corpus: "all", Override: 1.0},
-	{Capability: "jbig2-generic", Entry: "EncodeJBIG2Generic", Corpus: "all", Override: 1.0},
+	{Capability: "jbig2-generic", Entry: "jbig2.Encode (jbig2-go)", Corpus: "all", Override: 1.0},
 	{Capability: "quantize-png", Entry: "QuantizePNG", Corpus: "all", Override: 1.0},
 	{Capability: "downsample", Entry: "Downsample", Corpus: "all", Override: 1.0},
 	{Capability: "jpeg-recompress", Entry: "Optimize(RecompressJPEG)", Corpus: "all", Override: 1.0},

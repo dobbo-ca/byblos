@@ -2,21 +2,21 @@ package byblos
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
-	"math"
 	"runtime"
-	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/dobbo-ca/byblos/internal/jbig2"
+	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
+	jbig2 "github.com/dobbo-ca/jbig2-go"
 )
 
 // jbig2TestBitmap is a deterministic bitmap chosen to be hostile to the bugs a
@@ -37,104 +37,6 @@ func jbig2TestBitmap() *Bitmap {
 		}
 	}
 	return b
-}
-
-// TestDecodeJBIG2GenericRoundTripsTheEncoder is the public-API half of the
-// byb-riy acceptance: whatever EncodeJBIG2Generic writes, DecodeJBIG2Generic
-// must read back bit-identically.
-//
-// The internal round trip in internal/jbig2 proves the codec. This proves the
-// two exported functions are actually wired to it in the same polarity and the
-// same packing -- the seam where an inversion would be introduced.
-func TestDecodeJBIG2GenericRoundTripsTheEncoder(t *testing.T) {
-	for _, want := range []*Bitmap{
-		jbig2TestBitmap(),
-		NewBitmap(1, 1),
-		NewBitmap(64, 8),
-		func() *Bitmap { // all ink, non-byte-aligned
-			b := NewBitmap(13, 11)
-			for y := 0; y < b.Height; y++ {
-				for x := 0; x < b.Width; x++ {
-					b.Set(x, y, 1)
-				}
-			}
-			return b
-		}(),
-	} {
-		data, err := EncodeJBIG2Generic(want.Clone())
-		if err != nil {
-			t.Fatalf("%dx%d: EncodeJBIG2Generic: %v", want.Width, want.Height, err)
-		}
-		got, err := DecodeJBIG2Generic(data)
-		if err != nil {
-			t.Fatalf("%dx%d: DecodeJBIG2Generic: %v", want.Width, want.Height, err)
-		}
-		if !got.Equal(want) {
-			t.Errorf("%dx%d: round trip is not bit-identical", want.Width, want.Height)
-		}
-	}
-}
-
-// TestDecodeJBIG2GenericRejectsNonGeneric pins the documented residue as
-// behaviour rather than as a doc comment. Symbol-mode JBIG2 -- what most archive
-// scanners emit, and most of the 6,818 unsupported-codec-jbig2 pages on byb-riy
-// -- must come back as ErrUnsupportedJBIG2Feature and NO bitmap.
-//
-// A returned bitmap here would be the worst outcome this package can produce:
-// the MQ decoder yields a decision for any input, so decoding a symbol
-// dictionary as a generic region succeeds and gives back noise.
-func TestDecodeJBIG2GenericRejectsNonGeneric(t *testing.T) {
-	base, err := EncodeJBIG2Generic(jbig2TestBitmap())
-	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
-	}
-	// Segment type lives in the flags byte of the segment header. The generic
-	// region segment is the second one, after an 11-byte header and a 19-byte
-	// page information body.
-	const regionTypeAt = 11 + 19 + 4
-	if base[regionTypeAt] != 39 {
-		t.Fatalf("offset assumption broken: segment type byte = %d, want 39", base[regionTypeAt])
-	}
-	// SYMBOL DICTIONARY (0) AND TEXT REGION (6) USED TO BE IN THIS TABLE and
-	// byb-9v0 removed them, for the reason internal/jbig2's own copy of this
-	// table states: relabelling a generic region segment as one of those does
-	// not produce a legal symbol-mode stream, it produces a generic region body
-	// read as a symbol dictionary header. The cases passed because the dispatch
-	// refused by segment type before parsing, so what they pinned was the
-	// refusal and not the reason for it. What byblos still declines in those
-	// types is the Huffman and refinement variants, and
-	// TestDecodeJBIG2GenericDecodesSymbolModeAndDeclinesItsHuffmanVariant pins
-	// that against a stream jbig2enc wrote.
-	for name, typ := range map[string]byte{
-		"halftone-region":    22,
-		"refinement-region":  42,
-		"pattern-dictionary": 16,
-	} {
-		t.Run(name, func(t *testing.T) {
-			s := bytes.Clone(base)
-			s[regionTypeAt] = typ
-			got, err := DecodeJBIG2Generic(s)
-			if err == nil {
-				t.Fatalf("DecodeJBIG2Generic returned a %dx%d bitmap; want ErrUnsupportedJBIG2Feature",
-					got.Width, got.Height)
-			}
-			if !errors.Is(err, ErrUnsupportedJBIG2Feature) {
-				t.Fatalf("error = %v; want ErrUnsupportedJBIG2Feature", err)
-			}
-			if got != nil {
-				t.Error("a bitmap was returned alongside the error")
-			}
-		})
-	}
-
-	// A corrupt stream is a plain error, NOT ErrUnsupportedJBIG2Feature: the
-	// difference is what tells an archive "a future decoder recovers this page"
-	// from "these bytes are damaged".
-	if _, err := DecodeJBIG2Generic([]byte("not a jbig2 stream")); err == nil {
-		t.Error("DecodeJBIG2Generic on garbage: want an error")
-	} else if errors.Is(err, ErrUnsupportedJBIG2Feature) {
-		t.Errorf("garbage reported as an unsupported FEATURE: %v", err)
-	}
 }
 
 // TestExtractPageRasterDecodesASubstitutedJBIG2Page is byb-riy's headline claim,
@@ -158,9 +60,9 @@ func TestExtractPageRasterDecodesASubstitutedJBIG2Page(t *testing.T) {
 	ref := before[0].Images[0]
 
 	src := jbig2TestBitmap()
-	data, err := EncodeJBIG2Generic(src.Clone())
+	data, err := encodeJBIG2Generic(src.Clone())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 
 	var out bytes.Buffer
@@ -223,9 +125,9 @@ func TestExtractPageRasterRejectsJBIG2ItCannotDecode(t *testing.T) {
 	ref := inspect(t, "scan")[0].Images[0]
 
 	src := jbig2TestBitmap()
-	data, err := EncodeJBIG2Generic(src.Clone())
+	data, err := encodeJBIG2Generic(src.Clone())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 	// Retype the region segment as a text region: a legal segment type this
 	// package does not decode.
@@ -277,9 +179,9 @@ func grayInfo(w, h int) pdfdoc.ImageInfo {
 // match, and every assertion below would hold vacuously on a blank page.
 func TestDecodeJBIG2PlacementAppliesTheDecodeArray(t *testing.T) {
 	src := jbig2TestBitmap()
-	data, err := EncodeJBIG2Generic(src.Clone())
+	data, err := encodeJBIG2Generic(src.Clone())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 	var ink int
 	for y := 0; y < src.Height; y++ {
@@ -312,7 +214,7 @@ func TestDecodeJBIG2PlacementAppliesTheDecodeArray(t *testing.T) {
 			if tc.decode != nil {
 				info.Decode, info.DecodeArray = true, tc.decode
 			}
-			img, err := decodeJBIG2Placement(data, nil, func(int) (pdfdoc.ImageInfo, bool) {
+			img, err := decodeJBIG2Placement(context.Background(), data, nil, func(int) (pdfdoc.ImageInfo, bool) {
 				return info, true
 			}, 7)
 			if err != nil {
@@ -361,14 +263,14 @@ func TestDecodeJBIG2PlacementAppliesTheDecodeArray(t *testing.T) {
 // anything, it is a different image (grayLevels records poppler's numbers).
 //
 // The message substring is asserted rather than just the error, and the shared
-// "/Decode array" prefix is deliberate: jbig2_symbol_probe_test.go's census
-// classifies this gate by that phrase, so a refusal that drops it is a refusal
+// "/Decode array" prefix is deliberate: the byb-9v0 census
+// classified this gate by that phrase, so a refusal that drops it is a refusal
 // no measurement can see.
 func TestDecodeJBIG2PlacementRefusesADecodeArrayItCannotRead(t *testing.T) {
 	src := jbig2TestBitmap()
-	data, err := EncodeJBIG2Generic(src.Clone())
+	data, err := encodeJBIG2Generic(src.Clone())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 	for _, tc := range []struct {
 		name string
@@ -396,7 +298,7 @@ func TestDecodeJBIG2PlacementRefusesADecodeArrayItCannotRead(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info := tc.info(grayInfo(src.Width, src.Height))
-			got, err := decodeJBIG2Placement(data, nil, func(int) (pdfdoc.ImageInfo, bool) {
+			got, err := decodeJBIG2Placement(context.Background(), data, nil, func(int) (pdfdoc.ImageInfo, bool) {
 				return info, true
 			}, 7)
 			if err == nil {
@@ -424,9 +326,9 @@ func TestDecodeJBIG2PlacementRefusesADecodeArrayItCannotRead(t *testing.T) {
 // reasons, and require the identical error. Only a check that never opens the
 // stream can produce it.
 func TestDecodeJBIG2PlacementReadsTheDecodeArrayBeforeOpeningTheStream(t *testing.T) {
-	valid, err := EncodeJBIG2Generic(jbig2TestBitmap())
+	valid, err := encodeJBIG2Generic(jbig2TestBitmap())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 	// Refused on the colour space, and sized so that neither the pixel limit
 	// nor the size comparison could be what refuses it instead.
@@ -443,7 +345,7 @@ func TestDecodeJBIG2PlacementReadsTheDecodeArrayBeforeOpeningTheStream(t *testin
 		{"empty", nil},
 		{"valid-and-the-right-size", valid},
 	} {
-		got, err := decodeJBIG2Placement(c.data, nil, info, 7)
+		got, err := decodeJBIG2Placement(context.Background(), c.data, nil, info, 7)
 		if err == nil {
 			t.Fatalf("%s: an unreadable /Decode array must be refused", c.name)
 		}
@@ -486,9 +388,9 @@ func TestDecodeJBIG2PlacementReadsTheDecodeArrayBeforeOpeningTheStream(t *testin
 // which is a different error reaching this assertion for the wrong reason.
 func TestDecodeJBIG2PlacementGuardsTheDictionary(t *testing.T) {
 	src := jbig2TestBitmap()
-	data, err := EncodeJBIG2Generic(src.Clone())
+	data, err := encodeJBIG2Generic(src.Clone())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 	info := func(i pdfdoc.ImageInfo, ok bool) func(int) (pdfdoc.ImageInfo, bool) {
 		return func(int) (pdfdoc.ImageInfo, bool) { return i, ok }
@@ -496,7 +398,7 @@ func TestDecodeJBIG2PlacementGuardsTheDictionary(t *testing.T) {
 	good := pdfdoc.ImageInfo{Width: src.Width, Height: src.Height}
 
 	// The control: with a dictionary that agrees, the raster comes back.
-	img, err := decodeJBIG2Placement(data, nil, info(good, true), 7)
+	img, err := decodeJBIG2Placement(context.Background(), data, nil, info(good, true), 7)
 	if err != nil {
 		t.Fatalf("decodeJBIG2Placement on a matching dictionary: %v", err)
 	}
@@ -531,13 +433,13 @@ func TestDecodeJBIG2PlacementGuardsTheDictionary(t *testing.T) {
 		// true statement reached by parsing headers that never needed parsing,
 		// and on a stream at the segment cap that is 10.6 MiB of parsing.
 		//
-		// 8192x8193 is one row past jbig2.MaxPagePixels, so the gate is what
+		// 8192x8193 is one row past maxJBIG2Pixels, so the gate is what
 		// refuses it and nothing else can be.
 		"oversize-dictionary": {pdfdoc.ImageInfo{Width: 8192, Height: 8193}, true,
 			"byblos renders a bilevel page at one byte per pixel"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := decodeJBIG2Placement(data, nil, info(tc.info, tc.ok), 7)
+			got, err := decodeJBIG2Placement(context.Background(), data, nil, info(tc.info, tc.ok), 7)
 			if err == nil {
 				t.Fatalf("decodeJBIG2Placement returned a %v raster; want an error", got.Bounds())
 			}
@@ -547,6 +449,61 @@ func TestDecodeJBIG2PlacementGuardsTheDictionary(t *testing.T) {
 					"the message is what tells a caller which field to look at.", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestDecodeJBIG2PlacementGuardsTheDictionaryHeight pins the HEIGHT half of
+// decodeJBIG2Placement's size comparison, which no test in the tree could
+// detect the deletion of.
+//
+// The existing table around TestDecodeJBIG2PlacementGuardsTheDictionary pins the
+// width half and only the width half. Its three size cases -- transposed 73x101,
+// wrong-width 102x73, and the zero dictionary -- all disagree with the page on
+// WIDTH as well, so each is still refused by "w != info.Width" alone. Delete
+// "|| h != info.Height" and the whole file still passes.
+//
+// The case that separates them is a dictionary that agrees on width and lies
+// about height, and it is worth having as its own test because it is precisely
+// the /Width-/Height confusion the function's doc comment says the comparison
+// exists to catch. Reproduced against the mutant: a 100x50 JBIG2 page under a
+// dictionary declaring /Width 100 /Height 100 is ACCEPTED, and the caller is
+// handed back a 100x50 raster for an image the PDF says is 100 rows tall --
+// half a page of content placed as though it were a whole one, with no error
+// anywhere. That is the silent-accept failure mode this package treats as worse
+// than a refusal: the geometry the caller gets does not describe the pixels.
+//
+// The stream is built by hand rather than encoded, so the page really is 100x50
+// and the assertion does not depend on what the encoder happens to emit.
+func TestDecodeJBIG2PlacementGuardsTheDictionaryHeight(t *testing.T) {
+	const pageW, pageH = 100, 50
+	data := hostileJBIG2Stream(pageW, pageH, pageW, pageH)
+
+	// Agrees on width, and is square where the page is not. 10,000 pixels is
+	// far inside maxJBIG2Pixels, so the size gate in front cannot be what
+	// refuses this and the comparison under test is the only thing left.
+	info := func(int) (pdfdoc.ImageInfo, bool) {
+		return pdfdoc.ImageInfo{Width: pageW, Height: 2 * pageH}, true
+	}
+
+	got, err := decodeJBIG2Placement(context.Background(), data, nil, info, 7)
+	if err == nil {
+		t.Fatalf("a %dx%d JBIG2 page under a dictionary declaring %dx%d was accepted and "+
+			"returned a %v raster. The dictionary is what the PDF says the image is; a page "+
+			"of a different height means this stream is not the one the dictionary describes, "+
+			"and the placement geometry the caller gets back does not describe these pixels.",
+			pageW, pageH, pageW, 2*pageH, got.Bounds())
+	}
+	t.Logf("refused: %v", err)
+	for _, want := range []string{
+		fmt.Sprintf("%dx%d", pageW, pageH),   // what the stream actually is
+		fmt.Sprintf("%dx%d", pageW, 2*pageH), // what the dictionary claimed
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v; want it to name %q. A caller reading this has to be able to "+
+				"tell which of the two sizes came from the PDF and which came from the "+
+				"stream, or they cannot tell a mis-parsed stream from a wrong dictionary.",
+				err, want)
+		}
 	}
 }
 
@@ -581,452 +538,13 @@ func hostileJBIG2Stream(pageW, pageH, regionW, regionH int) []byte {
 	return append(seg(0, 48, pi), seg(1, 38, r)...)
 }
 
-// TestExtractPageRasterBoundsTheCostOfAHostileJBIG2Page pins the DoS bound where
-// it is actually reachable -- a hostile PDF handed to the public
-// ExtractPageRaster -- and it pins it FROM ABOVE, which is the thing two rounds
-// of this work were missing.
-//
-// The stream is the most ALLOCATING one every gate admits AT 67 BYTES: a page
-// just under jbig2.MaxPagePixels with a 1x1 region on it, so nothing is refused
-// and grayImage expands the whole page to one byte per pixel. Its size is
-// derived from the constant, so raising the constant raises this test's cost;
-// the ceiling it is measured against is a LITERAL, so raising the constant fails
-// here. Measured across the three multipliers: x2, x3 and x10 all push the
-// page's packed bitmap past the 16 MiB memory budget, so the page is refused
-// outright and the "must still decode" fatal below fires.
-//
-// That qualifier was missing until round 7 and its absence was a real defect,
-// not pedantry: this test said "the worst the gates admit" and a reader took the
-// 88 MiB as a bound on the whole path. It is not. A 67-byte stream cannot carry
-// segment HEADERS, and the header cost internal/jbig2's rule 5 concedes is what
-// gets past 88 MiB -- see TestExtractPageRasterCeilingBoundsEveryStreamTheGatesAdmit
-// below, which bounds the admitted set. What this test still holds, and holds
-// tightly, is the PAGE-SIZE axis: 1.2x the measurement, so any regression that
-// stops this path being O(page) fails here first and with a smaller stream.
-//
-// Round 1 of this work reported a 264,000x improvement and passed its whole
-// suite while this same path turned 67 bytes into 8.36 seconds and 640 MiB. The
-// reason no test caught it is that every test measured the stream shape its own
-// author had in mind. This one measures ALLOCATION on the real entry point, so
-// it does not need to have guessed the shape right.
-func TestExtractPageRasterBoundsTheCostOfAHostileJBIG2Page(t *testing.T) {
-	// The largest square page the pixel budget admits with a 1x1 region beside
-	// it. 8191x8191 at MaxPagePixels = 1<<26; the arithmetic follows the
-	// constant so that a mutation of the constant moves the cost.
-	side := int(math.Sqrt(float64(jbig2.MaxPagePixels - 1)))
-	data := hostileJBIG2Stream(side, side, 1, 1)
-
-	in := corpusDoc(t, "scan")
-	ref := inspect(t, "scan")[0].Images[0]
-	var out bytes.Buffer
-	if err := ReplaceImages(&out, bytes.NewReader(in), map[int]EncodedImage{
-		ref.ObjNr: {
-			Width: side, Height: side, BPC: 1,
-			ColorSpace: ColorSpace{Name: "DeviceGray"},
-			Filter:     "JBIG2Decode",
-			Data:       data,
-		},
-	}); err != nil {
-		t.Fatalf("ReplaceImages: %v", err)
-	}
-	doc := out.Bytes()
-
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	start := time.Now()
-	pr, err := ExtractPageRaster(bytes.NewReader(doc), 1)
-	elapsed := time.Since(start)
-	runtime.ReadMemStats(&after)
-	grew := after.TotalAlloc - before.TotalAlloc
-	t.Logf("%d bytes of JBIG2 in a %d byte PDF, page %dx%d: err = %v, elapsed = %v, "+
-		"TotalAlloc grew by %.1f MiB", len(data), len(doc), side, side, err, elapsed,
-		float64(grew)/(1<<20))
-
-	if err != nil {
-		t.Fatalf("the worst stream the budgets ADMIT must still decode, or the bound is "+
-			"pinned only from below and this test proves nothing: %v", err)
-	}
-	if b := pr.Image.Bounds(); b.Dx() != side || b.Dy() != side {
-		t.Fatalf("raster is %dx%d; want %dx%d", b.Dx(), b.Dy(), side, side)
-	}
-
-	// 640 MiB was measured on this path before any of this work. 72.3 MiB is what
-	// it costs now: a 64 MiB *image.Gray, the packed page beneath it, and the PDF
-	// machinery around both. The ceiling is a literal on purpose -- writing it in
-	// terms of jbig2.MaxPagePixels would make it move with the mutation it exists
-	// to catch -- and it is set at about 1.2x the measurement, the same headroom
-	// it carried when the budget was half this size.
-	const ceiling = 88 << 20
-	if grew > ceiling {
-		t.Errorf("the worst admitted JBIG2 page allocated %.1f MiB from %d bytes of stream; "+
-			"the ceiling is %d MiB. Either jbig2.MaxPagePixels went up or something on this "+
-			"path stopped being O(page).", float64(grew)/(1<<20), len(data), ceiling>>20)
-	}
-}
-
-// decodeJBIG2GenericNoPanic calls DecodeJBIG2Generic and turns a panic into a
-// failure of the CALLING SUBTEST rather than a crashed test binary.
-//
-// It is not softening anything: the panic is still a failure and the message
-// still carries the stack that names the line, but one missing length guard then
-// fails one subtest instead of taking the whole package's tests down with it and
-// hiding the other three.
-func decodeJBIG2GenericNoPanic(t *testing.T, s []byte) (b *Bitmap, err error) {
-	t.Helper()
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("DecodeJBIG2Generic PANICKED on a %d-byte stream (% 02X): %v\n\n%s",
-				len(s), s, r, debug.Stack())
-		}
-	}()
-	return DecodeJBIG2Generic(s)
-}
-
-// TestDecodeJBIG2GenericRefusesShortHeadersInsteadOfPanicking pins the six
-// LENGTH GUARDS that stand between a truncated JBIG2 header and an index or
-// slice-bounds panic inside the decoder.
-//
-// All six guards are present and correct at this tip. What was missing is any
-// test that notices their removal: each of the six deletions -- the 11-byte
-// minimum on a segment header, the check that the header's variable-width fields
-// do not run past the stream, the 19-byte minimum on a page information body,
-// the 17-byte minimum on a region segment information field, and the 18- and
-// 26-byte minima on a generic region body -- builds clean and passes the entire
-// suite, while turning the corresponding stream below into a PANIC out of the
-// exported DecodeJBIG2Generic.
-//
-// A panic is the one failure mode this API cannot have. DecodeJBIG2Generic runs
-// on bytes taken straight out of an untrusted PDF -- that is extract.go's JBIG2
-// branch, wired up by byb-riy -- so an attacker picks these bytes, and a caller
-// that can route around an error cannot route around a crashed process. Every
-// one of these streams is under 70 bytes.
-//
-// The streams are LITERAL HEX rather than assembled by this package's encoder,
-// and that is deliberate twice over. EncodeJBIG2Generic cannot produce any of
-// them, so there is no builder to borrow; and a stream derived from a helper
-// would move with the helper and quietly stop being the shape that panics. These
-// bytes ARE the shape that panics, so they are checked in as bytes.
-//
-// EVERY ONE OF THE SIX IS PINNED AT ITS BOUNDARY as well as at its presence,
-// and the two are different properties: a stream that is short by four bytes is
-// refused by the correct guard and by three wrong ones, so it pins that a check
-// exists and not where it sits. Each guard therefore has a case one byte inside
-// it, and each of those cases was run RED against the guard loosened by one
-// before it was trusted. The last of the six to get one is the header-length
-// comparison below, whose fixture overshot by four bytes.
-//
-// Each case asserts the guard's OUTCOME, not merely the absence of a panic: the
-// error has to name the field and the byte count that was actually short, which
-// pins the diagnosis as well as the guard. And none of them may carry
-// ErrUnsupportedJBIG2Feature -- a truncated header is DAMAGE, and filing damage
-// under the sentinel that tells an archive "a future decoder recovers this page"
-// is a misfiling the archive then acts on.
-func TestDecodeJBIG2GenericRefusesShortHeadersInsteadOfPanicking(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		// The stream, as hex. Byte counts in the comments are of the DECODED
-		// stream.
-		stream string
-		// A substring the refusal must contain. Each names both the structure
-		// that was short and the length it actually had, so a guard replaced by a
-		// vaguer one further down the parse also fails here.
-		want string
-		// What deleting the guard does instead, quoted from the run that found it.
-		panics string
-	}{
-		// internal/jbig2/segment_decode.go, parseSegments: len(rest) < 11.
-		//
-		// A T.88 7.2 segment header is eleven bytes at its narrowest -- four of
-		// segment number, one of flags, one referred-to count, one page
-		// association and four of data length. This stream is FIVE bytes: a
-		// segment number and a flags byte declaring type 48, and nothing else.
-		// Without the guard the parse reads the referred-to count at rest[5] of a
-		// 5-byte slice.
-		{
-			name:   "segment-header-under-11-bytes",
-			stream: "0000000030",
-			want:   "segment header at offset 0 is 5 bytes",
-			panics: "index out of range [5] with length 5",
-		},
-
-		// The same guard AT ITS BOUNDARY, which the five-byte case above cannot
-		// reach: five bytes is refused by a minimum of 11, of 10, of 9 and of 6,
-		// so it pins that a minimum exists and not what it is.
-		//
-		// Ten bytes -- the eleven-byte header with the last byte of its data
-		// length field cut off. A minimum of 10 admits it, and it is then refused
-		// two fields later as a header that runs past the end of the stream. The
-		// verdict is still a refusal; the DIAGNOSIS is wrong, and it points a
-		// caller at the variable-width referred-to fields of T.88 7.2.4-7.2.6
-		// when what is actually missing is the fixed tail of 7.2.7.
-		{
-			name:   "segment-header-exactly-10-bytes",
-			stream: "00000000300001000000",
-			want:   "segment header at offset 0 is 10 bytes",
-			panics: "accepted by a minimum of 10 and misreported as a header running past the end",
-		},
-
-		// internal/jbig2/segment_decode.go, parseSegments:
-		// i < 0 || i+4 > len(rest).
-		//
-		// The other end of the same header, and the one the 11-byte minimum
-		// above does NOT cover: a segment header is eleven bytes at its
-		// NARROWEST, and every one of the variable-width fields of T.88 7.2.4,
-		// 7.2.5 and 7.2.6 makes it longer.
-		//
-		// AT THE BOUNDARY, and it has to be, because this guard is an
-		// arithmetic comparison and not a minimum length: the case that pins it
-		// must be over by EXACTLY ONE BYTE. This stream is eleven bytes and
-		// spends them like this -- segment number 0, a flags byte of 0x27 (type
-		// 39, bit 6 clear so the page association is one byte), a referred-to
-		// count byte of 0x20 declaring ONE reference, one one-byte referred-to
-		// segment number (one byte because this segment's own number is at most
-		// 256, T.88 7.2.5) and a one-byte page association. That puts the
-		// four-byte data length field of 7.2.7 at rest[8:12] of an eleven-byte
-		// slice: one byte past the end and no more.
-		//
-		// The fixture this replaced declared FOUR references, which put the
-		// field at rest[11:15] -- four bytes past the end. It killed the
-		// guard's DELETION and survived every off-by-one: loosened to
-		// "i+4 > len(rest)+1" the parse still refused it, and that mutant
-		// passed the whole suite while turning this stream into a panic out of
-		// the exported API. Overshooting a boundary pins that a check exists
-		// and not where it sits.
-		//
-		// Deleting the guard is not a bounds error in Go's eyes unless the
-		// backing array ends there too, and that is exactly why it is worth a
-		// literal stream: hex.DecodeString allocates a slice whose capacity IS
-		// its length, which is what a stream lifted out of a PDF looks like, and
-		// the read then goes past the ALLOCATION. Handed a buffer with slack
-		// instead, the mutant does something quieter and worse -- it reads a data
-		// length out of whatever follows the stream in memory and reports a
-		// segment that parsed cleanly.
-		{
-			name:   "segment-header-one-byte-longer-than-the-stream",
-			stream: "0000000027200000000000",
-			want:   "header runs past the end of the stream",
-			panics: "slice bounds out of range [:12] with capacity 11",
-		},
-
-		// internal/jbig2/segment_decode.go, planStream: len(sg.data) < 19.
-		//
-		// 52 bytes: a page information segment declaring FOUR bytes of body,
-		// followed by a complete 26-byte generic region segment for an 8x8 page.
-		// The body is long enough for the width field and nothing else. Without
-		// the guard the page flags are read from sg.data[16] of a 4-byte slice --
-		// and the guard is what makes the width, the height and the default pixel
-		// value all readable from one bounds check.
-		{
-			name: "page-information-body-under-19-bytes",
-			stream: "000000003000010000000400000008000000012600010000001a00000008" +
-				"000000080000000000000000000803fffdff02fefefe",
-			want:   "page information segment is 4 bytes",
-			panics: "index out of range [16] with length 4",
-		},
-
-		// The same guard AT ITS BOUNDARY, and unlike every other case here the
-		// loosened guard does not panic and does not misdiagnose -- it ACCEPTS.
-		//
-		// The body is EIGHTEEN bytes: width, height, the two resolution fields
-		// and the flags byte are all present, and only the second byte of the
-		// two-byte striping information of T.88 7.4.8.5 is missing. A minimum of
-		// 18 reads every field it wants inside the slice, so the stream decodes
-		// and hands back an 8x8 page built from a page information segment that
-		// is not one. The rest of the stream is well formed on purpose, so the
-		// guard is the only thing standing between this and a raster.
-		{
-			name: "page-information-body-18-bytes",
-			stream: "0000000030000100000012" + "000000080000000800000000000000000100" +
-				"000000012600010000001a" + "00000008000000080000000000000000000803fffdff02fefefe",
-			want:   "page information segment is 18 bytes",
-			panics: "ACCEPTED, and an 8x8 raster is handed back for a truncated page segment",
-		},
-
-		// internal/jbig2/segment_decode.go, parseRegionInfo: len(d) < 17.
-		//
-		// The FIRST length check any region body meets, and the one guarding the
-		// widest read: parseRegionInfo takes four uint32 fields and a flags byte
-		// out of the T.88 7.4.1 region segment information field, and it is
-		// called from TWO places -- planStream's budget loop, over every region
-		// in the stream, and decodeGenericRegionSegment. The budget loop is the
-		// one that matters, because it runs from PageSize, which the PDF layer
-		// calls FIRST on bytes out of an untrusted file.
-		//
-		// 45 bytes: a well-formed 8x8 page, then a region segment declaring a
-		// FOUR-byte body -- the width field and nothing else. Without the guard
-		// the height is read from d[4:8] of a 4-byte slice.
-		{
-			name: "region-info-body-under-17-bytes",
-			stream: "00000000300001000000130000000800000008000000000000000001000000" +
-				"00000127000100000004" + "00000008",
-			want:   "region segment info is 4 bytes",
-			panics: "slice bounds out of range [:8] with capacity 4",
-		},
-
-		// The same guard one byte short of satisfying it, which is a different
-		// read: 57 bytes, a SIXTEEN-byte region body. Every uint32 field is
-		// present and only the external combination operator byte at d[16] is
-		// missing, so this case fails on an index rather than on a slice bound
-		// and would survive a guard rewritten as "len(d) < 16".
-		{
-			name: "region-info-body-16-bytes",
-			stream: "00000000300001000000130000000800000008000000000000000001000000" +
-				"00000127000100000010" + "00000008000000080000000000000000",
-			want:   "region segment info is 16 bytes",
-			panics: "index out of range [16] with length 16",
-		},
-
-		// internal/jbig2/segment_decode.go, decodeGenericRegionSegment: len(d) < 18.
-		//
-		// 58 bytes: a well-formed 8x8 page, then a generic region segment whose
-		// body is SEVENTEEN bytes -- exactly the T.88 7.4.1 region segment
-		// information field and not one byte more. parseRegionInfo is satisfied,
-		// because seventeen bytes is all it needs; the generic region flags byte
-		// of 7.4.6.2 is the eighteenth and is not there. Without the guard d[17]
-		// indexes one past the end.
-		{
-			name: "generic-region-body-under-18-bytes",
-			stream: "00000000300001000000130000000800000008000000000000000001000000" +
-				"000001260001000000110000000800000008000000000000000000",
-			want:   "generic region segment is 17 bytes",
-			panics: "index out of range [17] with length 17",
-		},
-
-		// internal/jbig2/segment_decode.go, decodeGenericRegionSegment: len(d) < 26.
-		//
-		// 59 bytes, and one byte longer than the case above: the body is
-		// EIGHTEEN bytes, so the flags byte is present and MMR, GBTEMPLATE and
-		// EXTTEMPLATE all check out, and the parse walks on to the eight-byte AT
-		// field of T.88 7.4.6.3 that is not there. Without the guard d[18:26] is
-		// taken from a slice whose backing array ends at 23.
-		{
-			name: "generic-region-body-under-26-bytes",
-			stream: "0000000030000100000013000000080000000800000000000000000100000000" +
-				"000126000100000012000000080000000800000000000000000000",
-			want:   "generic region segment is 18 bytes",
-			panics: "slice bounds out of range [:26] with capacity 23",
-		},
-
-		// The same guard, at the length where deleting it does NOT panic -- which
-		// is why the case above is not enough on its own.
-		//
-		// 66 bytes, and the segment order is reversed on purpose: a generic
-		// region segment whose body is TWENTY-FIVE bytes comes FIRST, and the
-		// page information segment follows it. The region body carries the first
-		// SEVEN of the eight nominal AT bytes (03 FF FD FF 02 FE FE) and stops.
-		//
-		// segment.data is a sub-slice of the caller's buffer, not a copy, so with
-		// the guard deleted d[18:26] is in range of the BACKING ARRAY and reads
-		// its eighth byte from the segment that follows -- the high byte of the
-		// next segment's number, 0x00, which is not the 0xFE the nominal AT field
-		// ends with. So the decoder does not panic and does not report a short
-		// segment: it reports "AT pixels are not the nominal ones" and hands back
-		// ErrUnsupportedJBIG2Feature, having reached its verdict from a byte
-		// OUTSIDE the segment it was decoding. That is the misfiling the sentinel
-		// exists to prevent -- a damaged stream filed as a page some future
-		// decoder recovers -- and it is why this case asserts the message and the
-		// sentinel and not just "no panic".
-		{
-			name: "generic-region-body-25-bytes-must-not-read-past-the-segment",
-			stream: "000000012600010000001900000008000000080000000000000000000003fffd" +
-				"ff02fefe000000003000010000001300000008000000080000000000000000010000",
-			want:   "generic region segment is 25 bytes",
-			panics: "ErrUnsupportedJBIG2Feature, decided from a byte outside the segment",
-		},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			s, err := hex.DecodeString(c.stream)
-			if err != nil {
-				t.Fatalf("the case's own hex is malformed: %v", err)
-			}
-			t.Logf("%d bytes: % 02X", len(s), s)
-
-			got, derr := decodeJBIG2GenericNoPanic(t, s)
-			if derr == nil {
-				t.Fatalf("DecodeJBIG2Generic returned a %dx%d bitmap for a truncated header; "+
-					"want a refusal naming %q", got.Width, got.Height, c.want)
-			}
-			if got != nil {
-				t.Error("a bitmap was returned alongside the error")
-			}
-			if !strings.Contains(derr.Error(), c.want) {
-				t.Errorf("error = %v;\nwant it to contain %q. The length guard is what produces "+
-					"that diagnosis from the header alone; without it this stream is %s.",
-					derr, c.want, c.panics)
-			}
-			if errors.Is(derr, ErrUnsupportedJBIG2Feature) {
-				t.Errorf("error = %v; a truncated header is DAMAGE, not a coding feature byblos "+
-					"has not implemented. Reporting it under ErrUnsupportedJBIG2Feature tells an "+
-					"archive the page is recoverable by a future decoder, and it is not -- the "+
-					"bytes are not there.", derr)
-			}
-		})
-	}
-}
-
-// TestDecodeJBIG2PlacementGuardsTheDictionaryHeight pins the HEIGHT half of
-// decodeJBIG2Placement's size comparison, which no test in the tree could
-// detect the deletion of.
-//
-// The existing table around TestDecodeJBIG2PlacementGuardsTheDictionary pins the
-// width half and only the width half. Its three size cases -- transposed 73x101,
-// wrong-width 102x73, and the zero dictionary -- all disagree with the page on
-// WIDTH as well, so each is still refused by "w != info.Width" alone. Delete
-// "|| h != info.Height" and the whole file still passes.
-//
-// The case that separates them is a dictionary that agrees on width and lies
-// about height, and it is worth having as its own test because it is precisely
-// the /Width-/Height confusion the function's doc comment says the comparison
-// exists to catch. Reproduced against the mutant: a 100x50 JBIG2 page under a
-// dictionary declaring /Width 100 /Height 100 is ACCEPTED, and the caller is
-// handed back a 100x50 raster for an image the PDF says is 100 rows tall --
-// half a page of content placed as though it were a whole one, with no error
-// anywhere. That is the silent-accept failure mode this package treats as worse
-// than a refusal: the geometry the caller gets does not describe the pixels.
-//
-// The stream is built by hand rather than encoded, so the page really is 100x50
-// and the assertion does not depend on what the encoder happens to emit.
-func TestDecodeJBIG2PlacementGuardsTheDictionaryHeight(t *testing.T) {
-	const pageW, pageH = 100, 50
-	data := hostileJBIG2Stream(pageW, pageH, pageW, pageH)
-
-	// Agrees on width, and is square where the page is not. 10,000 pixels is
-	// far inside jbig2.MaxPagePixels, so the size gate in front cannot be what
-	// refuses this and the comparison under test is the only thing left.
-	info := func(int) (pdfdoc.ImageInfo, bool) {
-		return pdfdoc.ImageInfo{Width: pageW, Height: 2 * pageH}, true
-	}
-
-	got, err := decodeJBIG2Placement(data, nil, info, 7)
-	if err == nil {
-		t.Fatalf("a %dx%d JBIG2 page under a dictionary declaring %dx%d was accepted and "+
-			"returned a %v raster. The dictionary is what the PDF says the image is; a page "+
-			"of a different height means this stream is not the one the dictionary describes, "+
-			"and the placement geometry the caller gets back does not describe these pixels.",
-			pageW, pageH, pageW, 2*pageH, got.Bounds())
-	}
-	t.Logf("refused: %v", err)
-	for _, want := range []string{
-		fmt.Sprintf("%dx%d", pageW, pageH),   // what the stream actually is
-		fmt.Sprintf("%dx%d", pageW, 2*pageH), // what the dictionary claimed
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %v; want it to name %q. A caller reading this has to be able to "+
-				"tell which of the two sizes came from the PDF and which came from the "+
-				"stream, or they cannot tell a mis-parsed stream from a wrong dictionary.",
-				err, want)
-		}
-	}
-}
-
 // hostileJBIG2StreamManyRegions builds the same hand-made stream as
 // hostileJBIG2Stream but with n one-pixel region segments instead of one, so a
 // test can name a SEGMENT COUNT as well as a page size.
 //
 // It is the other axis of the same attack. hostileJBIG2Stream makes the cost
 // come out of one region's declared size; this makes it come out of the number
-// of segment headers, which is what internal/jbig2's rule 5 bounds and what
+// of segment headers, which is what jbig2-go's header budgets bounds and what
 // nothing on the PDF path has ever been measured against.
 func hostileJBIG2StreamManyRegions(pageW, pageH, n int) []byte {
 	seg := func(num uint32, typ byte, data []byte) []byte {
@@ -1054,105 +572,347 @@ func hostileJBIG2StreamManyRegions(pageW, pageH, n int) []byte {
 	return out
 }
 
-// TestExtractPageRasterCeilingBoundsEveryStreamTheGatesAdmit bounds ALLOCATION
-// on this path over the whole set of streams the gates admit, not over one
-// stream shape, which is the difference between a ceiling and an anecdote.
-//
-// TestExtractPageRasterBoundsTheCostOfAHostileJBIG2Page above measures a single
-// shape -- an 8191x8191 page under a 1x1 region, 67 bytes -- and until round 7
-// called it "the most ALLOCATING one every gate admits". It is not. A 67-byte
-// stream cannot carry segment HEADERS, and rule 5 admits 65,536 of them. The
-// segment count is a second axis and that test does not vary it at all:
-//
-//	at-cap segments   1024x65536 page, 65,535 one-pixel regions, 2,424,825 bytes
-//	                  -> 113.7 MiB, 130 ms, a 1024x65536 raster
-//	square page       8191x8191 page, one 1x1 region, 67 bytes
-//	                  -> 72.3 MiB, 52 ms
-//	square page       8191x8191 page, a page-covering region, 67 bytes
-//	                  -> 80.3 MiB, 1.77 s
-//
-// THE RESOLUTION TAKEN IS TO RAISE THE LITERAL AND NAME THE NEW WORST SHAPE,
-// not to tighten a budget, and the reason is that nothing here is out of
-// proportion. Every one of these returns ONE maximal page. Above the 72.3 MiB
-// that page costs, the at-cap stream's extra 41.4 MiB is bought with 2.4 MB of
-// input and is bounded by rule 5 in both of its parts: the same 2,425,816-byte
-// document with ONE more segment, refused from the headers with nothing decoded,
-// already costs 18.0 MiB just to read the PDF and parse the descriptors, and the
-// rest is the region bitmaps and per-segment overhead the 16 MiB bitmap budget
-// concedes. Tightening maxStreamSegments is the only lever that would move it,
-// and that constant is derived from one region per row of the tallest page rule
-// 1 admits (see internal/jbig2's rule 5); lowering it to fit a test literal
-// would start refusing legitimately striped pages, which is the byb-riy bug.
-//
-// So 140 MiB, measured at 1.23x the worst of the three, the same headroom the
-// 88 MiB figure carries over its own shape. The two literals are separate on
-// purpose. 88 stays where it is and stays TIGHT on the page-size axis, so a
-// regression that stops this path being O(page) still fails there first, from a
-// 67-byte stream; this one is the outer bound and it is the one that has to be
-// true of every stream, whatever its size.
-func TestExtractPageRasterCeilingBoundsEveryStreamTheGatesAdmit(t *testing.T) {
-	// A literal, not an expression over jbig2.MaxPagePixels or
-	// maxStreamSegments: a ceiling written in terms of the constants it exists
-	// to bound moves with the mutation it exists to catch.
-	const ceiling = 140 << 20
+// jbig2ReplacedDoc is the "scan" fixture with its image replaced by a JBIG2
+// stream of jbig2TestBitmap, so ExtractPageRaster reaches the JBIG2 arm.
+func jbig2ReplacedDoc(t *testing.T) []byte {
+	t.Helper()
+	ref := inspect(t, "scan")[0].Images[0]
+	src := jbig2TestBitmap()
+	img, err := encodeJBIG2Image(src)
+	if err != nil {
+		t.Fatalf("encodeJBIG2Image: %v", err)
+	}
+	var out bytes.Buffer
+	if err := ReplaceImages(&out, bytes.NewReader(corpusDoc(t, "scan")), map[int]EncodedImage{ref.ObjNr: img}); err != nil {
+		t.Fatalf("ReplaceImages: %v", err)
+	}
+	return out.Bytes()
+}
 
-	side := int(math.Sqrt(float64(jbig2.MaxPagePixels - 1)))
+// jbig2Info is a dictionary for an image of the given size.
+func jbig2Info(w, h int) func(int) (pdfdoc.ImageInfo, bool) {
+	return func(int) (pdfdoc.ImageInfo, bool) { return grayInfo(w, h), true }
+}
+
+// TestJBIG2RequestOverTheWholeBudgetIsPermanent: a decode whose reservation is
+// larger than byblos's whole budget can never fit, so retrying it forever is
+// wrong. It must be a *LimitError (permanent), not ErrMemoryLimit and not a
+// refusal or divert. byblos.SetMemoryLimit is the only pool: jbig2-go's own is
+// never consulted (jbig2.SetMemoryLimit(1) must change nothing).
+func TestJBIG2RequestOverTheWholeBudgetIsPermanent(t *testing.T) {
+	doc := jbig2ReplacedDoc(t)
+	src := jbig2TestBitmap()
+	jbig2.SetMemoryLimit(1)
+	t.Cleanup(func() { jbig2.SetMemoryLimit(0) })
+	defer SetMemoryLimit(SetMemoryLimit(32 << 20)) // above a small PDF's parse, below jbig2DecodeBound
+
+	ResetExtractStats()
+	_, err := ExtractPageRaster(bytes.NewReader(doc), 1)
+	var le *LimitError
+	if !errors.As(err, &le) {
+		t.Fatalf("err = %v; want a *LimitError", err)
+	}
+	if le.Got < jbig2DecodeBound(0) {
+		t.Errorf("LimitError %+v is not the JBIG2 reservation (want Got >= %d); the budget tripped earlier", le, jbig2DecodeBound(0))
+	}
+	if errors.Is(err, ErrMemoryLimit) {
+		t.Errorf("err = %v; a request that can never fit must not be transient", err)
+	}
+	var rr *RasterRefusal
+	if errors.As(err, &rr) {
+		t.Errorf("a budget overflow became a refusal %q", rr.Reason)
+	}
+	if got := ExtractStats(); got.Diverted != 0 {
+		t.Errorf("a budget overflow was counted as a divert: %+v", got)
+	}
+
+	// The same through the placement, with a budget below even the raster.
+	SetMemoryLimit(1 << 10)
+	data, _ := encodeJBIG2Generic(src)
+	_, err = decodeJBIG2Placement(context.Background(), data, nil, jbig2Info(src.Width, src.Height), 7)
+	if !errors.As(err, &le) || errors.Is(err, ErrMemoryLimit) {
+		t.Errorf("tiny budget: err = %v; want a permanent *LimitError", err)
+	}
+}
+
+// TestJBIG2DecodeUsesOnlyByblosBudget: byblos reserves the decode from its own
+// pool and passes Reserved to jbig2-go, so jbig2-go's process-wide pool is never
+// consulted. With that pool at 1 byte, a page that fits byblos's budget still
+// decodes; without Reserved it would fail on jbig2-go's pool.
+func TestJBIG2DecodeUsesOnlyByblosBudget(t *testing.T) {
+	doc := jbig2ReplacedDoc(t)
+	jbig2.SetMemoryLimit(1)
+	t.Cleanup(func() { jbig2.SetMemoryLimit(0) })
+	if _, err := ExtractPageRaster(bytes.NewReader(doc), 1); err != nil {
+		t.Fatalf("err = %v; jbig2-go's own pool was consulted", err)
+	}
+}
+
+// TestJBIG2BudgetHeldElsewhereIsTransient: a decode that fits the budget alone
+// but not while another operation holds it waits for it, as a DCT decode does
+// (TestDCTDecodeSharesByblosBudget), and through the public API ends with
+// ErrMemoryLimit, counted as Failed, when ctx does.
+func TestJBIG2BudgetHeldElsewhereIsTransient(t *testing.T) {
+	doc := jbig2ReplacedDoc(t)
+	src := jbig2TestBitmap()
+	px := int64(src.Width * src.Height)
+	defer SetMemoryLimit(SetMemoryLimit(px + jbig2DecodeBound(0) + 1<<20))
+	release, err := limits.Reserve(context.Background(), 2<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ResetExtractStats()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err = ExtractPageRasterContext(ctx, bytes.NewReader(doc), 1)
+	var le *LimitError
+	if !errors.Is(err, ErrMemoryLimit) || errors.As(err, &le) {
+		t.Fatalf("err = %v; want transient ErrMemoryLimit, not a *LimitError", err)
+	}
+	if got := ExtractStats(); got.Failed != 1 || got.Diverted != 0 {
+		t.Errorf("stats = %+v; want one Failed and no divert", got)
+	}
+	release()
+	if _, err := ExtractPageRaster(bytes.NewReader(doc), 1); err != nil {
+		t.Fatalf("after the release: %v", err)
+	}
+}
+
+// jbig2StripedStream is a legal striped page by hand: page height 0xFFFFFFFF
+// with the striping bit set, one generic region of w x h with no coded data (the
+// MQ decoder reads 1 bits past its end, so the region decodes at its declared
+// size), and an end-of-stripe segment at row h-1, which is what fixes the page
+// height (T.88 7.4.8.2).
+func jbig2StripedStream(w, h int) []byte {
+	seg := func(num uint32, typ byte, data []byte) []byte {
+		hd := binary.BigEndian.AppendUint32(nil, num)
+		hd = append(hd, typ, 0x00, 0x01)
+		hd = binary.BigEndian.AppendUint32(hd, uint32(len(data)))
+		return append(hd, data...)
+	}
+	pi := binary.BigEndian.AppendUint32(nil, uint32(w))
+	pi = binary.BigEndian.AppendUint32(pi, 0xFFFFFFFF)
+	pi = binary.BigEndian.AppendUint32(pi, 0)
+	pi = binary.BigEndian.AppendUint32(pi, 0)
+	pi = append(pi, 0x01, 0x80, 0x10) // striped, maximum stripe size 16
+	r := binary.BigEndian.AppendUint32(nil, uint32(w))
+	r = binary.BigEndian.AppendUint32(r, uint32(h))
+	r = binary.BigEndian.AppendUint32(r, 0)
+	r = binary.BigEndian.AppendUint32(r, 0)
+	r = append(r, 0x00, 0x00)
+	r = append(r, 0x03, 0xFF, 0xFD, 0xFF, 0x02, 0xFE, 0xFE, 0xFE)
+	eos := binary.BigEndian.AppendUint32(nil, uint32(h-1))
+	return append(append(seg(0, 48, pi), seg(1, 38, r)...), seg(2, 50, eos)...)
+}
+
+// TestDecodeJBIG2PlacementDecodesAStripedPage: a legal striped stream has no
+// size in its headers (jbig2.PageSize returns ErrNoPageSize), and byblos must
+// neither refuse nor divert it for that. It decodes and the decoded size is
+// checked against the dictionary afterwards, as main did, through the public
+// ExtractPageRaster as well as the placement.
+func TestDecodeJBIG2PlacementDecodesAStripedPage(t *testing.T) {
+	const w, h = 24, 10
+	stream := jbig2StripedStream(w, h)
+	if _, _, err := jbig2.PageSize(stream, nil); !errors.Is(err, jbig2.ErrNoPageSize) {
+		t.Fatalf("PageSize err = %v; the fixture must be a stream PageSize cannot size", err)
+	}
+	img, err := decodeJBIG2Placement(context.Background(), stream, nil, jbig2Info(w, h), 7)
+	if err != nil {
+		t.Fatalf("a legal striped page was refused: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != w || b.Dy() != h {
+		t.Fatalf("raster is %v; want %dx%d", b, w, h)
+	}
+	// The decoded size is still checked against the dictionary.
+	_, err = decodeJBIG2Placement(context.Background(), stream, nil, jbig2Info(w, h+1), 7)
+	if err == nil || !strings.Contains(err.Error(), "page is 24x10 but image 7's dictionary says 24x11") {
+		t.Fatalf("err = %v; want the post-decode size mismatch", err)
+	}
+
+	in := corpusDoc(t, "scan")
+	ref := inspect(t, "scan")[0].Images[0]
+	var out bytes.Buffer
+	if err := ReplaceImages(&out, bytes.NewReader(in), map[int]EncodedImage{
+		ref.ObjNr: {Width: w, Height: h, BPC: 1, ColorSpace: ColorSpace{Name: "DeviceGray"},
+			Filter: "JBIG2Decode", Data: stream},
+	}); err != nil {
+		t.Fatalf("ReplaceImages: %v", err)
+	}
+	ResetExtractStats()
+	pr, err := ExtractPageRaster(bytes.NewReader(out.Bytes()), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRaster on a striped page: %v", err)
+	}
+	if b := pr.Image.Bounds(); b.Dx() != w || b.Dy() != h {
+		t.Errorf("extracted raster is %v; want %dx%d", b, w, h)
+	}
+	if got := ExtractStats(); got.Diverted != 0 || got.Failed != 0 {
+		t.Errorf("a striped page moved the failure counters: %+v", got)
+	}
+}
+
+// cancelInJBIG2 is cancelled by the first ctx.Err() call made from inside
+// jbig2-go, and stays cancelled, so the cancel lands during jbig2.Decode and
+// nowhere earlier.
+type cancelInJBIG2 struct {
+	context.Context
+	hit bool
+}
+
+func (c *cancelInJBIG2) Err() error {
+	if c.hit {
+		return context.Canceled
+	}
+	pcs := make([]uintptr, 16)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.Contains(f.Function, "dobbo-ca/jbig2-go") {
+			c.hit = true
+			return context.Canceled
+		}
+		if !more {
+			return nil
+		}
+	}
+}
+
+// TestJBIG2CancelMidDecodeIsNotADivert: a cancellation that lands inside
+// jbig2.Decode is the caller's, so it comes back as the context error and does
+// not move the counters (TestCancelledExtractionDoesNotMoveTheCounters).
+func TestJBIG2CancelMidDecodeIsNotADivert(t *testing.T) {
+	doc := jbig2ReplacedDoc(t)
+	ResetExtractStats()
+	cc := &cancelInJBIG2{Context: context.Background()}
+	_, err := ExtractPageRasterContext(cc, bytes.NewReader(doc), 1)
+	if !cc.hit {
+		t.Fatal("jbig2-go never checked the context; the test proved nothing")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v; want context.Canceled", err)
+	}
+	if got := ExtractStats(); got.Diverted != 0 || got.Failed != 0 || len(got.Reasons) != 0 {
+		t.Fatalf("a cancel inside the decode moved the counters: %+v", got)
+	}
+}
+
+// TestDecodeJBIG2PlacementAdmitsAFullResolutionPage pins maxJBIG2Pixels from
+// below: a 600-dpi A4 or Letter master must get past byblos's size gate. The
+// stream is unparseable on purpose, so the only claim is that the refusal, if
+// any, is not the gate.
+func TestDecodeJBIG2PlacementAdmitsAFullResolutionPage(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		w, h int
-		data []byte
 	}{
-		// 1024 is the narrowest width the cap's own derivation contemplates, and
-		// MaxPagePixels over it is 65,536 rows -- so this page is exactly the
-		// budget, and one region per row is exactly the cap.
-		{"at-cap-segment-count", 1024, 65536, hostileJBIG2StreamManyRegions(1024, 65536, 65535)},
-		{"widest-page-tiny-region", side, side, hostileJBIG2Stream(side, side, 1, 1)},
-		{"widest-page-full-region", side, side, hostileJBIG2Stream(side, side, side, side)},
+		{"600dpi-A4", 4961, 7016},
+		{"600dpi-Letter", 5100, 6600},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			in := corpusDoc(t, "scan")
-			ref := inspect(t, "scan")[0].Images[0]
-			var out bytes.Buffer
-			if err := ReplaceImages(&out, bytes.NewReader(in), map[int]EncodedImage{
-				ref.ObjNr: {
-					Width: c.w, Height: c.h, BPC: 1,
-					ColorSpace: ColorSpace{Name: "DeviceGray"},
-					Filter:     "JBIG2Decode",
-					Data:       c.data,
-				},
-			}); err != nil {
-				t.Fatalf("ReplaceImages: %v", err)
+			info := func(int) (pdfdoc.ImageInfo, bool) {
+				return pdfdoc.ImageInfo{Width: c.w, Height: c.h}, true
 			}
-			doc := out.Bytes()
-
-			var before, after runtime.MemStats
-			runtime.GC()
-			runtime.ReadMemStats(&before)
-			start := time.Now()
-			pr, err := ExtractPageRaster(bytes.NewReader(doc), 1)
-			elapsed := time.Since(start)
-			runtime.ReadMemStats(&after)
-			grew := after.TotalAlloc - before.TotalAlloc
-			t.Logf("%d bytes of JBIG2 in a %d-byte PDF, page %dx%d: err = %v, elapsed = %v, "+
-				"TotalAlloc grew by %.1f MiB", len(c.data), len(doc), c.w, c.h, err, elapsed,
-				float64(grew)/(1<<20))
-
-			if err != nil {
-				t.Fatalf("this stream is ADMITTED by every gate on the path, so it has to "+
-					"decode or the shape being bounded is not the shape being measured: %v", err)
+			_, err := decodeJBIG2Placement(context.Background(), []byte("garbage"), nil, info, 7)
+			if err == nil {
+				t.Fatal("an unparseable stream must still be an error")
 			}
-			if b := pr.Image.Bounds(); b.Dx() != c.w || b.Dy() != c.h {
-				t.Fatalf("raster is %dx%d; want %dx%d", b.Dx(), b.Dy(), c.w, c.h)
-			}
-			if grew > ceiling {
-				t.Errorf("an admitted JBIG2 page allocated %.1f MiB from %d bytes of stream; "+
-					"the ceiling this path commits to over EVERY admitted stream is %d MiB. "+
-					"Check which axis moved before raising it again: this bound was already "+
-					"raised once, from 88 MiB, because it had only ever been measured by "+
-					"varying the page size and the SEGMENT COUNT is a second axis. A third "+
-					"one is a rule that stopped charging what it charges.",
-					float64(grew)/(1<<20), len(c.data), ceiling>>20)
+			if strings.Contains(err.Error(), "dictionary declares") {
+				t.Fatalf("a %dx%d page is a 600-dpi master and must reach the decoder: %v", c.w, c.h, err)
 			}
 		})
+	}
+}
+
+// TestDecodeJBIG2PlacementComparesSizesBeforeDecoding pins that a page whose
+// size disagrees with the dictionary is refused from its page-information
+// segment. The stream is cut right after that segment, so a decode would fail
+// with a different error; the size-mismatch error proves nothing was decoded.
+func TestDecodeJBIG2PlacementComparesSizesBeforeDecoding(t *testing.T) {
+	stream, err := jbig2.Encode(context.Background(), jbig2.NewBitmap(8000, 8000), jbig2.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, h, err := jbig2.PageSize(stream, nil)
+	if err != nil || w != 8000 || h != 8000 {
+		t.Fatalf("jbig2.PageSize = %d, %d, %v; want 8000, 8000, nil", w, h, err)
+	}
+	// Page-information segment: 11-byte header (no referred-to segments, 1-byte
+	// page association) plus its 19-byte body.
+	head := stream[:30]
+	info := func(int) (pdfdoc.ImageInfo, bool) {
+		return pdfdoc.ImageInfo{Width: 10, Height: 10, BPC: 1, ColorSpace: "DeviceGray"}, true
+	}
+	_, err = decodeJBIG2Placement(context.Background(), head, nil, info, 7)
+	if err == nil || !strings.Contains(err.Error(), "page is 8000x8000 but image 7's dictionary says 10x10") {
+		t.Fatalf("err = %v; want the size mismatch, raised before decoding", err)
+	}
+}
+
+// wastedWorkStreamHex is 67 bytes of legal JBIG2 whose cost would be thrown
+// away: a 1x1 page and one generic region of 8192x4095 (33,546,240 pixels, no
+// coded data) at (0,0), 4,193,281 packed bytes together, inside the byte cap. A
+// decoder that charged only the region's pixels would run the MQ decoder over
+// 33.5 million of them to hand back one. jbig2-go refuses it from the headers.
+const wastedWorkStreamHex = "000000003000010000001300000001000000010000000000000000010000000000012600010000001a0000200000000fff0000000000000000000003fffdff02fefefe"
+
+// wastedWorkDoc is a document whose pages (a fixture's own image objects) are
+// replaced by the 67-byte stream under a 1x1 dictionary, so the dictionary
+// agrees with the page and only the region's cost is in question.
+func wastedWorkDoc(t *testing.T, fixture string) []byte {
+	t.Helper()
+	data, err := hex.DecodeString(wastedWorkStreamHex)
+	if err != nil || len(data) != 67 {
+		t.Fatalf("fixture hex: %d bytes, %v", len(data), err)
+	}
+	repl := map[int]EncodedImage{}
+	for _, p := range inspect(t, fixture) {
+		repl[p.Images[0].ObjNr] = EncodedImage{Width: 1, Height: 1, BPC: 1,
+			ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "JBIG2Decode", Data: data}
+	}
+	var out bytes.Buffer
+	if err := ReplaceImages(&out, bytes.NewReader(corpusDoc(t, fixture)), repl); err != nil {
+		t.Fatalf("ReplaceImages: %v", err)
+	}
+	return out.Bytes()
+}
+
+// TestExtractPageRasterBoundsDecodingByWhatItCanReturn drives the stream
+// through ExtractPageRaster: jbig2-go refuses it from its headers, so the page
+// is diverted at once (the wall-clock guard is far above any header parse).
+func TestExtractPageRasterBoundsDecodingByWhatItCanReturn(t *testing.T) {
+	doc := wastedWorkDoc(t, "scan")
+	start := time.Now()
+	pr, err := ExtractPageRaster(bytes.NewReader(doc), 1)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("took %v on a 67-byte stream", elapsed)
+	}
+	if err == nil {
+		if b := pr.Image.Bounds(); b.Dx() != 1 || b.Dy() != 1 {
+			t.Fatalf("returned a %v raster for a 1x1 page", b)
+		}
+		return
+	}
+	var rr *RasterRefusal
+	if !errors.As(err, &rr) || rr.Reason != "unsupported-codec-jbig2" {
+		t.Fatalf("err = %v; want the stream refused as unsupported-codec-jbig2", err)
+	}
+}
+
+// TestRecordExtractionBoundsDecodingByWhatItCanReturn is the same over every
+// page of a document (RecordExtraction pays once per page).
+func TestRecordExtractionBoundsDecodingByWhatItCanReturn(t *testing.T) {
+	doc := wastedWorkDoc(t, "dup-raster")
+	start := time.Now()
+	prov, err := RecordExtraction(bytes.NewReader(doc))
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("took %v over 2 pages of a 67-byte stream", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("RecordExtraction: %v", err)
+	}
+	for _, pg := range prov.Pages {
+		if pg.Diverted != "" && pg.Diverted != "unsupported-codec-jbig2" {
+			t.Errorf("a page diverted as %q; want it refused as unsupported-codec-jbig2 or extracted", pg.Diverted)
+		}
 	}
 }

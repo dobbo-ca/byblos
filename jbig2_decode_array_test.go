@@ -6,7 +6,7 @@ package byblos
 // WHY THIS IS NOT COVERED BY WHAT WAS ALREADY HERE. Three tests touch the same
 // seam and none of them can catch an inversion introduced on this path:
 //
-//   - internal/jbig2's TestPDFDecodeArrayWouldInvert asks pdfimages what the
+//   - jbig2-go's pdfimages tests ask what the
 //     FILTER does. It proves /Decode [1 0] inverts the samples, which is the
 //     fact grayLevels is built on, and says nothing about whether byblos
 //     applies it.
@@ -26,7 +26,7 @@ package byblos
 // 160-point page puts 40 device pixels on a side of every cell, and the middle
 // half of each cell is then flat colour that either agrees or does not.
 //
-// It skips when pdftoppm is absent, as internal/jbig2's pdfimages tests do.
+// It skips when pdftoppm is absent, as the other poppler-backed tests do.
 
 import (
 	"bytes"
@@ -147,9 +147,9 @@ func TestExtractedJBIG2RasterCarriesThePopplerGreysForADecodeArray(t *testing.T)
 		t.Skipf("pdftoppm not installed (brew install poppler): %v", err)
 	}
 	src := decodeArrayCells()
-	data, err := EncodeJBIG2Generic(src.Clone())
+	data, err := encodeJBIG2Generic(src.Clone())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 
 	for _, decode := range []string{"", " /Decode [0 1]", " /Decode [1 0]", " /Decode [0.5 1]"} {

@@ -2,7 +2,7 @@ package byblos
 
 // ReplaceImages is the write seam byb-fp6 asks for: the route by which bytes
 // one of Byblos' encoders produced get back into an EXISTING PDF. Without it
-// Downsample, QuantizeIndexed and EncodeJBIG2Generic have nowhere to put what
+// Downsample, QuantizeIndexed and a JBIG2 encoder have nowhere to put what
 // they produce -- internal/pdfdoc has done the substitution since byb-0he, but
 // on an unexported receiver, so nothing outside the module could reach it.
 //

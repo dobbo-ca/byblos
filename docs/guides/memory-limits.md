@@ -196,17 +196,43 @@ into an error. They are configurable and nothing else.
 
 | Bound | Value | Where |
 |---|---|---|
-| JBIG2 page pixels | 1<<26 | `internal/jbig2/segment_decode.go:397`, checked at `:1173` (page width at `:1057`) |
-| JBIG2 retained bitmap bytes | 16 MiB | `internal/jbig2/segment_decode.go:398` |
-| JBIG2 segments per stream | 1<<16 | `internal/jbig2/segment_decode.go:401` |
-| JBIG2 references per stream | 1<<18 | `internal/jbig2/segment_decode.go:402` |
-| JBIG2 region overdraw | 4x | `internal/jbig2/segment_decode.go:399` |
-| JBIG2 dictionary check in `DecodeJBIG2Generic` | 1<<26 px | `jbig2.go:287` |
+| JBIG2 page pixels | 1<<26 | `jbig2.go` (`maxJBIG2Pixels`): the image dictionary's declared size is checked against it before any decode |
 
-The JBIG2 limits are a decoder budget, with the rules and their reasoning
-written at `internal/jbig2/segment_decode.go:72-320`. They bound what a
-stream can cost whatever the stream says; they are the only part of byblos
-that already meets the "refuse before allocating" rule end to end.
+JBIG2 is decoded by `github.com/dobbo-ca/jbig2-go` (v0.2.0), and byblos's budget
+is the only pool the decode draws on, as for DCT. Before anything is reserved
+or decoded, `jbig2.PageSize` reads the page size from the headers and a page
+that disagrees with the image dictionary is refused with no pixel decoded. Then
+`decodeJBIG2Placement` reserves, from `SetMemoryLimit`'s budget, the
+one-byte-per-pixel raster plus the most jbig2-go can estimate for a decode under
+these caps (`jbig2DecodeBound`: the 16 MiB packed-bitmap cap, 96 bytes a declared
+symbol up to 1<<16, 256 a segment up to 1<<16, the stream and 256 KiB of context
+arrays; about 38 MiB), and calls `jbig2.Decode` with `Reserved: true` and
+`MaxBytes` set to the decode's part of it, so jbig2-go's own process-wide pool
+(`jbig2.SetMemoryLimit`) is skipped. Caps handed to it are the old decoder's:
+`maxJBIG2Pixels` for pages, regions and symbols together (including a globals
+dictionary), 1<<16 symbols and 1<<16 segments, so what is refused as
+`unsupported-codec-jbig2` is unchanged.
+
+A reservation larger than the whole budget, and a `*jbig2.LimitError` named
+`MaxBytes` or `MemoryLimit`, are a `*LimitError` (permanent). A budget held by
+others waits until ctx ends and is `ErrMemoryLimit` (transient), the same as a
+DCT decode. A cancelled ctx comes back as the context's error and moves no
+counter.
+
+A striped page (height 0xFFFFFFFF, sized from its regions) has no size in its
+headers, so `jbig2.PageSize` returns `ErrNoPageSize` for it, as it does for a
+stream with no page-information segment or malformed headers. byblos does not
+refuse any of them for that: the reservation above does not depend on the
+page's size, `jbig2.Decode` refuses what is malformed or unsupported, and the
+decoded size is compared with the dictionary afterwards.
+
+KNOWN DEVIATION FROM THE DECODER THIS REPLACED: that decoder sized a striped page
+from its regions' headers and refused a dictionary mismatch with no pixel
+decoded. jbig2-go does not expose a plan-based size, so a striped page that
+disagrees with its dictionary is decoded (up to `maxJBIG2Pixels`) and only then
+refused. Capping the decode at the dictionary's size instead would starve a
+document whose globals dictionary is large, so it is not done; closing this
+needs a jbig2-go API for the plan-based size.
 
 `ctx` entry points exist today for the nine document-scale primitives,
 `BuildFromPagesContext`, `RenderPageContext` and the `...Limits` forms above: `InspectContext` (`inspect.go:213`),
@@ -217,7 +243,7 @@ that already meets the "refuse before allocating" rule end to end.
 `RecordExtractionContext` (`provenance.go:450`, `RecordExtractionLimits` for caps), `WriteProvenanceContext`
 (`provenance.go:366`), `ReadProvenanceContext` (`provenance.go:531`) and
 `RenderPageContext` (`render.go:50`). `Sauvola`, `QuantizePNG`,
-`QuantizeIndexed`, `EncodeJBIG2Generic`, `DecodeJBIG2Generic` and `EmbedPNG` take no `ctx`; the
+`QuantizeIndexed` and `EmbedPNG` take no `ctx`; the
 design reviewed these as image-scale calls bounded by one in-memory image the
 caller chose to pass (`context.go:27-35`), and that decision is revisited
 against owner decision D2 (ctx on every band-level and larger entry point)

@@ -18,8 +18,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/dobbo-ca/byblos/internal/jbig2"
 )
 
 // futureMDPath is where the deferred capabilities are written up in prose.
@@ -222,24 +220,12 @@ func TestEveryNotImplementedSiteNamesTheRegister(t *testing.T) {
 	}{
 		{"jpx", codecPDF("JPXDecode", "DeviceRGB", 8, 101, 73, codecFiller(64)), "decode-jpx"},
 
-		// BOTH JBIG2 CASES ARE HERE BECAUSE decodeJBIG2Placement HAS TWO PLACES
-		// TO LOSE THE SENTINEL, and one of them does not look like a decode at
-		// all. jbig2.PageSizeWithGlobals reads the page size, but it runs the
-		// same header walk the decoder does, so some coding modes are refused
-		// from the headers and never reach the decode call at all.
-		//
-		// MUTATION TESTING IS WHY THERE ARE TWO, AND IT TOOK TWO ROUNDS. With
-		// only a halftone fixture, deleting markUnsupportedJBIG2 from the
-		// PageSizeWithGlobals call left this test green. Adding a second
-		// halftone-shaped fixture did not help: BOTH were refused walking the
-		// headers, so the decode-time wrap was still never exercised and
-		// deleting IT also left the test green. Only a refusal that comes out of
-		// the region DATA -- GBTEMPLATE 1 -- reaches the second call.
-		//
-		// Neither arm is hypothetical. After byb-9v0, 33 of the 37 refusals in
-		// the pinned sample are a refinement text region, caught walking the
-		// headers; the rest of what byblos declines (MMR, the other templates,
-		// non-nominal AT pixels) is decided from the data.
+		// Two JBIG2 fixtures: a refusal jbig2-go raises from the segment
+		// headers, and one it raises from the region data. Both now arrive
+		// through the single jbig2.Decode call in decodeJBIG2Placement, so
+		// they no longer reach different sites there; they are kept because
+		// each is a distinct way for a well-formed stream to be declined, and
+		// both must carry the sentinel.
 		{"jbig2-refused-walking-the-headers", codecPDF("JBIG2Decode", "DeviceGray", 1, 101, 73,
 			refusedJBIG2Stream(t, refusedWalkingHeaders)), "decode-jbig2"},
 		{"jbig2-refused-decoding", codecPDF("JBIG2Decode", "DeviceGray", 1, 101, 73,
@@ -286,11 +272,10 @@ func TestEveryNotImplementedSiteNamesTheRegister(t *testing.T) {
 	}
 }
 
-// The two points inside decodeJBIG2Placement where an internal/jbig2 refusal
-// can arrive, and therefore the two places the sentinel can be dropped.
+// The two stages inside jbig2.Decode at which a refusal can arise.
 const (
-	refusedWalkingHeaders = "walking the headers" // jbig2.PageSizeWithGlobals
-	refusedDecoding       = "decoding"            // jbig2.DecodeEmbeddedStreamWithGlobals
+	refusedWalkingHeaders = "walking the headers"
+	refusedDecoding       = "decoding"
 )
 
 // refusedJBIG2Stream is a WELL-FORMED JBIG2 stream byblos declines for its
@@ -319,9 +304,9 @@ const (
 // fixture whose stage silently moves fails here rather than in six months.
 func refusedJBIG2Stream(t *testing.T, stage string) []byte {
 	t.Helper()
-	s, err := EncodeJBIG2Generic(jbig2TestBitmap())
+	s, err := encodeJBIG2Generic(jbig2TestBitmap())
 	if err != nil {
-		t.Fatalf("EncodeJBIG2Generic: %v", err)
+		t.Fatalf("encodeJBIG2Generic: %v", err)
 	}
 	switch stage {
 	case refusedWalkingHeaders:
@@ -342,17 +327,9 @@ func refusedJBIG2Stream(t *testing.T, stage string) []byte {
 		t.Fatalf("unknown stage %q", stage)
 	}
 
-	if _, err := DecodeJBIG2Generic(s); !errors.Is(err, ErrUnsupportedJBIG2Feature) {
+	if _, err := decodeJBIG2Generic(s); !errors.Is(err, errUnsupportedJBIG2) {
 		t.Fatalf("the %s fixture decodes as %v; it has to be a stream byblos refuses for its "+
 			"CODING MODE, or this test proves nothing about the arm it exercises", stage, err)
-	}
-	_, _, perr := jbig2.PageSizeWithGlobals(nil, s)
-	refusedEarly := perr != nil
-	if want := stage == refusedWalkingHeaders; refusedEarly != want {
-		t.Fatalf("the %s fixture is refused by the header walk = %v (%v); want %v. The two "+
-			"fixtures exist to reach DIFFERENT calls inside decodeJBIG2Placement, and one that "+
-			"drifts to the other stage leaves a wrap untested while the test still passes",
-			stage, refusedEarly, perr, want)
 	}
 	return s
 }
@@ -418,7 +395,7 @@ func codecPDF(filter, colorSpace string, bpc, w, h int, payload []byte) []byte {
 // every assertion above.
 func TestDamagedJBIG2DoesNotClaimAMissingCapability(t *testing.T) {
 	// corpus.jbig2Payload is 64 bytes of filler, not a JBIG2 stream at all, so
-	// internal/jbig2 refuses it from the headers WITHOUT ErrUnsupportedFeature.
+	// jbig2-go refuses it from the headers WITHOUT ErrUnsupportedFeature.
 	data := corpusDoc(t, "jbig2")
 	_, err := ExtractPageRaster(bytes.NewReader(data), 1)
 	if err == nil {
@@ -427,7 +404,7 @@ func TestDamagedJBIG2DoesNotClaimAMissingCapability(t *testing.T) {
 	if !errors.Is(err, ErrUnsupportedImageCodec) {
 		t.Fatalf("error = %v; want ErrUnsupportedImageCodec", err)
 	}
-	if errors.Is(err, ErrUnsupportedJBIG2Feature) {
+	if errors.Is(err, errUnsupportedJBIG2) {
 		t.Errorf("error = %v; 64 bytes of filler is damage, not a coding mode byblos has yet "+
 			"to implement", err)
 	}

@@ -620,35 +620,13 @@ func (b *Bitmap) Bounds() image.Rectangle
 func (b *Bitmap) Clone() *Bitmap
 func (b *Bitmap) Equal(o *Bitmap) bool
 
-func EncodeJBIG2Generic(b *Bitmap) ([]byte, error)   // lossless; see §5
-
-// EncodeJBIG2Image (byb-js5.3) is EncodeJBIG2Generic packaged as a ready
-// EncodedImage, so a caller does not hand-transcribe the seven dictionary
-// entries EncodeJBIG2Generic's doc comment lists.
-func EncodeJBIG2Image(b *Bitmap) (EncodedImage, error)
+// JBIG2 encode and decode moved to github.com/dobbo-ca/jbig2-go (B1); byblos
+// decodes inbound /JBIG2Decode images through it and exports no JBIG2 codec.
 
 // Sauvola (byb-jj5) binarizes by local adaptive thresholding, producing the
-// Bitmap EncodeJBIG2Generic takes. Adaptive because a scan with a shadowed
+// Bitmap a JBIG2 encoder takes. Adaptive because a scan with a shadowed
 // gutter has no single global cutoff that works across the page.
 func Sauvola(img image.Image) (*Bitmap, error)
-
-// ErrUnsupportedJBIG2Feature reports a JBIG2 stream that parsed correctly and
-// uses a coding feature byblos does not implement: symbol dictionaries and text
-// regions, refinement, halftones, MMR, or a generic region coded with anything
-// other than GBTEMPLATE 0 and the nominal AT pixels. Distinct from a decode
-// failure: this one says the bytes are fine and byblos is not enough.
-var ErrUnsupportedJBIG2Feature = errors.New("byblos: JBIG2 stream uses a feature byblos does not decode")
-
-// DecodeJBIG2Generic inverts EncodeJBIG2Generic UP TO A SIZE and nothing wider
-// (byb-riy): immediate generic regions only, and only pages inside the decoder's
-// resource budget -- 67,108,864 pixels packing into 16 MiB, which covers every
-// 600-dpi master and 800-dpi A4 but not 600-dpi A3. The encoder has no size
-// budget and never did, so byblos can write a page it will not read back; the
-// asymmetry is documented on DecodeJBIG2Generic and pinned by
-// TestEncodeDecodeSizeBoundary. Below that size it is what makes a
-// byblos-compressed page re-openable by byblos, and it is the decoder
-// ExtractPageRaster runs on an inbound /JBIG2Decode image. See §5.
-func DecodeJBIG2Generic(data []byte) (*Bitmap, error)
 
 func QuantizePNG(img image.Image, colors int) ([]byte, error)
 func Downsample(img image.Image, srcDPI, dstDPI float64) (image.Image, error)
@@ -889,7 +867,7 @@ substantially more complex — is recorded in `FUTURE.md` as the intended next s
 
 **Scope note (byb-9v0): this section is about what Byblos WRITES, and Byblos now
 READS symbol mode.** The heading and the decision above are unchanged —
-`EncodeJBIG2Generic` emits a generic region and nothing else, and lossy symbol
+`jbig2.Encode` (jbig2-go) emits a generic region and nothing else, and lossy symbol
 matching stays rejected. What changed is the other direction:
 `ExtractPageRaster` decodes arithmetically coded symbol dictionaries and text
 regions, including the dictionary a PDF keeps in `/DecodeParms /JBIG2Globals`.
@@ -981,7 +959,7 @@ oracles**. They never ship and Kleio never depends on them.
 | area | oracle |
 |---|---|
 | `Inspect`, `ExtractPageRaster` | `pdfinfo`, `pdfimages` output on a fixed PDF corpus |
-| `EncodeJBIG2Generic` | round-trip through a JBIG2 *decoder*, asserting bit-identical output — this is the definitive lossless check, and it does not need `jbig2enc` |
+| `jbig2.Encode` | round-trip through a JBIG2 *decoder*, asserting bit-identical output — this is the definitive lossless check, and it does not need `jbig2enc` |
 | `QuantizePNG`, `Downsample` | size and PSNR bounds against `pngquant`/`ghostscript` output |
 | `StampTextLayer` | `pdftotext` on the result must return the text that was stamped, in reading order |
 | `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input — suspended for `Linearize: true`: over the 36 readable corpus documents it runs +7 to +1007 B against the input, every one of them larger (the +7 is `dup-raster`, the one document pdfcpu's rewrite shrinks enough to nearly pay for the linearization), and +649 to +2071 B with no exceptions against the same document rewritten and not linearized (the +2071 is `booklet`, the eight-page document: linearization's per-page hint columns are the one cost that scales with page count — see §4/§6 `Provenance`) |

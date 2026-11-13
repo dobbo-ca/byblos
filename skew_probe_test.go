@@ -54,7 +54,7 @@ package byblos
 //
 // IT WRITES ROWS AS IT GOES. Every other probe in this repository creates its
 // output file only after the walk returns (clause_probe_test.go,
-// jbig2_symbol_probe_test.go), so a run that is killed, cancelled or hits
+// the removed JBIG2 probe), so a run that is killed, cancelled or hits
 // -timeout produces zero bytes. This census decodes far more than the JBIG2 one
 // did, and a run long enough to be worth doing is long enough to be interrupted.
 // Rows therefore carry doc_index and are sorted afterwards rather than emitted

@@ -24,13 +24,12 @@ package byblos
 // the document: Inspect, ExtractPageRaster, Optimize, StampTextLayer, BuildPDF,
 // ReplaceImages, RecordExtraction, WriteProvenance, ReadProvenance.
 //
-// The six image-scale pure-compute functions -- Sauvola, QuantizePNG,
-// QuantizeIndexed, Downsample, DownsampleDeclaredBPC, EncodeJBIG2Generic --
+// The five image-scale pure-compute functions -- Sauvola, QuantizePNG,
+// QuantizeIndexed, Downsample, DownsampleDeclaredBPC --
 // deliberately get NO context variant, and the omission is a decision rather
 // than an oversight. Their cost is bounded by one already-in-memory image the
 // caller chose to pass, so the caller can bound them without a context; adding
-// ctx there would be API surface carrying no guarantee. DecodeJBIG2Generic is
-// the same shape and additionally carries its own resource budget (byb-riy).
+// ctx there would be API surface carrying no guarantee.
 // The five trivial ones -- NewBitmap, ExtractStats, ResetExtractStats,
 // Capabilities, UpgradeCandidates -- do no document-scale work at all.
 //

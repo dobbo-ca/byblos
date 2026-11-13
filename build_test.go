@@ -29,7 +29,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dobbo-ca/byblos/internal/jbig2"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
 
@@ -132,11 +131,11 @@ func jpegImage(t *testing.T, w, h int) (EncodedImage, image.Image) {
 }
 
 // jbig2Image returns a JBIG2Decode EncodedImage whose payload is real
-// internal/jbig2 output, not hand-typed bytes: T9 checks the builder carries
+// jbig2-go output, not hand-typed bytes: T9 checks the builder carries
 // exactly these bytes, unmodified.
 func jbig2Image(t *testing.T, w, h int) (EncodedImage, []byte) {
 	t.Helper()
-	bm := jbig2.NewBitmap(w, h)
+	bm := NewBitmap(w, h)
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			if (x/4+y/4)%2 == 0 {
@@ -144,7 +143,10 @@ func jbig2Image(t *testing.T, w, h int) (EncodedImage, []byte) {
 			}
 		}
 	}
-	payload := jbig2.EncodeGenericRegion(bm, true)
+	payload, err := encodeJBIG2Generic(bm)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return EncodedImage{
 		Width:      w,
 		Height:     h,
@@ -572,9 +574,8 @@ func TestBuildPDFCarriesJBIG2Verbatim(t *testing.T) {
 		t.Error("the built PDF does not contain the JBIG2 payload byte-for-byte")
 	}
 
-	// Inspect/ExtractPageRaster never decode a JBIG2 stream (byblos has no
-	// JBIG2 reader), so neither one would notice a wrong /ColorSpace on this
-	// dict. Check the raw dictionary text directly: ISO 32000-1 7.4.7 says
+	// Neither Inspect nor ExtractPageRaster would notice a wrong /ColorSpace
+	// on this dict. Check the raw dictionary text directly: ISO 32000-1 7.4.7 says
 	// JBIG2Decode carries 1-bit DeviceGray, and nothing else could have come
 	// from a real JBIG2 region.
 	dict := imageDictString(t, out, "JBIG2Decode")
@@ -597,13 +598,12 @@ func TestBuildPDFCarriesJBIG2Verbatim(t *testing.T) {
 		t.Errorf("dims = %dx%d; want %dx%d", ref.Width, ref.Height, w, h)
 	}
 
-	if _, err := ExtractPageRaster(bytes.NewReader(out), 1); !errIsUnsupportedCodec(err) {
-		t.Errorf("ExtractPageRaster error = %v; want ErrUnsupportedImageCodec", err)
+	// The payload is a whole embedded stream, so jbig2-go reads it back.
+	if pr, err := ExtractPageRaster(bytes.NewReader(out), 1); err != nil {
+		t.Errorf("ExtractPageRaster error = %v; want the page decoded", err)
+	} else if b := pr.Image.Bounds(); b.Dx() != w || b.Dy() != h {
+		t.Errorf("extracted raster is %dx%d; want %dx%d", b.Dx(), b.Dy(), w, h)
 	}
-}
-
-func errIsUnsupportedCodec(err error) bool {
-	return err != nil && strings.Contains(err.Error(), ErrUnsupportedImageCodec.Error())
 }
 
 // --- T9b: /DecodeParms is Flate-only -------------------------------------

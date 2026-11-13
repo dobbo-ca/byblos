@@ -560,7 +560,7 @@ func hostilePageDoc(t *testing.T) []byte {
 	// wastedWork fixture carries a 1x1 region and diverts almost instantly --
 	// building this test on it measured 104us and proved nothing, which is
 	// exactly the vacuous-instrument failure byb-riy kept hitting. This one is
-	// a page just under jbig2.MaxPagePixels fully covered by a region, so it is
+	// a page just under maxJBIG2Pixels fully covered by a region, so it is
 	// admitted by every gate and actually decodes ~67 million pixels.
 	data := hostileJBIG2Stream(hostileDim, hostileDim, hostileDim, hostileDim)
 	in := corpusDoc(t, "dup-raster")

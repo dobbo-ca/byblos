@@ -2,9 +2,12 @@ package bench
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image"
+
+	jbig2 "github.com/dobbo-ca/jbig2-go"
 
 	"github.com/dobbo-ca/byblos"
 )
@@ -103,7 +106,8 @@ var cases = map[string]Case{
 			return byblos.Sauvola(img)
 		},
 		Run: func(in any) ([]byte, error) {
-			return byblos.EncodeJBIG2Generic(in.(*byblos.Bitmap))
+			b := in.(*byblos.Bitmap)
+			return jbig2.Encode(context.Background(), &jbig2.Bitmap{W: b.Width, H: b.Height, Stride: b.Stride, Pix: b.Pix}, jbig2.Limits{})
 		},
 	},
 
