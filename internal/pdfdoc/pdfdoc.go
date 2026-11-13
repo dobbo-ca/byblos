@@ -249,6 +249,9 @@ type ImageInfo struct {
 	// about its own encoding.
 	Filter string
 
+	// Filters is the whole chain in decode order, by name; nil when unfiltered.
+	Filters []string
+
 	// ColorSpace is /ColorSpace when it is a plain name ("DeviceGray",
 	// "DeviceRGB", "DeviceCMYK"), and "" when it is an array or an indirect
 	// reference -- Indexed, ICCBased, Separation, DeviceN. Recompression uses
@@ -350,6 +353,10 @@ type Doc interface {
 	// /DecodeParms names in /JBIG2Globals, decoded, and nil when it names
 	// none. See the method for why it is separate from RawImage.
 	RawImageGlobals(id int) ([]byte, error)
+	// RawBitonal decodes the filters of the one-bit image id and returns its
+	// samples as the stream holds them: rows of stride bytes, MSB first, no
+	// colour applied. pdfcpu renders nothing, so the pixels are never widened.
+	RawBitonal(ctx context.Context, id int) (pix []byte, stride int, err error)
 	// ReplaceImage and Write are the write half; see write.go. They are on the
 	// same interface because writing requires the context Open normalized, so
 	// there is no way to reach them from a document Byblos did not read.
@@ -1064,6 +1071,7 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 			Decode:      hasEntry(sd.Dict, "Decode"),
 			DecodeArray: d.numberArray(sd.Dict, "Decode"),
 			Filter:      d.filterName(sd.Dict),
+			Filters:     filterNames(sd),
 			ColorSpace:  csName,
 		}
 		// Keep the stream dictionary. RawImage renders from this rather than
@@ -1577,6 +1585,14 @@ func rawLen(sd *types.StreamDict) int64 {
 	return *sd.StreamLength
 }
 
+// filterNames is the names of sd's filters in decode order.
+func filterNames(sd *types.StreamDict) (names []string) {
+	for _, f := range sd.FilterPipeline {
+		names = append(names, f.Name)
+	}
+	return names
+}
+
 // lastFilter is the name of sd's last filter, empty for none.
 func lastFilter(sd *types.StreamDict) string {
 	if n := len(sd.FilterPipeline); n > 0 {
@@ -1658,6 +1674,59 @@ func (d *doc) reserveCMYKDCT(sd *types.StreamDict, info ImageInfo, declared, ext
 		return nil, err
 	}
 	return release, nil
+}
+
+// RawBitonal is Doc.RawBitonal. Its memory is reserved as RawImage's is for a
+// non-codec image, less the render: the decode, and a lazy stream's bytes.
+func (d *doc) RawBitonal(ctx context.Context, id int) (pix []byte, stride int, err error) {
+	defer catchPanic(fmt.Sprintf("decoding bitonal image %d", id), &err)
+	sd, ok := d.streams[id]
+	if !ok {
+		return nil, 0, fmt.Errorf("byblos/pdfdoc: image %d has not been resolved on this document", id)
+	}
+	info := d.images[id]
+	if info.Width <= 0 || info.Height <= 0 {
+		return nil, 0, fmt.Errorf("byblos/pdfdoc: image %d: invalid dimensions %d x %d", id, info.Width, info.Height)
+	}
+	if err := limits.Check("image-pixels", int64(info.Width)*int64(info.Height), d.lim.ImagePixels()); err != nil {
+		return nil, 0, err
+	}
+	stride = (info.Width + 7) / 8
+	declared := imageDecodeBytes(info.Width, info.Height, 1, 1, len(sd.FilterPipeline))
+	if declared <= 0 {
+		return nil, 0, &limits.LimitError{Name: "image-bytes", Got: d.lim.StreamBytes() + 1, Max: d.lim.StreamBytes()}
+	}
+	lazyRaw := d.lazy && sd.Raw == nil
+	defer func() {
+		if lazyRaw {
+			sd.Raw = nil
+		}
+	}()
+	var extra int64
+	if lazyRaw {
+		extra = max(rawLen(sd)-declared, 0)
+	}
+	release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+extra)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
+	if lazyRaw {
+		if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
+			return nil, 0, fmt.Errorf("byblos/pdfdoc: image %d: %w", id, err)
+		}
+	}
+	cp := *sd // decode a copy, so sd is left as it was
+	cp.Content = nil
+	if err := cp.DecodeWithLimit(declared); errors.Is(err, filter.ErrDecodeLimitExceeded) {
+		return nil, 0, &limits.LimitError{Name: "image-bytes", Got: declared + 1, Max: declared}
+	} else if err != nil {
+		return nil, 0, fmt.Errorf("byblos/pdfdoc: image %d: %w", id, err)
+	}
+	if int64(len(cp.Content)) < int64(stride)*int64(info.Height) {
+		return nil, 0, fmt.Errorf("byblos/pdfdoc: image %d: %d bytes of samples for %d rows of %d", id, len(cp.Content), info.Height, stride)
+	}
+	return cp.Content[:stride*info.Height], stride, nil
 }
 
 // RawImageGlobals returns the JBIG2 page-0 segments image id declares in

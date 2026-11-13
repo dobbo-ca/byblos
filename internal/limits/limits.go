@@ -126,6 +126,10 @@ type Limits struct {
 	// Scan.TextShows (1<<16) and Scan.Paints (1<<18). Past them the walk
 	// stops recording and carries on; it does not fail.
 	MaxOperands, MaxTextShows, MaxPaints int64
+	// PackedBitonal asks PageRaster extraction for a declared-bitonal source
+	// (CCITT, JBIG2, 1-bpc Flate, an image mask) as a packed PageRaster.Bitmap
+	// instead of a widened Image. Not a cap: the default is the wide raster.
+	PackedBitonal bool
 }
 
 const DefaultFontProgramBytes = 16 << 20
