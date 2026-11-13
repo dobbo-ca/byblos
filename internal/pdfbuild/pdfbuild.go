@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dobbo-ca/byblos/internal/dct"
+	"github.com/dobbo-ca/byblos/internal/jbig2"
 	"github.com/dobbo-ca/byblos/internal/limits"
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
 )
@@ -122,28 +124,46 @@ func (b *Builder) emit(p Page) error {
 	tx := (p.WidthPt - dw) / 2
 	ty := (p.HeightPt - dh) / 2
 
+	data := img.Data
+	if img.FlateLevel > 0 {
+		var z bytes.Buffer
+		zw, err := zlib.NewWriterLevel(&z, img.FlateLevel)
+		if err != nil {
+			return fmt.Errorf("byblos/pdfbuild: page %d: %w", len(b.kids)+1, err)
+		}
+		_, _ = zw.Write(img.Data) // a bytes.Buffer does not fail
+		_ = zw.Close()
+		data = z.Bytes()
+	}
+
 	page, content, image := w.reserve(), w.reserve(), w.reserve()
-	smask := 0
+	smask, globals := 0, 0
 	if img.SMask != nil {
 		smask = w.reserve()
+	}
+	if img.JBIG2Globals != nil {
+		globals = w.reserve()
 	}
 	b.kids = append(b.kids, fmt.Sprintf("%d 0 R", page))
 
 	w.fillStream(content, "", []byte(fmt.Sprintf("q %s 0 0 %s %s %s cm /Im0 Do Q\n",
 		formatNum(dw), formatNum(dh), formatNum(tx), formatNum(ty))))
 
-	dict, err := imageDict(img, smask)
+	dict, err := imageDict(img, smask, globals)
 	if err != nil {
 		return fmt.Errorf("byblos/pdfbuild: page %d: %w", len(b.kids), err)
 	}
 	if smask > 0 {
-		sdict, err := imageDict(*img.SMask, 0)
+		sdict, err := imageDict(*img.SMask, 0, 0)
 		if err != nil {
 			return fmt.Errorf("byblos/pdfbuild: page %d: %w", len(b.kids), err)
 		}
 		w.fillStream(smask, sdict, img.SMask.Data)
 	}
-	w.fillStream(image, dict, img.Data)
+	if globals > 0 {
+		w.fillStream(globals, "", img.JBIG2Globals)
+	}
+	w.fillStream(image, dict, data)
 
 	rotate := ""
 	if p.Rotate != 0 {
@@ -344,6 +364,12 @@ func validatePage(p Page, lim limits.Limits) error {
 	if len(img.Data) == 0 {
 		return fmt.Errorf("image has no data")
 	}
+	if img.FlateLevel < 0 || img.FlateLevel > 9 || img.FlateLevel > 0 && img.Filter != "DCTDecode" {
+		return fmt.Errorf("FlateLevel %d: only 1..9 over DCTDecode is written (filter %q)", img.FlateLevel, img.Filter)
+	}
+	if img.JBIG2Globals != nil && img.Filter != "JBIG2Decode" {
+		return fmt.Errorf("JBIG2Globals on a %q image", img.Filter)
+	}
 	switch img.Filter {
 	case "FlateDecode":
 		switch img.BPC {
@@ -371,6 +397,13 @@ func validatePage(p Page, lim limits.Limits) error {
 			}
 		}
 	case "DCTDecode":
+		if img.FlateLevel > 0 {
+			if f, ok := dct.Parse(img.Data); !ok || !bytes.HasPrefix(img.Data, []byte{0xFF, 0xD8}) {
+				return fmt.Errorf("DCTDecode under Flate: data is not a JPEG with a frame header")
+			} else if f.W != img.Width || f.H != img.Height {
+				return fmt.Errorf("DCTDecode under Flate: frame is %dx%d, the image %dx%d", f.W, f.H, img.Width, img.Height)
+			}
+		}
 		if img.BPC != 8 {
 			return fmt.Errorf("DCTDecode: bits per component must be 8, got %d", img.BPC)
 		}
@@ -393,6 +426,14 @@ func validatePage(p Page, lim limits.Limits) error {
 		}
 		if img.ColorSpace.Name != "DeviceGray" {
 			return fmt.Errorf("JBIG2Decode: colour space must be DeviceGray, got %q", img.ColorSpace.Name)
+		}
+		if g := img.JBIG2Globals; g != nil {
+			if err := limits.Check("stream-bytes", int64(len(g)), lim.StreamBytes()); err != nil {
+				return err
+			}
+			if _, err := jbig2.ProfileStream(g, nil); err != nil || len(g) == 0 {
+				return fmt.Errorf("JBIG2Decode: /JBIG2Globals does not parse as JBIG2 segments: %v", err)
+			}
 		}
 	default:
 		return fmt.Errorf("filter %q is not supported", img.Filter)
@@ -691,13 +732,20 @@ func decodeParmsDict(p *pdfdoc.DecodeParms) string {
 // imageDict renders the image XObject dictionary contents (without the
 // enclosing << >>, which fillStream adds) for img; smask is the object number
 // of its soft mask, or 0.
-func imageDict(img pdfdoc.EncodedImage, smask int) (string, error) {
+func imageDict(img pdfdoc.EncodedImage, smask, globals int) (string, error) {
 	cs, err := colorSpaceObject(img.ColorSpace)
 	if err != nil {
 		return "", err
 	}
-	d := fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d /BitsPerComponent %d /ColorSpace %s /Filter /%s",
-		img.Width, img.Height, img.BPC, cs, img.Filter)
+	filter := "/" + img.Filter
+	if img.FlateLevel > 0 {
+		filter = "[/FlateDecode " + filter + "]"
+	}
+	d := fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d /BitsPerComponent %d /ColorSpace %s /Filter %s",
+		img.Width, img.Height, img.BPC, cs, filter)
+	if globals > 0 {
+		d += fmt.Sprintf(" /DecodeParms << /JBIG2Globals %d 0 R >>", globals)
+	}
 	// /DecodeParms only has a defined meaning for FlateDecode here (see
 	// decodeParmsDict); DCTDecode and JBIG2Decode take none of these keys.
 	if img.Filter == "FlateDecode" {
