@@ -635,6 +635,19 @@ func TestJBIG2RequestOverTheWholeBudgetIsPermanent(t *testing.T) {
 	}
 }
 
+// TestJBIG2DecodeUsesOnlyByblosBudget: byblos reserves the decode from its own
+// pool and passes Reserved to jbig2-go, so jbig2-go's process-wide pool is never
+// consulted. With that pool at 1 byte, a page that fits byblos's budget still
+// decodes; without Reserved it would fail on jbig2-go's pool.
+func TestJBIG2DecodeUsesOnlyByblosBudget(t *testing.T) {
+	doc := jbig2ReplacedDoc(t)
+	jbig2.SetMemoryLimit(1)
+	t.Cleanup(func() { jbig2.SetMemoryLimit(0) })
+	if _, err := ExtractPageRaster(bytes.NewReader(doc), 1); err != nil {
+		t.Fatalf("err = %v; jbig2-go's own pool was consulted", err)
+	}
+}
+
 // TestJBIG2BudgetHeldElsewhereIsTransient: a decode that fits the budget alone
 // but not while another operation holds it waits for it, as a DCT decode does
 // (TestDCTDecodeSharesByblosBudget), and through the public API ends with
