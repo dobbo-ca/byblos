@@ -29,7 +29,7 @@ type pageIndex struct {
 }
 
 // buildPageIndex walks the tree once. It returns nil for any tree it does not
-// fully understand (untyped or odd nodes, a /Pages node with no /Count or one
+// fully understand (untyped or odd nodes, a leaf with a /Count, a /Pages node with no /Count or one
 // that disagrees with the leaves, a cycle, too deep, or a different page count than Open's): lookups
 // then use pdfcpu's own PageDict, so such files behave as before.
 func (d *doc) buildPageIndex() *pageIndex {
@@ -60,6 +60,9 @@ func (d *doc) buildPageIndex() *pageIndex {
 		idx.nodes = append(idx.nodes, pageNode{ref, parent})
 		if _, hasKids := dd.Find("Kids"); !hasKids {
 			if typ.Value() != "Page" {
+				return 0, false
+			}
+			if _, has := dd.Find("Count"); has { // pdfcpu reads a leaf's /Count too
 				return 0, false
 			}
 			idx.leaves = append(idx.leaves, me)

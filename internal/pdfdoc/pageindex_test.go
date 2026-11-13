@@ -128,3 +128,29 @@ func TestPageIndexFallsBackWithoutCount(t *testing.T) {
 		t.Errorf("page 2: got %v %+v, pdfcpu %v %+v", got, ginh, want, winh)
 	}
 }
+
+// pdfcpu reads a leaf's /Count too (a malformed one errors, a non-positive one
+// skips the leaf), so a leaf carrying /Count stays on pdfcpu's path.
+func TestPageIndexFallsBackWithLeafCount(t *testing.T) {
+	for _, leaf := range []string{"/Count /X", "/Count -1 /MediaBox [0 0 100 200]"} {
+		data := rawPDF([]string{
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 400] >>",
+			"<< /Type /Page /Parent 2 0 R " + leaf + " >>",
+			"<< /Type /Page /Parent 2 0 R /Rotate 90 >>",
+		})
+		od, err := Open(bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := od.(*doc)
+		if d.buildPageIndex() != nil {
+			t.Fatalf("%q: tree with a leaf /Count was indexed", leaf)
+		}
+		got, ginh, gerr := d.pageDict(1)
+		want, _, winh, werr := d.ctx.XRefTable.PageDict(context.Background(), 1, false)
+		if (gerr == nil) != (werr == nil) || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(ginh, winh) {
+			t.Errorf("%q: got %v %v, pdfcpu %v %v", leaf, got, gerr, want, werr)
+		}
+	}
+}
