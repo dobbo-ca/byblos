@@ -433,3 +433,80 @@ func TestOpenDocumentFlateSoftMask(t *testing.T) {
 		t.Fatal("one-shot rendered nothing")
 	}
 }
+
+// zlibExcessPDF is a 100x100 RGB Flate image whose stream holds more encoded
+// bytes than the image's declared room (trailing bytes after the zlib stream):
+// the shape of the 5000x1000 case, on a small page.
+func zlibExcessPDF(t *testing.T) []byte {
+	t.Helper()
+	const w, h = 100, 100
+	px := make([]byte, w*h*3)
+	rand.New(rand.NewSource(3)).Read(px)
+	img := append(flateEncode(t, px), make([]byte, 40000)...)
+	return pdfFile([]string{catalog, pages1,
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+		"<< /Length 30 >>\nstream\nq 612 0 0 792 0 0 cm /Im0 Do Q\nendstream",
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", w, h, len(img), img),
+	}, "", 0)
+}
+
+// Every corpus page, and the synthetic masked, DCT+SMask, JBIG2-globals, CMYK DCT
+// and zlib-excess pages, give the same verdict and the same output open-once and
+// one-shot at the one-shot's own need + 16: both reserve the same bytes.
+func TestOpenOnceAndOneShotSameVerdictAtTightBudget(t *testing.T) {
+	const side = 256
+	px := make([]byte, side*side)
+	rand.New(rand.NewSource(2)).Read(px)
+	dctSMask := func(t *testing.T) []byte {
+		enc, _, err := EmbedJPEG(dcOnlyJPEG(side, side, 1, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		enc.SMask = &EncodedImage{Width: side, Height: side, BPC: 8, ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: flateEncode(t, px)}
+		var buf bytes.Buffer
+		if err := BuildPDF(&buf, []BuildPage{{Image: enc, WidthPt: 612, HeightPt: 792}}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	docs := map[string][]byte{
+		"flate-smask":     flateImagePDF(t, 600, 600, 3, true),
+		"dct-flate-smask": dctSMask(t),
+		"jbig2-globals":   jbig2GlobalsPDF(symbolFixture(t, "symbol-page.jb2"), symbolFixture(t, "symbol-globals.jb2"), 640, 480),
+		"cmyk-dct":        dctPDF(t, img2pdfFile(t, "cmyk.jpg"), 16, 12),
+		"zlib-excess":     zlibExcessPDF(t),
+	}
+	for _, d := range corpus.All() {
+		docs["corpus/"+d.Name] = d.Data
+	}
+	prev := SetMemoryLimit(1 << 30)
+	defer SetMemoryLimit(prev)
+	for name, data := range docs {
+		t.Run(name, func(t *testing.T) {
+			SetMemoryLimit(1 << 30)
+			infos, err := Inspect(bytes.NewReader(data))
+			if err != nil {
+				t.Skip("not inspectable:", err)
+			}
+			for _, pi := range infos {
+				SetMemoryLimit(1 << 30)
+				limits.ResetPeak()
+				_, _ = ExtractPageRasterLimits(context.Background(), bytes.NewReader(data), pi.Index, Limits{})
+				SetMemoryLimit(limits.PeakReserved() + 16)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(data), pi.Index, Limits{})
+				doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{})
+				if err != nil {
+					cancel()
+					t.Fatal(err)
+				}
+				got, gerr := doc.PageRaster(ctx, pi.Index)
+				doc.Close()
+				cancel()
+				if errStr(gerr) != errStr(werr) || !reflect.DeepEqual(got, want) {
+					t.Errorf("page %d: open-once err=%v; one-shot err=%v; equal=%v", pi.Index, gerr, werr, reflect.DeepEqual(got, want))
+				}
+			}
+		})
+	}
+}

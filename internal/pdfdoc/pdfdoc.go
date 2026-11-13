@@ -417,7 +417,7 @@ func OpenLazy(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc, er
 	return openSized(ctx, rs, lim, objectsIn(rs), true)
 }
 
-// OpenBudgeted is Open under lim, with the object table and one stream decode
+// OpenBudgeted is OpenLazy under lim, with the object table and one stream decode
 // reserved from the package memory budget (limits.SetMemoryLimit) before pdfcpu
 // parses. The returned release gives the reservation back; call it when done
 // with the document. The reservation comes from objectsIn: the larger of the
@@ -481,7 +481,7 @@ func OpenBudgeted(ctx context.Context, rs io.ReadSeeker, lim limits.Limits) (Doc
 	if err != nil {
 		return nil, nil, err
 	}
-	d, err := openSized(ctx, rs, lim, size, false)
+	d, err := openSized(ctx, rs, lim, size, true)
 	if err != nil {
 		release()
 		return nil, nil, err
