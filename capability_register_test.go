@@ -284,7 +284,7 @@ func TestEveryNotImplementedSiteNamesTheRegister(t *testing.T) {
 	}
 }
 
-// The two points inside decodeJBIG2Placement where an internal/jbig2 refusal
+// The two points inside decodeJBIG2Placement where a jbig2-go refusal
 // can arrive, and therefore the two places the sentinel can be dropped.
 const (
 	refusedWalkingHeaders = "walking the headers" // jbig2.PageSizeWithGlobals
@@ -408,7 +408,7 @@ func codecPDF(filter, colorSpace string, bpc, w, h int, payload []byte) []byte {
 // every assertion above.
 func TestDamagedJBIG2DoesNotClaimAMissingCapability(t *testing.T) {
 	// corpus.jbig2Payload is 64 bytes of filler, not a JBIG2 stream at all, so
-	// internal/jbig2 refuses it from the headers WITHOUT ErrUnsupportedFeature.
+	// jbig2-go refuses it from the headers WITHOUT ErrUnsupportedFeature.
 	data := corpusDoc(t, "jbig2")
 	_, err := ExtractPageRaster(bytes.NewReader(data), 1)
 	if err == nil {

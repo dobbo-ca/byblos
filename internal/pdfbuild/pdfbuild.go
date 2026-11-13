@@ -200,7 +200,7 @@ func inRange(v float64) bool {
 // The default of Limits.MaxEncodedImagePixels bounds an EncodedImage's Width*Height, restated (not
 // imported -- see internal/render's maxRasterPixels, which restates the same
 // number for the same reason) from this module's design point:
-// internal/jbig2's MaxPagePixels and internal/render's maxRasterPixels are
+// byblos's maxJBIG2Pixels and internal/render's maxRasterPixels are
 // both 1<<26 = 67,108,864, arrived at independently as 256 MB of RGBA,
 // roughly twice a 600 DPI A4. A census over the pinned sample (5,671
 // documents, 169,376 pages) found the largest single decoded font program at

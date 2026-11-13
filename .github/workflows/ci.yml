@@ -124,7 +124,7 @@ jobs:
 
   # This job installs every oracle the suite knows how to use and runs the
   # WHOLE suite -- not a package path, not a -run filter. The job it replaces
-  # ran `go test ./internal/jbig2/ -run "TestRoundTrip|TestBeats|TestPDF"`,
+  # ran `go test` on the in-tree JBIG2 package with a -run filter,
   # which covered 4 of the 24 oracle-backed tests; the other 20 depended on
   # the sibling job happening to install qpdf and poppler-utils for its own
   # reasons. Coverage that arrives as a side effect of another job's needs is

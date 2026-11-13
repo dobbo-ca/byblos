@@ -1,10 +1,10 @@
 package byblos
 
 // byb-9v0 at the boundary a caller sees: symbol-mode JBIG2 through
-// DecodeJBIG2Generic and through ExtractPageRaster, including the
+// decodeJBIG2Generic and through ExtractPageRaster, including the
 // /DecodeParms /JBIG2Globals plumbing that most of it needs.
 //
-// internal/jbig2's symbol_test.go proves the DECODER matches jbig2dec. These
+// jbig2-go's own tests prove the DECODER matches jbig2dec. These
 // prove the two things above it that a decoder cannot: that a self-contained
 // symbol-mode stream reaches the decoder at all, and that a page whose
 // dictionary lives in a separate PDF object reaches it WITH that object.
@@ -65,7 +65,7 @@ func TestDecodeJBIG2GenericDecodesSymbolModeAndDeclinesItsHuffmanVariant(t *test
 
 	got, err := decodeJBIG2Generic(s)
 	if err != nil {
-		t.Fatalf("DecodeJBIG2Generic on a self-contained symbol-mode stream: %v", err)
+		t.Fatalf("decodeJBIG2Generic on a self-contained symbol-mode stream: %v", err)
 	}
 	if got.Width != 640 || got.Height != 480 {
 		t.Fatalf("decoded %dx%d; want 640x480", got.Width, got.Height)
@@ -84,7 +84,7 @@ func TestDecodeJBIG2GenericDecodesSymbolModeAndDeclinesItsHuffmanVariant(t *test
 	huff[12] = 0x01
 	bad, err := decodeJBIG2Generic(huff)
 	if err == nil {
-		t.Fatalf("DecodeJBIG2Generic returned a %dx%d bitmap for a Huffman symbol dictionary; "+
+		t.Fatalf("decodeJBIG2Generic returned a %dx%d bitmap for a Huffman symbol dictionary; "+
 			"want errUnsupportedJBIG2", bad.Width, bad.Height)
 	}
 	if !errors.Is(err, errUnsupportedJBIG2) {

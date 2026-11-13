@@ -8,7 +8,7 @@ import (
 
 // Sauvola binarizes img by local adaptive thresholding (J. Sauvola & M.
 // Pietikäinen, "Adaptive document image binarization", Pattern Recognition
-// 33(2), 2000), returning a Bitmap ready for EncodeJBIG2Generic.
+// 33(2), 2000), returning a Bitmap ready for a JBIG2 encoder (jbig2.Encode).
 //
 // Adaptive, not global: a scan with uneven illumination -- a shadowed gutter,
 // a page corner lifted off the platen -- has no single cutoff that both keeps

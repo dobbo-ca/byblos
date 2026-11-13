@@ -559,6 +559,11 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		}
 		img, err = decodeJBIG2Placement(ctx, data, globals, d.ImageInfo, placement.ID)
 		if err != nil {
+			// A cancellation inside the decode is the caller's, not the page's:
+			// no divert, no counter (TestCancelledExtractionDoesNotMoveTheCounters).
+			if cerr := checkContext(ctx); cerr != nil {
+				return nil, PageProvenance{}, cerr
+			}
 			var le *LimitError
 			if errors.As(err, &le) || errors.Is(err, ErrMemoryLimit) {
 				countFailure()
@@ -653,7 +658,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// returns the same shape of error for a compression it does not
 		// implement and for a TIFF that is simply corrupt, so this site cannot
 		// tell which it is holding. The jbig2 arm above can only make that call
-		// because internal/jbig2 draws the line itself and says so with
+		// because jbig2-go draws the line itself and says so with
 		// ErrUnsupportedFeature. Give a decoder here the same sentinel (byb-2bx)
 		// and this arm can name its capability the same way.
 		reason := "unsupported-codec-" + fileType

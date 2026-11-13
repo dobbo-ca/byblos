@@ -201,7 +201,12 @@ into an error. They are configurable and nothing else.
 JBIG2 is decoded by `github.com/dobbo-ca/jbig2-go`, which carries its own
 stream budgets (page pixels, bitmap bytes, segments, symbols; see its
 `docs/guides/memory-limits.md`). byblos passes it a page-pixel cap derived from
-the image dictionary and reserves the decode's memory from its own budget first.
+the image dictionary and reserves its own share (the packed bitmap and the
+one-byte-per-pixel raster) from its budget first. jbig2-go reserves its own
+decode estimate from a separate, non-waiting process-wide pool
+(`jbig2.SetMemoryLimit`), so `SetMemoryLimit` here does not bound the decode
+itself. A `jbig2.ErrMemoryLimit` from that pool comes back as `ErrMemoryLimit`
+(transient), not as a divert.
 
 `ctx` entry points exist today for the nine document-scale primitives,
 `BuildFromPagesContext`, `RenderPageContext` and the `...Limits` forms above: `InspectContext` (`inspect.go:213`),

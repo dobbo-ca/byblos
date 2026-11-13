@@ -6,7 +6,7 @@ package byblos
 // WHY THIS IS NOT COVERED BY WHAT WAS ALREADY HERE. Three tests touch the same
 // seam and none of them can catch an inversion introduced on this path:
 //
-//   - internal/jbig2's TestPDFDecodeArrayWouldInvert asks pdfimages what the
+//   - jbig2-go's pdfimages tests ask what the
 //     FILTER does. It proves /Decode [1 0] inverts the samples, which is the
 //     fact grayLevels is built on, and says nothing about whether byblos
 //     applies it.

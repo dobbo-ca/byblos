@@ -26,18 +26,24 @@ const maxJBIG2Pixels = 1 << 26
 // decodeJBIG2Placement is extractPage's JBIG2 branch: decode the stream through
 // jbig2-go and hand back a raster in the polarity a renderer would show.
 //
-// The image dictionary's /Width x /Height cap the decode (jbig2.Limits)
-// so a stream asking for a bigger page than the dictionary describes is refused
-// from its headers, before anything is allocated; a smaller or differently
-// shaped page is refused after the decode. /Decode is applied through
-// grayLevels, because on a 1-bit image [1 0] inverts the page. The decode's
-// memory (the packed bitmap, then the one-byte-per-pixel raster) is reserved
-// from byblos's own budget first, the way the DCT path reserves for jpeg-go.
+// The image dictionary's /Width x /Height shape the decode's jbig2.Limits: a
+// page pixel cap of four times the dictionary's bitmap bytes (1 Mpx at least)
+// leaves room for the symbols, so a stream asking for much more than the
+// dictionary describes is refused by jbig2-go; one a little over is decoded
+// and then refused, with every page whose size differs from the dictionary's.
+// /Decode is applied through grayLevels, because on a 1-bit image [1 0]
+// inverts the page. byblos reserves the packed bitmap and the one-byte-per-pixel
+// raster from its own budget first. jbig2-go does NOT draw on that budget: it
+// reserves its own estimate (a quarter of the page pixels plus per-symbol and
+// per-segment costs) from a separate process-wide pool (jbig2.SetMemoryLimit),
+// so byblos.SetMemoryLimit does not bound the decode itself. That pool is
+// non-waiting; running out is transient, so a jbig2.ErrMemoryLimit is returned
+// as byblos's ErrMemoryLimit (wrapping both) rather than as damage.
 //
-// Every error it returns opens with "jbig2:", so extractPage can wrap the lot
-// without naming the codec a second time. A coding mode jbig2-go does not
-// decode carries jbig2.ErrUnsupportedFeature; byblos's *LimitError and
-// ErrMemoryLimit pass through unchanged.
+// Errors opening with "jbig2:" are the document's or the codec's; byblos's
+// *LimitError, ErrMemoryLimit and a cancelled ctx's error are not, and extractPage
+// passes those through. A coding mode jbig2-go does not decode carries
+// jbig2.ErrUnsupportedFeature.
 func decodeJBIG2Placement(ctx context.Context, data, globals []byte, imageInfo func(int) (pdfdoc.ImageInfo, bool), id int) (image.Image, error) {
 	info, ok := imageInfo(id)
 	if !ok {
@@ -65,9 +71,12 @@ func decodeJBIG2Placement(ctx context.Context, data, globals []byte, imageInfo f
 		PagePixels: min(maxJBIG2Pixels, max(1<<20, 4*8*int64((info.Width+7)/8)*int64(info.Height))),
 	})
 	if err != nil {
+		if errors.Is(err, jbig2.ErrMemoryLimit) {
+			return nil, fmt.Errorf("%w: %w", ErrMemoryLimit, err)
+		}
 		var le *jbig2.LimitError
 		if errors.As(err, &le) {
-			return nil, fmt.Errorf("jbig2: image %d's stream asks for more than the %dx%d its dictionary says: %v",
+			return nil, fmt.Errorf("jbig2: image %d's stream trips a cap sized from its %dx%d dictionary: %v",
 				id, info.Width, info.Height, err)
 		}
 		return nil, err
@@ -116,9 +125,6 @@ const (
 // probe on [0.25 0.75] gives 64 and 191, and on [0.3333 0.6667] gives 85 and
 // 170, which is what graySample computes to the level.
 //
-// internal/jbig2's TestPDFDecodeArrayWouldInvert pins the [1 0] row of that
-// table from the other side, through pdfimages, and has done since v0.1.0.
-//
 // So the rule is a two-entry lookup table rather than a flip: sample 0 takes
 // the array's first number and sample 1 its second. Reading it as "invert when
 // the array is [1 0]" gets the same answer on the two common arrays and a
@@ -142,7 +148,7 @@ const (
 // nobody counts.
 //
 // WHAT THE CORPUS ACTUALLY HOLDS, and it is not what the shape of this function
-// suggests. Measured 2026-08-11 by jbig2_symbol_probe_test.go over all four
+// suggests. Measured 2026-08-11 by a since-removed probe test over all four
 // corpora, 5,672 sample files and 169,376 sample pages: of the 6,818 pages that are a single
 // page-covering JBIG2 raster, 4,371 were held by this gate, and every one of
 // them is /DeviceGray at 1 bit per component with an array of exactly two
@@ -217,9 +223,9 @@ func graySample(v float64) uint8 {
 // *image.Gray rather than a one-bit image.Image over the same buffer: it costs
 // 8x the memory and buys interoperability with everything that type-switches on
 // the concrete type for a fast path, including Downsample in this package. That
-// 8x is why jbig2.MaxPagePixels is the bound that matters on this path: the
-// result of this function is MaxPagePixels bytes, the largest single allocation
-// anywhere in a JBIG2 extraction.
+// 8x is why maxJBIG2Pixels is the bound that matters on this path: the
+// result of this function is up to maxJBIG2Pixels bytes, the largest single
+// allocation byblos makes in a JBIG2 extraction.
 func grayImage(b *jbig2.Bitmap, ink, background uint8) *image.Gray {
 	g := image.NewGray(image.Rect(0, 0, b.W, b.H))
 	for y := 0; y < b.H; y++ {

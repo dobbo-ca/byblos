@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/dobbo-ca/byblos/internal/pdfdoc"
+	jbig2 "github.com/dobbo-ca/jbig2-go"
 )
 
 // jbig2TestBitmap is a deterministic bitmap chosen to be hostile to the bugs a
@@ -258,8 +259,8 @@ func TestDecodeJBIG2PlacementAppliesTheDecodeArray(t *testing.T) {
 // anything, it is a different image (grayLevels records poppler's numbers).
 //
 // The message substring is asserted rather than just the error, and the shared
-// "/Decode array" prefix is deliberate: jbig2_symbol_probe_test.go's census
-// classifies this gate by that phrase, so a refusal that drops it is a refusal
+// "/Decode array" prefix is deliberate: the byb-9v0 census
+// classified this gate by that phrase, so a refusal that drops it is a refusal
 // no measurement can see.
 func TestDecodeJBIG2PlacementRefusesADecodeArrayItCannotRead(t *testing.T) {
 	src := jbig2TestBitmap()
@@ -565,4 +566,100 @@ func hostileJBIG2StreamManyRegions(pageW, pageH, n int) []byte {
 		out = append(out, seg(uint32(i+1), 38, r)...)
 	}
 	return out
+}
+
+// jbig2ReplacedDoc is the "scan" fixture with its image replaced by a JBIG2
+// stream of jbig2TestBitmap, so ExtractPageRaster reaches the JBIG2 arm.
+func jbig2ReplacedDoc(t *testing.T) []byte {
+	t.Helper()
+	ref := inspect(t, "scan")[0].Images[0]
+	src := jbig2TestBitmap()
+	img, err := encodeJBIG2Image(src)
+	if err != nil {
+		t.Fatalf("encodeJBIG2Image: %v", err)
+	}
+	var out bytes.Buffer
+	if err := ReplaceImages(&out, bytes.NewReader(corpusDoc(t, "scan")), map[int]EncodedImage{ref.ObjNr: img}); err != nil {
+		t.Fatalf("ReplaceImages: %v", err)
+	}
+	return out.Bytes()
+}
+
+// TestJBIG2MemoryPoolExhaustionIsTransientNotADivert: jbig2-go draws on its own
+// process-wide pool, which does not wait. Running out of it must surface as
+// byblos's ErrMemoryLimit (retry later), never as a permanent
+// unsupported-codec-jbig2 refusal that counts the page as damaged.
+func TestJBIG2MemoryPoolExhaustionIsTransientNotADivert(t *testing.T) {
+	doc := jbig2ReplacedDoc(t)
+	jbig2.SetMemoryLimit(1)
+	t.Cleanup(func() { jbig2.SetMemoryLimit(0) })
+
+	ResetExtractStats()
+	_, err := ExtractPageRaster(bytes.NewReader(doc), 1)
+	if !errors.Is(err, ErrMemoryLimit) {
+		t.Fatalf("err = %v; want it to wrap byblos.ErrMemoryLimit", err)
+	}
+	if !errors.Is(err, jbig2.ErrMemoryLimit) {
+		t.Errorf("err = %v; the jbig2-go sentinel should stay reachable", err)
+	}
+	var rr *RasterRefusal
+	if errors.As(err, &rr) {
+		t.Errorf("pool exhaustion became a refusal %q", rr.Reason)
+	}
+	if got := ExtractStats(); got.Diverted != 0 {
+		t.Errorf("pool exhaustion was counted as a divert: %+v", got)
+	}
+}
+
+// TestJBIG2CancelMidDecodeIsNotADivert: a cancellation that lands inside
+// jbig2.Decode is the caller's, so it comes back as the context error and does
+// not count as a divert.
+func TestJBIG2CancelMidDecodeIsNotADivert(t *testing.T) {
+	doc := jbig2ReplacedDoc(t)
+	var sawJBIG2 bool
+	for after := 1; after < 200; after++ {
+		ResetExtractStats()
+		cc := &cancelAtCheck{Context: context.Background(), after: after}
+		_, err := ExtractPageRasterContext(cc, bytes.NewReader(doc), 1)
+		if err == nil {
+			break // past the last check
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel at check %d returned %v; want context.Canceled", after, err)
+		}
+		if got := ExtractStats(); got.Diverted != 0 {
+			t.Fatalf("cancel at check %d counted a divert: %+v", after, got)
+		}
+		sawJBIG2 = true
+	}
+	if !sawJBIG2 {
+		t.Fatal("no check cancelled the extraction; the sweep proved nothing")
+	}
+}
+
+// TestDecodeJBIG2PlacementAdmitsAFullResolutionPage pins maxJBIG2Pixels from
+// below: a 600-dpi A4 or Letter master must get past byblos's size gate. The
+// stream is unparseable on purpose, so the only claim is that the refusal, if
+// any, is not the gate.
+func TestDecodeJBIG2PlacementAdmitsAFullResolutionPage(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		w, h int
+	}{
+		{"600dpi-A4", 4961, 7016},
+		{"600dpi-Letter", 5100, 6600},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			info := func(int) (pdfdoc.ImageInfo, bool) {
+				return pdfdoc.ImageInfo{Width: c.w, Height: c.h}, true
+			}
+			_, err := decodeJBIG2Placement(context.Background(), []byte("garbage"), nil, info, 7)
+			if err == nil {
+				t.Fatal("an unparseable stream must still be an error")
+			}
+			if strings.Contains(err.Error(), "dictionary declares") {
+				t.Fatalf("a %dx%d page is a 600-dpi master and must reach the decoder: %v", c.w, c.h, err)
+			}
+		})
+	}
 }

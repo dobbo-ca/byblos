@@ -55,7 +55,7 @@ var pngSignature = [8]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
 
 // A PNG's declared Width*Height is bounded by Limits.MaxEncodedImagePixels,
 // default 1<<26 = 67,108,864: this module's design point (also
-// internal/jbig2's MaxPagePixels), 256 MB of RGBA, roughly twice a 600 DPI A4.
+// maxJBIG2Pixels), 256 MB of RGBA, roughly twice a 600 DPI A4.
 
 // EmbedPNG lifts a PNG file's pixel data into a ready EncodedImage under
 // /FlateDecode, plus the resolution its pHYs chunk declares (zero if the file

@@ -54,7 +54,7 @@
 // Untrusted input: the page box and scale come out of the file, so raster
 // dimensions are clamped before allocation; flattened path points and
 // scanline work are charged against budgets as they accrue, in the spirit of
-// internal/jbig2's decode-time budget -- refuse before allocating, never
+// jbig2-go's decode-time budget -- refuse before allocating, never
 // after.
 package render
 
@@ -103,8 +103,8 @@ import (
 // cache of its own, so every name pays a fresh decode even when it
 // aliases an already-parsed program) plus that name's own /Widths and
 // /W arrays, which are never deduped at all. 16<<20 is this module's
-// stated per-unit memory concession (see internal/jbig2's
-// maxStreamBitmapBytes); a census of the pinned sample's font-bearing
+// stated per-unit memory concession (jbig2-go's
+// stream bitmap cap was the precedent); a census of the pinned sample's font-bearing
 // pages found the worst single page retaining 2,821,308 bytes of
 // program plus 655,360 bytes of metric arrays (about 3.5 MiB), so the
 // bound is a 4.5x margin over anything actually seen. Without it, 2000

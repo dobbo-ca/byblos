@@ -867,7 +867,7 @@ substantially more complex — is recorded in `FUTURE.md` as the intended next s
 
 **Scope note (byb-9v0): this section is about what Byblos WRITES, and Byblos now
 READS symbol mode.** The heading and the decision above are unchanged —
-`EncodeJBIG2Generic` emits a generic region and nothing else, and lossy symbol
+`jbig2.Encode` (jbig2-go) emits a generic region and nothing else, and lossy symbol
 matching stays rejected. What changed is the other direction:
 `ExtractPageRaster` decodes arithmetically coded symbol dictionaries and text
 regions, including the dictionary a PDF keeps in `/DecodeParms /JBIG2Globals`.
@@ -959,7 +959,7 @@ oracles**. They never ship and Kleio never depends on them.
 | area | oracle |
 |---|---|
 | `Inspect`, `ExtractPageRaster` | `pdfinfo`, `pdfimages` output on a fixed PDF corpus |
-| `EncodeJBIG2Generic` | round-trip through a JBIG2 *decoder*, asserting bit-identical output — this is the definitive lossless check, and it does not need `jbig2enc` |
+| `jbig2.Encode` | round-trip through a JBIG2 *decoder*, asserting bit-identical output — this is the definitive lossless check, and it does not need `jbig2enc` |
 | `QuantizePNG`, `Downsample` | size and PSNR bounds against `pngquant`/`ghostscript` output |
 | `StampTextLayer` | `pdftotext` on the result must return the text that was stamped, in reading order |
 | `Optimize` | output must remain valid per `pdfcpu validate`, and no larger than input — suspended for `Linearize: true`: over the 36 readable corpus documents it runs +7 to +1007 B against the input, every one of them larger (the +7 is `dup-raster`, the one document pdfcpu's rewrite shrinks enough to nearly pay for the linearization), and +649 to +2071 B with no exceptions against the same document rewritten and not linearized (the +2071 is `booklet`, the eight-page document: linearization's per-page hint columns are the one cost that scales with page count — see §4/§6 `Provenance`) |
