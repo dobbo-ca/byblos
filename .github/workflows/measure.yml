@@ -60,4 +60,4 @@ jobs:
       - name: measure
         env:
           BYBLOS_MEASURE: 1
-        run: go test . -run '^TestMeasure(OpenOnce|PageData)$' -v -count=1 -timeout 15m
+        run: go test . -run '^TestMeasure(OpenOnce|PageData|OpenDocumentHeap)$' -v -count=1 -timeout 15m
