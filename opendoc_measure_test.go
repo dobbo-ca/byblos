@@ -123,11 +123,11 @@ func TestMeasureOpenDocumentHeap(t *testing.T) {
 	}
 	const pages = 200
 	rng := rand.New(rand.NewSource(1))
-	px := make([]byte, 1024*1024)
+	px := make([]byte, 1000*1000)
 	bp := make([]BuildPage, pages)
 	for i := range bp {
 		rng.Read(px)
-		bp[i] = BuildPage{Image: EncodedImage{Width: 1024, Height: 1024, BPC: 8, ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: flateEncode(t, px)}, WidthPt: 612, HeightPt: 792, DPI: 100}
+		bp[i] = BuildPage{Image: EncodedImage{Width: 1000, Height: 1000, BPC: 8, ColorSpace: ColorSpace{Name: "DeviceGray"}, Filter: "FlateDecode", Data: flateEncode(t, px)}, WidthPt: 612, HeightPt: 792, DPI: 100}
 	}
 	var buf bytes.Buffer
 	if err := BuildPDF(&buf, bp); err != nil {
