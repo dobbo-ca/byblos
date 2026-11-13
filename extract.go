@@ -534,7 +534,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		// the arithmetic symbol mode most archive scanners emit.
 		//
 		// What still diverts is the rest -- Huffman symbol coding, refinement,
-		// halftones, MMR, the three generic templates byblos does not code --
+		// halftones, MMR --
 		// under the SAME reason string as before. The taxonomy does not gain a
 		// term for it: a page that needs a fuller JBIG2 decoder and a page that
 		// needs any JBIG2 decoder nominate the same capability, decode-jbig2,

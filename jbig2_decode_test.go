@@ -683,3 +683,28 @@ func TestDecodeJBIG2PlacementAdmitsAFullResolutionPage(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeJBIG2PlacementComparesSizesBeforeDecoding pins that a page whose
+// size disagrees with the dictionary is refused from its page-information
+// segment. The stream is cut right after that segment, so a decode would fail
+// with a different error; the size-mismatch error proves nothing was decoded.
+func TestDecodeJBIG2PlacementComparesSizesBeforeDecoding(t *testing.T) {
+	stream, err := jbig2.Encode(context.Background(), jbig2.NewBitmap(8000, 8000), jbig2.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, h, ok := jbig2PageSize(stream)
+	if !ok || w != 8000 || h != 8000 {
+		t.Fatalf("jbig2PageSize = %d, %d, %v; want 8000, 8000, true", w, h, ok)
+	}
+	// Page-information segment: 11-byte header (no referred-to segments, 1-byte
+	// page association) plus its 19-byte body.
+	head := stream[:30]
+	info := func(int) (pdfdoc.ImageInfo, bool) {
+		return pdfdoc.ImageInfo{Width: 10, Height: 10, BPC: 1, ColorSpace: "DeviceGray"}, true
+	}
+	_, err = decodeJBIG2Placement(context.Background(), head, nil, info, 7)
+	if err == nil || !strings.Contains(err.Error(), "page is 8000x8000 but image 7's dictionary says 10x10") {
+		t.Fatalf("err = %v; want the size mismatch, raised before decoding", err)
+	}
+}

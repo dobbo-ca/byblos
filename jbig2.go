@@ -29,8 +29,10 @@ const maxJBIG2Pixels = 1 << 26
 // The page pixel cap handed to jbig2-go is maxJBIG2Pixels, the same bound as
 // the dictionary size gate: it is shared by the page, its regions and every
 // symbol, so a cap scaled to the dictionary's page would starve a document
-// whose global dictionary is large. A decoded page whose size differs from the
-// dictionary's is refused. /Decode is applied through grayLevels, because on a 1-bit image [1 0]
+// whose global dictionary is large. That cap does not bound the cost of a
+// page whose size disagrees with the dictionary, so the page-information
+// segment is read first (jbig2PageSize) and a mismatch is refused before any
+// decode; a decoded page whose size differs is refused too. /Decode is applied through grayLevels, because on a 1-bit image [1 0]
 // inverts the page. byblos reserves the packed bitmap and the one-byte-per-pixel
 // raster from its own budget first. jbig2-go does NOT draw on that budget: it
 // reserves its own estimate (a quarter of the page pixels plus per-symbol and
@@ -59,6 +61,14 @@ func decodeJBIG2Placement(ctx context.Context, data, globals []byte, imageInfo f
 			"bilevel page at one byte per pixel and the limit is %d",
 			id, info.Width, info.Height, px, int64(maxJBIG2Pixels))
 	}
+	// A page whose declared size disagrees with the dictionary is refused from
+	// its page-information segment, before any pixel is decoded: jbig2-go has
+	// no header-only call, and decoding a page this big only to divert it costs
+	// seconds of arithmetic decoding on every pass.
+	if w, h, ok := jbig2PageSize(data); ok && (w != int64(info.Width) || h != int64(info.Height)) {
+		return nil, fmt.Errorf("jbig2: page is %dx%d but image %d's dictionary says %dx%d",
+			w, h, id, info.Width, info.Height)
+	}
 	release, err := limits.Reserve(ctx, px+px/8+int64(len(data)+len(globals)))
 	if err != nil {
 		return nil, err
@@ -84,6 +94,59 @@ func decodeJBIG2Placement(ctx context.Context, data, globals []byte, imageInfo f
 			b.W, b.H, id, info.Width, info.Height)
 	}
 	return grayImage(b, ink, background), nil
+}
+
+// jbig2PageSize reads the width and height out of an embedded stream's
+// page-information segment (type 48, ISO 14492 7.4.8) by walking segment
+// headers (7.2) without decoding anything. ok is false when the segment is not
+// found in well-formed headers or the height is the "unknown" 0xFFFFFFFF; the
+// caller then falls back to comparing the decoded size.
+func jbig2PageSize(data []byte) (w, h int64, ok bool) {
+	u32 := func(b []byte) int64 { return int64(b[0])<<24 | int64(b[1])<<16 | int64(b[2])<<8 | int64(b[3]) }
+	for off := 0; len(data)-off >= 11; {
+		hdr := data[off:]
+		num, flags := u32(hdr), hdr[4]
+		n := 5
+		count := int64(hdr[n] >> 5)
+		if count == 7 {
+			if len(hdr) < n+4 {
+				return 0, 0, false
+			}
+			count = u32(hdr[n:]) & 0x1FFFFFFF
+			n += 4 + int((count+8)/8)
+		} else {
+			n++
+		}
+		ref := int64(1)
+		if num > 65536 {
+			ref = 4
+		} else if num > 256 {
+			ref = 2
+		}
+		n64 := int64(n) + count*ref
+		if flags&0x40 != 0 {
+			n64 += 4
+		} else {
+			n64++
+		}
+		if n64+4 > int64(len(hdr)) {
+			return 0, 0, false
+		}
+		size := u32(hdr[n64:])
+		body := int64(off) + n64 + 4
+		if flags&0x3F == 48 {
+			if size < 8 || body+8 > int64(len(data)) {
+				return 0, 0, false
+			}
+			w, h = u32(data[body:]), u32(data[body+4:])
+			return w, h, h != 0xFFFFFFFF
+		}
+		if size == 0xFFFFFFFF || body+size > int64(len(data)) {
+			return 0, 0, false
+		}
+		off = int(body + size)
+	}
+	return 0, 0, false
 }
 
 // jbig2PoolRequest reads the request and the pool size out of a

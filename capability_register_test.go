@@ -220,24 +220,12 @@ func TestEveryNotImplementedSiteNamesTheRegister(t *testing.T) {
 	}{
 		{"jpx", codecPDF("JPXDecode", "DeviceRGB", 8, 101, 73, codecFiller(64)), "decode-jpx"},
 
-		// BOTH JBIG2 CASES ARE HERE BECAUSE decodeJBIG2Placement HAS TWO PLACES
-		// TO LOSE THE SENTINEL, and one of them does not look like a decode at
-		// all. jbig2.PageSizeWithGlobals reads the page size, but it runs the
-		// same header walk the decoder does, so some coding modes are refused
-		// from the headers and never reach the decode call at all.
-		//
-		// MUTATION TESTING IS WHY THERE ARE TWO, AND IT TOOK TWO ROUNDS. With
-		// only a halftone fixture, deleting markUnsupportedJBIG2 from the
-		// PageSizeWithGlobals call left this test green. Adding a second
-		// halftone-shaped fixture did not help: BOTH were refused walking the
-		// headers, so the decode-time wrap was still never exercised and
-		// deleting IT also left the test green. Only a refusal that comes out of
-		// the region DATA -- GBTEMPLATE 1 -- reaches the second call.
-		//
-		// Neither arm is hypothetical. After byb-9v0, 33 of the 37 refusals in
-		// the pinned sample are a refinement text region, caught walking the
-		// headers; the rest of what byblos declines (MMR, the other templates,
-		// non-nominal AT pixels) is decided from the data.
+		// Two JBIG2 fixtures: a refusal jbig2-go raises from the segment
+		// headers, and one it raises from the region data. Both now arrive
+		// through the single jbig2.Decode call in decodeJBIG2Placement, so
+		// they no longer reach different sites there; they are kept because
+		// each is a distinct way for a well-formed stream to be declined, and
+		// both must carry the sentinel.
 		{"jbig2-refused-walking-the-headers", codecPDF("JBIG2Decode", "DeviceGray", 1, 101, 73,
 			refusedJBIG2Stream(t, refusedWalkingHeaders)), "decode-jbig2"},
 		{"jbig2-refused-decoding", codecPDF("JBIG2Decode", "DeviceGray", 1, 101, 73,
@@ -284,11 +272,10 @@ func TestEveryNotImplementedSiteNamesTheRegister(t *testing.T) {
 	}
 }
 
-// The two points inside decodeJBIG2Placement where a jbig2-go refusal
-// can arrive, and therefore the two places the sentinel can be dropped.
+// The two stages inside jbig2.Decode at which a refusal can arise.
 const (
-	refusedWalkingHeaders = "walking the headers" // jbig2.PageSizeWithGlobals
-	refusedDecoding       = "decoding"            // jbig2.DecodeEmbeddedStreamWithGlobals
+	refusedWalkingHeaders = "walking the headers"
+	refusedDecoding       = "decoding"
 )
 
 // refusedJBIG2Stream is a WELL-FORMED JBIG2 stream byblos declines for its
