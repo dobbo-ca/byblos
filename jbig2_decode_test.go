@@ -585,29 +585,49 @@ func jbig2ReplacedDoc(t *testing.T) []byte {
 	return out.Bytes()
 }
 
-// TestJBIG2MemoryPoolExhaustionIsTransientNotADivert: jbig2-go draws on its own
-// process-wide pool, which does not wait. Running out of it must surface as
-// byblos's ErrMemoryLimit (retry later), never as a permanent
-// unsupported-codec-jbig2 refusal that counts the page as damaged.
-func TestJBIG2MemoryPoolExhaustionIsTransientNotADivert(t *testing.T) {
+// TestJBIG2RequestOverTheWholePoolIsPermanent: a request larger than jbig2-go's
+// whole pool can never fit, so retrying it forever is wrong. It must be a
+// *LimitError (permanent), not ErrMemoryLimit and not a refusal or divert.
+func TestJBIG2RequestOverTheWholePoolIsPermanent(t *testing.T) {
 	doc := jbig2ReplacedDoc(t)
 	jbig2.SetMemoryLimit(1)
 	t.Cleanup(func() { jbig2.SetMemoryLimit(0) })
 
 	ResetExtractStats()
 	_, err := ExtractPageRaster(bytes.NewReader(doc), 1)
-	if !errors.Is(err, ErrMemoryLimit) {
-		t.Fatalf("err = %v; want it to wrap byblos.ErrMemoryLimit", err)
+	var le *LimitError
+	if !errors.As(err, &le) {
+		t.Fatalf("err = %v; want a *LimitError", err)
 	}
-	if !errors.Is(err, jbig2.ErrMemoryLimit) {
-		t.Errorf("err = %v; the jbig2-go sentinel should stay reachable", err)
+	if errors.Is(err, ErrMemoryLimit) {
+		t.Errorf("err = %v; a request that can never fit must not be transient", err)
 	}
 	var rr *RasterRefusal
 	if errors.As(err, &rr) {
-		t.Errorf("pool exhaustion became a refusal %q", rr.Reason)
+		t.Errorf("pool overflow became a refusal %q", rr.Reason)
 	}
 	if got := ExtractStats(); got.Diverted != 0 {
-		t.Errorf("pool exhaustion was counted as a divert: %+v", got)
+		t.Errorf("pool overflow was counted as a divert: %+v", got)
+	}
+}
+
+// TestJBIG2PoolRequestParses pins the jbig2-go wording jbig2PoolRequest reads,
+// against the real error, and the transient case (fits alone, pool busy).
+func TestJBIG2PoolRequestParses(t *testing.T) {
+	stream, err := encodeJBIG2Generic(jbig2TestBitmap())
+	if err != nil {
+		t.Fatalf("encodeJBIG2Generic: %v", err)
+	}
+	jbig2.SetMemoryLimit(1)
+	t.Cleanup(func() { jbig2.SetMemoryLimit(0) })
+	_, err = jbig2.Decode(context.Background(), stream, nil, jbig2.Limits{})
+	need, limit, ok := jbig2PoolRequest(err)
+	if !ok || limit != 1 || need <= limit {
+		t.Fatalf("jbig2PoolRequest(%v) = %d, %d, %v; want need > 1 and limit 1", err, need, limit, ok)
+	}
+	busy := fmt.Errorf("%w: need 10 bytes, 95 of 100 in use", jbig2.ErrMemoryLimit)
+	if need, limit, ok := jbig2PoolRequest(busy); !ok || need > limit {
+		t.Errorf("a busy pool read as need %d limit %d ok %v; want need <= limit", need, limit, ok)
 	}
 }
 

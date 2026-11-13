@@ -200,13 +200,25 @@ into an error. They are configurable and nothing else.
 
 JBIG2 is decoded by `github.com/dobbo-ca/jbig2-go`, which carries its own
 stream budgets (page pixels, bitmap bytes, segments, symbols; see its
-`docs/guides/memory-limits.md`). byblos passes it a page-pixel cap derived from
-the image dictionary and reserves its own share (the packed bitmap and the
+`docs/guides/memory-limits.md`). byblos passes it `maxJBIG2Pixels` as the page
+pixel cap (the page, its regions and every symbol, including a globals
+dictionary, share it) and reserves its own share (the packed bitmap and the
 one-byte-per-pixel raster) from its budget first. jbig2-go reserves its own
 decode estimate from a separate, non-waiting process-wide pool
 (`jbig2.SetMemoryLimit`), so `SetMemoryLimit` here does not bound the decode
-itself. A `jbig2.ErrMemoryLimit` from that pool comes back as `ErrMemoryLimit`
-(transient), not as a divert.
+itself, and the two default pools can together claim more than half of
+GOMEMLIMIT.
+
+This departs from plan item B1 (byblos reserves from its own pool, as for
+jpeg-go). Meeting it needs jbig2-go to take a reserve func on its public
+`Decode`; its internal `DecodeStream` already does. Status: open, pending a
+decision by the kleio primary review session on whether to wait for that
+jbig2-go release.
+
+A `jbig2.ErrMemoryLimit` from that pool comes back as `ErrMemoryLimit`
+(transient) when the request would fit the pool alone, and as a `*LimitError`
+(permanent) when it is larger than the whole pool, as the contract above
+requires.
 
 `ctx` entry points exist today for the nine document-scale primitives,
 `BuildFromPagesContext`, `RenderPageContext` and the `...Limits` forms above: `InspectContext` (`inspect.go:213`),

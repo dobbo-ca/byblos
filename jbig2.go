@@ -26,19 +26,19 @@ const maxJBIG2Pixels = 1 << 26
 // decodeJBIG2Placement is extractPage's JBIG2 branch: decode the stream through
 // jbig2-go and hand back a raster in the polarity a renderer would show.
 //
-// The image dictionary's /Width x /Height shape the decode's jbig2.Limits: a
-// page pixel cap of four times the dictionary's bitmap bytes (1 Mpx at least)
-// leaves room for the symbols, so a stream asking for much more than the
-// dictionary describes is refused by jbig2-go; one a little over is decoded
-// and then refused, with every page whose size differs from the dictionary's.
-// /Decode is applied through grayLevels, because on a 1-bit image [1 0]
+// The page pixel cap handed to jbig2-go is maxJBIG2Pixels, the same bound as
+// the dictionary size gate: it is shared by the page, its regions and every
+// symbol, so a cap scaled to the dictionary's page would starve a document
+// whose global dictionary is large. A decoded page whose size differs from the
+// dictionary's is refused. /Decode is applied through grayLevels, because on a 1-bit image [1 0]
 // inverts the page. byblos reserves the packed bitmap and the one-byte-per-pixel
 // raster from its own budget first. jbig2-go does NOT draw on that budget: it
 // reserves its own estimate (a quarter of the page pixels plus per-symbol and
 // per-segment costs) from a separate process-wide pool (jbig2.SetMemoryLimit),
 // so byblos.SetMemoryLimit does not bound the decode itself. That pool is
-// non-waiting; running out is transient, so a jbig2.ErrMemoryLimit is returned
-// as byblos's ErrMemoryLimit (wrapping both) rather than as damage.
+// non-waiting. A jbig2.ErrMemoryLimit is returned as byblos's ErrMemoryLimit
+// (wrapping both) when the request would fit the pool alone, because that is
+// transient; one larger than the whole pool can never fit and is a *LimitError.
 //
 // Errors opening with "jbig2:" are the document's or the codec's; byblos's
 // *LimitError, ErrMemoryLimit and a cancelled ctx's error are not, and extractPage
@@ -64,14 +64,12 @@ func decodeJBIG2Placement(ctx context.Context, data, globals []byte, imageInfo f
 		return nil, err
 	}
 	defer release()
-	// jbig2-go budgets pixels and bitmap bytes (a quarter of PagePixels) across
-	// the page, its regions and every symbol, so the cap is the dictionary's rows
-	// at whole bytes with room for the symbols, floored at 1 Mpx for a small page.
-	b, err := jbig2.Decode(ctx, data, globals, jbig2.Limits{
-		PagePixels: min(maxJBIG2Pixels, max(1<<20, 4*8*int64((info.Width+7)/8)*int64(info.Height))),
-	})
+	b, err := jbig2.Decode(ctx, data, globals, jbig2.Limits{PagePixels: maxJBIG2Pixels})
 	if err != nil {
 		if errors.Is(err, jbig2.ErrMemoryLimit) {
+			if need, limit, ok := jbig2PoolRequest(err); ok && need > limit {
+				return nil, &limits.LimitError{Name: "jbig2-memory", Got: need, Max: limit}
+			}
 			return nil, fmt.Errorf("%w: %w", ErrMemoryLimit, err)
 		}
 		var le *jbig2.LimitError
@@ -86,6 +84,17 @@ func decodeJBIG2Placement(ctx context.Context, data, globals []byte, imageInfo f
 			b.W, b.H, id, info.Width, info.Height)
 	}
 	return grayImage(b, ink, background), nil
+}
+
+// jbig2PoolRequest reads the request and the pool size out of a
+// jbig2.ErrMemoryLimit. jbig2-go v0.1.0 words it "need N bytes, U of L in use"
+// and exposes neither number; TestJBIG2PoolRequestParses pins the wording so an
+// upgrade that changes it fails there instead of turning a request that can
+// never fit into a retry loop.
+func jbig2PoolRequest(err error) (need, limit int64, ok bool) {
+	var used int64
+	_, serr := fmt.Sscanf(err.Error(), "jbig2: memory limit exceeded: need %d bytes, %d of %d in use", &need, &used, &limit)
+	return need, limit, serr == nil
 }
 
 // defaultInk and defaultBackground are the /DeviceGray samples a 1-bit image
