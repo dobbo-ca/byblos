@@ -1467,14 +1467,14 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	if declared <= 0 { // overflow
 		return nil, "", &limits.LimitError{Name: "image-bytes", Got: d.lim.StreamBytes() + 1, Max: d.lim.StreamBytes()}
 	}
-	// A lazy image's bytes (and its soft mask's) are read now. They are reserved once, inside
-	// the reservation the one-shot path takes for the same page, which already has room for
-	// encoded bytes up to the declared size: only what a stream holds past that is added
-	// (extra), so open-once and one-shot need the same. The page's other streams are not lazy:
-	// /JBIG2Globals and an Indexed lookup table are not image XObjects, and /Mask is never read.
-	// A codec stream has no decode reservation of its own, so extra is held by itself, and
-	// handed back before the CMYK DCT gate asks for more (waiting on it would be waiting on
-	// itself).
+	// A lazy image's bytes (and its soft mask's) are read now and reserved once, so open-once
+	// and one-shot need the same. A non-codec image's reservation below has room for encoded
+	// bytes up to the declared size, so only what a stream holds past that is added (extra).
+	// A codec stream has no decode reservation of its own (dct.Reserve counts the frame, not
+	// the data), so all of its encoded bytes are extra: held by themselves, and handed back
+	// before the CMYK DCT gate asks for more (waiting on it would be waiting on itself).
+	// The page's other streams are not lazy: /JBIG2Globals and an Indexed lookup table are not
+	// image XObjects, and /Mask is never read.
 	sm, smCap := d.softMask(sd, info)
 	var smRaw int64 // a lazy mask's bytes: read for the check below and again by pdfcpu, one copy at a time
 	if sm != nil && d.lazy && sm.Raw == nil {
@@ -1483,6 +1483,9 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	var extra int64
 	if lazyRaw {
 		extra = max(rawLen(sd)-declared, 0)
+		if codec {
+			extra = rawLen(sd)
+		}
 	}
 	extra += max(smRaw-smCap, 0)
 	releaseRaw := func() {}

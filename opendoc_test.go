@@ -510,3 +510,38 @@ func TestOpenOnceAndOneShotSameVerdictAtTightBudget(t *testing.T) {
 		})
 	}
 }
+
+// A codec image's encoded bytes are reserved whole, whatever the declared floor: a JPEG
+// padded with COM segments to under 1 MiB used to load with none of its bytes reserved.
+func TestCodecImageReservesItsEncodedBytes(t *testing.T) {
+	jpg := dcOnlyJPEG(16, 16, 1, 1)
+	com := append([]byte{0xFF, 0xFE, 0xFF, 0xFF}, make([]byte, 0xFFFD)...)
+	pad := bytes.Repeat(com, 14)
+	jpg = append(jpg[:2:2], append(pad, jpg[2:]...)...)
+	data := dctPDF(t, jpg, 16, 16)
+	prev := SetMemoryLimit(1 << 30)
+	defer SetMemoryLimit(prev)
+	for name, run := range map[string]func() error{
+		"one-shot": func() error {
+			_, err := ExtractPageRasterLimits(context.Background(), bytes.NewReader(data), 1, Limits{})
+			return err
+		},
+		"open-once": func() error {
+			doc, err := OpenDocument(context.Background(), bytes.NewReader(data), Limits{})
+			if err != nil {
+				return err
+			}
+			defer doc.Close()
+			_, err = doc.PageRaster(context.Background(), 1)
+			return err
+		},
+	} {
+		limits.ResetPeak()
+		if err := run(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := limits.PeakReserved(); got < int64(len(jpg)) {
+			t.Errorf("%s: peak reserved %d < %d encoded bytes held", name, got, len(jpg))
+		}
+	}
+}
