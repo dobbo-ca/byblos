@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
+	"runtime/debug"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,32 +26,111 @@ func errStr(err error) string {
 }
 
 // The open-once render and inspect equal the one-shot ones for every corpus
-// document and page, error text included.
+// document and page, error text included, at each budget and with none.
 func TestOpenDocumentMatchesOneShot(t *testing.T) {
 	ctx := context.Background()
-	for _, c := range corpus.All() {
-		t.Run(c.Name, func(t *testing.T) {
-			want, werr := InspectDocument(ctx, bytes.NewReader(c.Data), Limits{})
-			doc, err := OpenDocument(ctx, bytes.NewReader(c.Data), Limits{})
-			if err != nil {
-				if werr == nil || errStr(err) != errStr(werr) {
-					t.Fatalf("open err = %v; one-shot err = %v", err, werr)
+	for _, budget := range []int64{0, 64 << 20, 300 << 20, 1024 << 20} {
+		prev := SetMemoryLimit(budget)
+		for _, c := range corpus.All() {
+			t.Run(fmt.Sprintf("%d/%s", budget>>20, c.Name), func(t *testing.T) {
+				want, werr := InspectDocument(ctx, bytes.NewReader(c.Data), Limits{})
+				doc, err := OpenDocument(ctx, bytes.NewReader(c.Data), Limits{})
+				if err != nil {
+					if werr == nil || errStr(err) != errStr(werr) {
+						t.Fatalf("open err = %v; one-shot err = %v", err, werr)
+					}
+					return
 				}
-				return
-			}
-			defer doc.Close()
-			got, gerr := doc.Info(ctx)
-			if errStr(gerr) != errStr(werr) || !reflect.DeepEqual(got, want) {
-				t.Fatalf("Info = %+v, %v; want %+v, %v", got, gerr, want, werr)
-			}
-			for n := 1; n <= doc.PageCount(); n++ {
-				w, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(c.Data), n, Limits{})
-				g, gerr := doc.PageRaster(ctx, n)
-				if errStr(gerr) != errStr(werr) || !reflect.DeepEqual(g, w) {
-					t.Errorf("page %d: %+v, %v; want %+v, %v", n, g, gerr, w, werr)
+				defer doc.Close()
+				got, gerr := doc.Info(ctx)
+				if errStr(gerr) != errStr(werr) || !reflect.DeepEqual(got, want) {
+					t.Fatalf("Info = %+v, %v; want %+v, %v", got, gerr, want, werr)
+				}
+				for n := 1; n <= doc.PageCount(); n++ {
+					w, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(c.Data), n, Limits{})
+					g, gerr := doc.PageRaster(ctx, n)
+					if errStr(gerr) != errStr(werr) || !reflect.DeepEqual(g, w) {
+						t.Errorf("page %d: %+v, %v; want %+v, %v", n, g, gerr, w, werr)
+					}
+				}
+			})
+		}
+		SetMemoryLimit(prev)
+	}
+}
+
+// While a Document is open, a one-shot call on another document does not wait
+// behind it: the Document holds its parse, not a decode slot.
+func TestOpenDocumentDoesNotStarveOthers(t *testing.T) {
+	for _, budget := range []int64{64 << 20, 300 << 20} {
+		prev := SetMemoryLimit(budget)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		doc, err := OpenDocument(ctx, bytes.NewReader(corpusDoc(t, "booklet")), Limits{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := doc.PageRaster(ctx, 1); err != nil {
+			t.Fatalf("budget %d: page: %v", budget, err)
+		}
+		if _, err := ExtractPageRasterLimits(ctx, bytes.NewReader(corpusDoc(t, "scan")), 1, Limits{}); err != nil {
+			t.Errorf("budget %d: one-shot while a Document is open: %v", budget, err)
+		}
+		doc.Close()
+		cancel()
+		SetMemoryLimit(prev)
+	}
+}
+
+// A page's peak reservation (the open parse plus the page's own) covers what the
+// page allocates while it runs, and a page leaves nothing reserved behind.
+func TestOpenDocumentPageReservationCoversLiveBytes(t *testing.T) {
+	prev := SetMemoryLimit(300 << 20)
+	defer SetMemoryLimit(prev)
+	oldGC := debug.SetGCPercent(1)
+	defer debug.SetGCPercent(oldGC)
+	ctx := context.Background()
+	var buf bytes.Buffer
+	if err := BuildPDF(&buf, []BuildPage{{Image: flateGrayImage(t, 1000, 1000, 1), WidthPt: 612, HeightPt: 792, DPI: 100}}); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"flate": buf.Bytes(), "jpeg": corpus.ScanJPEG()} {
+		doc, err := OpenDocument(ctx, bytes.NewReader(data), Limits{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		base := int64(m.HeapAlloc)
+		limits.ResetPeak()
+		var peak atomic.Int64
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			var s runtime.MemStats
+			for {
+				runtime.ReadMemStats(&s)
+				for old := peak.Load(); int64(s.HeapAlloc) > old && !peak.CompareAndSwap(old, int64(s.HeapAlloc)); old = peak.Load() {
+				}
+				select {
+				case <-stop:
+					return
+				default:
 				}
 			}
-		})
+		}()
+		if _, err := doc.PageRaster(ctx, 1); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		close(stop)
+		<-done
+		live, reserved := peak.Load()-base, limits.PeakReserved()
+		t.Logf("%s: live %d, peak reserved %d", name, live, reserved)
+		if live > reserved {
+			t.Errorf("%s: page held %d bytes, reserved only %d", name, live, reserved)
+		}
+		doc.Close()
 	}
 }
 

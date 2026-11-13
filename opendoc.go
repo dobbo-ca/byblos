@@ -11,17 +11,21 @@ import (
 )
 
 // Document is a PDF parsed once. Info and PageRaster read from that one parse,
-// so N pages cost one pdfcpu parse rather than N+1; the one-shot InspectDocument
-// is OpenDocument, Info, Close. Its object table and one stream decode are
-// reserved from the memory budget (SetMemoryLimit) until Close.
+// so N pages cost one pdfcpu parse rather than N+1.
+//
+// Memory model (SetMemoryLimit): the Document holds, until Close, only what
+// lives across pages, the object table and the file's bytes. Each page's own
+// need is reserved when the page runs and released when it is done, exactly as
+// the one-shot ExtractPageRasterLimits reserves it, so an open Document does not
+// make other callers wait. Its caps are Limits as given, the same as the
+// one-shot path's, with or without a budget. Per-page state (decoded forms, the
+// page's image records) is dropped when the page is done.
 //
 // The reader is read in OpenDocument only. A Document is not safe for
-// concurrent use. Per-page state (decoded streams, the walk's records) is reset
-// by each page's walk and a returned raster is the caller's, so a page's memory
-// is collectable once the caller drops it.
+// concurrent use. A returned raster is the caller's, so a page's memory is
+// collectable once the caller drops it.
 type Document struct {
 	d       pdfdoc.Doc
-	held    *limits.Held
 	release func()
 }
 
@@ -32,14 +36,14 @@ func OpenDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*Document, 
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	d, held, release, err := pdfdoc.OpenBudgetedHeld(ctx, r, lim)
+	d, release, err := pdfdoc.OpenHeld(ctx, r, lim)
 	if err != nil {
 		if pdfdoc.IsWrongPassword(err) {
 			return nil, fmt.Errorf("%w: %w", ErrPassword, err)
 		}
 		return nil, err
 	}
-	return &Document{d: d, held: held, release: release}, nil
+	return &Document{d: d, release: release}, nil
 }
 
 // Close gives back the memory reservation and drops the parse. It is safe to
@@ -60,7 +64,8 @@ func (doc *Document) PageRaster(ctx context.Context, page int) (*PageRaster, err
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	pr, _, err := extractPage(limits.WithHeld(ctx, doc.held), doc.d, page)
+	defer doc.d.EndPage()
+	pr, _, err := extractPage(ctx, doc.d, page)
 	return pr, err
 }
 
@@ -70,8 +75,11 @@ func (doc *Document) Info(ctx context.Context) (*DocumentInfo, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	ctx = limits.WithHeld(ctx, doc.held)
-	d := doc.d
+	return inspectDoc(ctx, doc.d)
+}
+
+// inspectDoc is the loop of Info and of InspectDocument over an open document.
+func inspectDoc(ctx context.Context, d pdfdoc.Doc) (*DocumentInfo, error) {
 	cat := d.Catalog()
 	di := &DocumentInfo{
 		Pages:          make([]PageInfo, 0, d.PageCount()),
@@ -120,6 +128,7 @@ func (doc *Document) Info(ctx context.Context) (*DocumentInfo, error) {
 			return nil, err
 		}
 		di.Pages = append(di.Pages, *pi)
+		d.EndPage()
 	}
 	return di, nil
 }

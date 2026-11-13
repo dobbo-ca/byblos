@@ -483,6 +483,7 @@ func extractPage(ctx context.Context, d pdfdoc.Doc, page int) (*PageRaster, Page
 		countFailure()
 		return nil, PageProvenance{}, err
 	}
+	p.Content = nil // inspectPage decodes it again; one copy at a time
 	_, scan, err := inspectPage(ctx, d, page)
 	if err != nil {
 		countFailure()

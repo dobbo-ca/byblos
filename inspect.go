@@ -249,12 +249,18 @@ func InspectContext(ctx context.Context, r io.ReadSeeker) ([]PageInfo, error) {
 // *LimitError; a budget held by others returns ErrMemoryLimit. The cancellation
 // latency is InspectContext's.
 func InspectDocument(ctx context.Context, r io.ReadSeeker, lim Limits) (*DocumentInfo, error) {
-	doc, err := OpenDocument(ctx, r, lim)
-	if err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	defer doc.Close()
-	return doc.Info(ctx)
+	d, release, err := pdfdoc.OpenBudgeted(ctx, r, lim)
+	if err != nil {
+		if pdfdoc.IsWrongPassword(err) {
+			return nil, fmt.Errorf("%w: %w", ErrPassword, err)
+		}
+		return nil, err
+	}
+	defer release()
+	return inspectDoc(ctx, d)
 }
 
 // defaultWalkCap reports whether err is a content-walk nesting cap the caller
@@ -293,6 +299,7 @@ func inspectPage(ctx context.Context, d pdfdoc.Doc, n int) (*PageInfo, *content.
 		return nil, nil, err
 	}
 	s, walkErr := content.Walk(ctx, p.Content, p.Scope, d)
+	d.EndWalk() // the decoded forms are dead now; RawImage must not run beside them
 	pi := &PageInfo{Index: n, Bounds: rectOf(p.CropBox), Rotate: p.Rotate}
 	if s == nil {
 		// Defensive: Walk returns its partial scan even on failure. A nil one

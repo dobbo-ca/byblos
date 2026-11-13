@@ -210,6 +210,7 @@ type budget struct {
 	inited bool
 	limit  int64 // <= 0: none
 	used   int64
+	peak   int64 // most used since ResetPeak, for tests
 	q      []*waiter
 }
 
@@ -231,6 +232,7 @@ func (b *budget) grant() {
 			return
 		}
 		b.used += w.n
+		b.peak = max(b.peak, b.used)
 		w.granted = true
 		close(w.ch)
 		b.q = b.q[1:]
@@ -251,6 +253,21 @@ func SetMemoryLimit(n int64) int64 {
 	return prev
 }
 
+// PeakReserved is the most the budget had reserved since ResetPeak, which
+// starts it from what is reserved now. For tests that pin an accounting.
+func PeakReserved() int64 {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	return global.peak
+}
+
+// ResetPeak restarts PeakReserved from the bytes reserved now.
+func ResetPeak() {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.peak = global.used
+}
+
 // MemoryLimit is the budget now in force; <= 0 means none.
 func MemoryLimit() int64 {
 	global.mu.Lock()
@@ -263,56 +280,6 @@ func MemoryLimit() int64 {
 // permanent *LimitError; a wait that ctx ends is an error wrapping
 // ErrMemoryLimit and ctx.Err(). The returned func releases the bytes.
 func Reserve(ctx context.Context, n int64) (func(), error) {
-	if h, ok := ctx.Value(heldKey{}).(*Held); ok {
-		return h.reserve(ctx, n)
-	}
-	return reserve(ctx, n)
-}
-
-// Held is memory its owner already reserved for the decodes that follow (an
-// open Document's slot). A Reserve under WithHeld spends it first and asks the
-// pool only for the rest, so a decode never queues behind the reservation its
-// own document holds.
-type Held struct {
-	mu          sync.Mutex
-	free, total int64
-}
-
-type heldKey struct{}
-
-// NewHeld is a slot of free bytes inside a reservation of total bytes.
-func NewHeld(free, total int64) *Held { return &Held{free: free, total: total} }
-
-// WithHeld makes Reserve under ctx spend h before the pool.
-func WithHeld(ctx context.Context, h *Held) context.Context {
-	return context.WithValue(ctx, heldKey{}, h)
-}
-
-func (h *Held) reserve(ctx context.Context, n int64) (func(), error) {
-	h.mu.Lock()
-	take := min(max(n, 0), h.free)
-	h.free -= take
-	h.mu.Unlock()
-	back := func() { h.mu.Lock(); h.free += take; h.mu.Unlock() }
-	short := n - take
-	if short <= 0 {
-		return back, nil
-	}
-	// The rest can never be granted while the document holds total: refuse it
-	// rather than wait on ourselves.
-	if lim := MemoryLimit(); lim > 0 && short > lim-h.total {
-		back()
-		return nil, &LimitError{Name: "memory-budget", Got: h.total + short, Max: lim}
-	}
-	rel, err := reserve(ctx, short)
-	if err != nil {
-		back()
-		return nil, err
-	}
-	return func() { rel(); back() }, nil
-}
-
-func reserve(ctx context.Context, n int64) (func(), error) {
 	b := &global
 	b.mu.Lock()
 	lim := b.cur()
@@ -332,6 +299,7 @@ func reserve(ctx context.Context, n int64) (func(), error) {
 	}
 	if len(b.q) == 0 && b.used+n <= lim {
 		b.used += n
+		b.peak = max(b.peak, b.used)
 		b.mu.Unlock()
 		return release, nil
 	}
