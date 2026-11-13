@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	imagepng "image/png"
 	"math/rand"
 	"reflect"
 	"runtime"
@@ -251,7 +253,7 @@ func TestOpenDocumentPageFitsBudgetWithoutParseHeadroom(t *testing.T) {
 		t.Fatal(err)
 	}
 	need := limits.PeakReserved()
-	SetMemoryLimit(need + 16) // fits the page, not the page plus the table and the file
+	SetMemoryLimit(need + int64(len(data)) + 16) // fits the page and the bytes it reads, not the page plus the table and the file
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(data), 1, Limits{})
@@ -262,7 +264,7 @@ func TestOpenDocumentPageFitsBudgetWithoutParseHeadroom(t *testing.T) {
 	defer doc.Close()
 	got, gerr := doc.PageRaster(ctx, 1)
 	if werr != nil || gerr != nil || !reflect.DeepEqual(got, want) {
-		t.Errorf("budget %d: open-once err=%v; one-shot err=%v; equal=%v", need+16, gerr, werr, reflect.DeepEqual(got, want))
+		t.Errorf("budget %d: open-once err=%v; one-shot err=%v; equal=%v", need+int64(len(data))+16, gerr, werr, reflect.DeepEqual(got, want))
 	}
 	// And a one-shot call on another document is not starved meanwhile.
 	if _, err := ExtractPageRasterLimits(ctx, bytes.NewReader(corpus.ScanJPEG()), 1, Limits{}); err != nil {
@@ -333,5 +335,42 @@ func TestOpenDocumentHoldsNoImageBytes(t *testing.T) {
 	}
 	if grew := live() - base; grew > uint64(len(data))/4 {
 		t.Errorf("after %d pages, live heap grew %d bytes for a %d-byte file", pages, grew, len(data))
+	}
+}
+
+// A Flate image with a Flate /SMask (what TranscodePNG writes for alpha) renders
+// from an open Document as the one-shot path renders it: the mask is an image
+// stream whose bytes the lazy parse left in the file.
+func TestOpenDocumentFlateSoftMask(t *testing.T) {
+	const w, h = 64, 32
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i * 7)
+	}
+	var png bytes.Buffer
+	if err := imagepng.Encode(&png, src); err != nil {
+		t.Fatal(err)
+	}
+	enc, _, err := TranscodePNG(context.Background(), &png, Limits{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := BuildPDF(&buf, []BuildPage{{Image: enc, WidthPt: 612, HeightPt: 792}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	want, werr := ExtractPageRasterLimits(ctx, bytes.NewReader(buf.Bytes()), 1, Limits{})
+	doc, err := OpenDocument(ctx, bytes.NewReader(buf.Bytes()), Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	got, gerr := doc.PageRaster(ctx, 1)
+	if errStr(gerr) != errStr(werr) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("doc: %v; one-shot: %v (nil: %v / %v)", gerr, werr, got == nil, want == nil)
+	}
+	if want == nil {
+		t.Fatal("one-shot rendered nothing")
 	}
 }

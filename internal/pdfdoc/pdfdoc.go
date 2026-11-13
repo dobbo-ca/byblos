@@ -1052,13 +1052,6 @@ func (d *doc) XObject(sc int, name string) (content.XObject, bool) {
 				csName = string(n)
 			}
 		}
-		if d.lazy && sd.Raw == nil {
-			if prev := d.streams[id]; prev != nil && prev.Raw != nil { // drawn twice on this page
-				sd = prev
-			} else if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
-				return content.XObject{}, false
-			}
-		}
 		d.images[id] = ImageInfo{
 			Name:        name,
 			ObjNr:       id,
@@ -1435,6 +1428,17 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	if err := limits.Check("image-pixels", int64(info.Width)*int64(info.Height), d.lim.ImagePixels()); err != nil {
 		return nil, "", err
 	}
+	if d.lazy && sd.Raw == nil {
+		// The bytes are read now, held for this call under the budget, and let go when it returns.
+		release, err := limits.Reserve(ctx, rawLen(sd))
+		if err != nil {
+			return nil, "", err
+		}
+		defer func() { sd.Raw = nil; release() }()
+		if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sd); err != nil {
+			return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: %w", id, err)
+		}
+	}
 	last := lastFilter(sd)
 	bpc, n := info.BPC, 4 // four components when the colour space does not say
 	if info.ImageMask {
@@ -1479,18 +1483,28 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 	// allows, so a stream that lies about it is refused.
 	if !codec {
 		sm, smCap := d.softMask(sd, info)
+		var smRaw int64 // a lazy mask's bytes: read for the check below and again by pdfcpu, one copy at a time
+		if sm != nil && d.lazy && sm.Raw == nil {
+			smRaw = rawLen(sm)
+		}
 		px := limits.MulSat(int64(info.Width), int64(info.Height))
-		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+3*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px)
+		release, err := limits.Reserve(ctx, limits.DecodeBytes(declared)+3*max(declared, 4*px)+limits.DecodeBytes(smCap)+4*px+smRaw)
 		if err != nil {
 			return nil, "", err
 		}
 		defer release()
 		if sm != nil {
+			if smRaw > 0 {
+				if err := pdfcpu.LoadStreamRaw(context.Background(), d.ctx, sm); err != nil {
+					return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: soft mask: %w", id, err)
+				}
+			}
 			if err := sm.DecodeWithLimit(smCap); errors.Is(err, filter.ErrDecodeLimitExceeded) {
 				return nil, "", &limits.LimitError{Name: "image-bytes", Got: smCap + 1, Max: smCap}
 			} else if err != nil {
 				return nil, "", fmt.Errorf("byblos/pdfdoc: image %d: soft mask: %w", id, err)
 			}
+			sm.Raw, sm.Content = nil, nil // pdfcpu reads its own copy
 		}
 	}
 	lims := &d.ctx.Configuration.Limits
@@ -1525,6 +1539,14 @@ func (d *doc) RawImage(ctx context.Context, id int) (data []byte, fileType strin
 		return nil, "", fmt.Errorf("byblos/pdfdoc: reading image %d: %w", id, err)
 	}
 	return b, im.FileType, nil
+}
+
+// rawLen is sd's declared encoded length, 0 when unknown.
+func rawLen(sd *types.StreamDict) int64 {
+	if sd.StreamLength == nil {
+		return 0
+	}
+	return *sd.StreamLength
 }
 
 // lastFilter is the name of sd's last filter, empty for none.
